@@ -1,0 +1,1 @@
+FSSpec OpenMeshFile ();FSSpec OpenMeshFile(){	StandardFileReply	theReply;	StandardGetFile( nil, 0, theTypeList, &theReply );	if ( theReply.sfGood != true )		ExitToShell();	return theReply.sfFile;}
