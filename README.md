@@ -90,41 +90,6 @@ g++ -std=c++17 -O2 myth2/myth2_assemble.cpp -o myth2_assemble
 
 ## Tools
 
-### `myth_extract`
-```
-myth_extract [-o] <tags.gor> <meshtag>
-```
-
-| Argument | Description |
-|----------|-------------|
-| `-o` | Overwrite existing extracted files instead of skipping them |
-| `tags.gor` | Path to `tags.gor` for the map set you want to extract |
-| `meshtag` | 4-character mesh tag name (for example `sega`, `balo`, `00tm`) |
-
-### `myth_assemble`
-```
-myth_assemble <folder> [output.gor] [--edit] [--obj <input.obj>] [--heightscale <n>]
-```
-
-- `--edit` reapplies editable assets from the extracted folder before rebuilding.
-- `--obj` imports terrain heights from a Wavefront OBJ and recomputes slope bytes.
-- If `--edit` is used and `--obj` is omitted, the assembler auto-detects `<folder>/<tag>.obj`.
-- When OBJ import is used, `height.bmp` is skipped, but `passability.bmp`, `water.bmp`, `animation.bmp`, and `terrain.bmp` still apply.
-
-### `myth_mesh`
-```
-myth_mesh <tags.gor> <meshtag> [output.obj] [heightscale]
-```
-
-Exports the terrain grid as a Wavefront OBJ for editing in Blender.
-
-### `myth_mesh_import`
-```
-myth_mesh_import <tag_folder> <input.obj> [heightscale]
-```
-
-Standalone OBJ importer for patching `raw/mesh_tag.bin` directly.
-
 ### `myth2_dump`
 ```
 myth2_dump <file>
@@ -345,6 +310,41 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 - `screens/pregame.bmp`, `screens/overhead.bmp`, and `screens/postgame.bmp` are reinjected into their `.256` tags when present.
 - `strings/name.txt` is rebuilt into the map-name `stli` when present.
 
+### `myth_extract`
+```
+myth_extract [-o] <tags.gor> <meshtag>
+```
+
+| Argument | Description |
+|----------|-------------|
+| `-o` | Overwrite existing extracted files instead of skipping them |
+| `tags.gor` | Path to `tags.gor` for the map set you want to extract |
+| `meshtag` | 4-character mesh tag name (for example `sega`, `balo`, `00tm`) |
+
+### `myth_assemble`
+```
+myth_assemble <folder> [output.gor] [--edit] [--obj <input.obj>] [--heightscale <n>]
+```
+
+- `--edit` reapplies editable assets from the extracted folder before rebuilding.
+- `--obj` imports terrain heights from a Wavefront OBJ and recomputes slope bytes.
+- If `--edit` is used and `--obj` is omitted, the assembler auto-detects `<folder>/<tag>.obj`.
+- When OBJ import is used, `height.bmp` is skipped, but `passability.bmp`, `water.bmp`, `animation.bmp`, and `terrain.bmp` still apply.
+
+### `myth_mesh`
+```
+myth_mesh <tags.gor> <meshtag> [output.obj] [heightscale]
+```
+
+Exports the terrain grid as a Wavefront OBJ for editing in Blender.
+
+### `myth_mesh_import`
+```
+myth_mesh_import <tag_folder> <input.obj> [heightscale]
+```
+
+Standalone OBJ importer for patching `raw/mesh_tag.bin` directly.
+
 ---
 
 ## Examples
@@ -374,7 +374,8 @@ Each `.256` tag has:
 
 The tiles are interleaved with shadow map tiles in the section table (even indices = color texture, the extractor skips odd ones). Each row of scanlines is also stored right-to-left on disk and reversed on read.
 
-The output is a standard 8-bit indexed Windows BMP.
+The extractor writes a standard 8-bit indexed Windows BMP as an editing
+container. Myth's internal texture data is palette-indexed pixel data, not BMP.
 
 ---
 
@@ -389,8 +390,9 @@ The output is a standard 8-bit indexed Windows BMP.
 
 ## Notes
 
-- Myth data is **big-endian** (Mac PowerPC). All multi-byte integers in `.gor` files  
-  are byte-swapped before use.
+- Myth and Myth II data are **big-endian** (Mac PowerPC lineage). All multi-byte
+  integers in tag/archive data are byte-swapped before use.
 - The program scans the `.gor` file to locate the tag rather than using a hard-coded  
   offset table, so it works with any version of the game files.
-- Output is always an 8-bit indexed BMP (same format Myth uses internally).
+- Image outputs use standard BMP files as editable containers. The games store
+  palette-indexed image data internally.
