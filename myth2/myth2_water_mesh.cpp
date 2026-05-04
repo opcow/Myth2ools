@@ -255,7 +255,7 @@ static void addFaceNormal(int i0, int i1, int i2,
 
 static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs) {
     std::string mtlPath = dirOf(objPath) + stemOf(objPath) + ".mtl";
-    std::string textureBmp = "terrain/water.bmp";
+    std::string textureBmp = "terrain/water_mask.bmp";
 
     FILE* obj = fopen(objPath.c_str(), "w");
     if (!obj) {
@@ -280,9 +280,9 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs)
         for (int x = 0; x < vw; x++) {
             int vi = vertexIndex(x, y, vw);
             const Myth2Cell& c = mesh.cells[(size_t)cellIndexClamped(x, y, mesh.cellWidth, mesh.cellHeight)];
-            vx[vi] = (float)y - halfH;
+            vx[vi] = halfW - (float)x;
             vy[vi] = (float)c.mediaHeight * hs;
-            vz[vi] = (float)x - halfW;
+            vz[vi] = (float)y - halfH;
         }
     }
 
@@ -392,11 +392,11 @@ static void usage(const char* p) {
         "  %s <tag_folder> [output.obj] [heightscale]\n\n"
         "Arguments:\n"
         "  tag_folder    Extracted Myth II map folder from myth2_extract\n"
-        "  output.obj    Output OBJ path (default: <tag_folder>/<mesh_tag>_water.obj)\n"
+        "  output.obj    Output OBJ path (default: <tag_folder>/water.obj)\n"
         "  heightscale   Vertical scale multiplier (default: 1/512)\n\n"
         "Example:\n"
         "  %s 85gy\n"
-        "  %s 85gy 85gy_water.obj 0.001953125\n",
+        "  %s 85gy water.obj 0.001953125\n",
         p, p, p);
 }
 
@@ -412,7 +412,7 @@ int main(int argc, char** argv) {
     Manifest manifest;
     if (!readManifest(folder + "/manifest.json", manifest)) return 1;
 
-    std::string objPath = argc >= 3 ? argv[2] : (folder + "/" + manifest.meshTag + "_water.obj");
+    std::string objPath = argc >= 3 ? argv[2] : (folder + "/water.obj");
 
     printf("Myth II Water Surface Exporter\n");
     printf("==============================\n");

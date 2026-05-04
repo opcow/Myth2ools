@@ -227,10 +227,10 @@ static std::vector<RuntimeEntry> buildRuntimeTable() {
 }
 
 // From the verified comparator result:
-// empirical OBJ basis (x=row, y=up, z=col) = (+y,+z,+x) applied to runtime basis.
-// Therefore runtime basis = inverse: (empirical.z, empirical.x, empirical.y).
+// empirical OBJ basis (x=-col, y=up, z=row) = (-z,+y,+x) applied to runtime basis.
+// Therefore runtime basis = inverse: (-empirical.x, empirical.z, empirical.y).
 static Vec3 empiricalToRuntime(const Vec3& v) {
-    return normalized(Vec3{v.z, v.x, v.y});
+    return normalized(Vec3{-v.x, v.z, v.y});
 }
 
 static uint8_t nearestRuntimeNormalIndex(const Vec3& empiricalNormal,
@@ -300,8 +300,8 @@ static bool parseOBJ(const std::string& path, float hs,
         if (sscanf(line + 2, "%f %f %f", &x, &y, &z) != 3) continue;
         vCount++;
 
-        int col = (int)roundf(z + halfW);
-        int row = (int)roundf(x + halfH);
+        int col = (int)roundf(halfW - x);
+        int row = (int)roundf(z + halfH);
         if (col < 0 || col >= vertexWidth || row < 0 || row >= vertexHeight) {
             fprintf(stderr, "  Warning: vertex out of range: v %g %g %g -> (%d,%d)\n",
                     x, y, z, row, col);
@@ -383,10 +383,10 @@ static int patchMesh(std::vector<uint8_t>& meshBin,
             if (!cornersChanged) {
                 continue;
             }
-            Vec3 pA{(double)y - halfH, (double)vertexHeights[(size_t)A] * WORLD_HEIGHT_SCALE, (double)x - halfW};
-            Vec3 pB{(double)y - halfH, (double)vertexHeights[(size_t)B] * WORLD_HEIGHT_SCALE, (double)(x + 1) - halfW};
-            Vec3 pC{(double)(y + 1) - halfH, (double)vertexHeights[(size_t)C] * WORLD_HEIGHT_SCALE, (double)(x + 1) - halfW};
-            Vec3 pD{(double)(y + 1) - halfH, (double)vertexHeights[(size_t)D] * WORLD_HEIGHT_SCALE, (double)x - halfW};
+            Vec3 pA{halfW - (double)x, (double)vertexHeights[(size_t)A] * WORLD_HEIGHT_SCALE, (double)y - halfH};
+            Vec3 pB{halfW - (double)(x + 1), (double)vertexHeights[(size_t)B] * WORLD_HEIGHT_SCALE, (double)y - halfH};
+            Vec3 pC{halfW - (double)(x + 1), (double)vertexHeights[(size_t)C] * WORLD_HEIGHT_SCALE, (double)(y + 1) - halfH};
+            Vec3 pD{halfW - (double)x, (double)vertexHeights[(size_t)D] * WORLD_HEIGHT_SCALE, (double)(y + 1) - halfH};
 
             Vec3 n0;
             Vec3 n1;

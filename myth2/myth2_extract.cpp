@@ -152,18 +152,21 @@ static bool readBMPToRGBA(const std::string& path, int& outW, int& outH,
         return true;
     }
 
-    if(bits == 8){
+    if(bits == 4 || bits == 8){
         uint32_t dibSize = (uint32_t)raw[14] | ((uint32_t)raw[15] << 8) | ((uint32_t)raw[16] << 16) | ((uint32_t)raw[17] << 24);
         uint32_t palStart = 14 + dibSize;
         uint32_t paletteBytes = dataOff > palStart ? (dataOff - palStart) : 0;
         uint32_t paletteCount = paletteBytes / 4;
-        int stride = (w + 3) & ~3;
+        int rawStride = (bits == 4) ? ((w + 1) / 2) : w;
+        int stride = (rawStride + 3) & ~3;
         if(dataOff + (size_t)stride * h > raw.size()) return false;
         for(int row=0; row<h; row++){
             const uint8_t* src = raw.data() + dataOff + (size_t)(h - 1 - row) * stride;
             uint8_t* dst = rgba.data() + (size_t)row * w * 4;
             for(int x=0; x<w; x++){
-                uint8_t idx = src[x];
+                uint8_t idx = (bits == 4)
+                    ? (uint8_t)((x & 1) ? (src[x / 2] & 0x0F) : (src[x / 2] >> 4))
+                    : src[x];
                 if(idx >= paletteCount) continue;
                 const uint8_t* pe = raw.data() + palStart + (size_t)idx * 4;
                 uint8_t b = pe[0], g = pe[1], r = pe[2];
@@ -334,6 +337,7 @@ static bool writeORA(const std::string& base){
     const LayerSpec specs[] = {
         {"terrain/shadow.bmp",     "data/shadow.png",     "Shadow",      false, true},
         {"terrain/water.bmp",      "data/water.png",      "Water",       true,  true},
+        {"terrain/water_mask.bmp", "data/water_mask.png", "Water Mask",  true,  true},
         {"terrain/passability.bmp","data/passability.png","Passability", true,  true},
         {"terrain/reflection.bmp", "data/reflection.png", "Reflection",  true,  true},
         {"terrain/animation.bmp",  "data/animation.png",  "Animation",   true,  true},
@@ -413,34 +417,51 @@ static bool copyIfExists(const std::string& src, const std::string& dst){
     return writeFile(dst, data);
 }
 
+static bool writeLayerPNGIfExists(const std::string& src, const std::string& dst,
+                                  bool blackTransparent)
+{
+    int w=0,h=0;
+    std::vector<uint8_t> rgba;
+    if(!readBMPToRGBA(src,w,h,rgba,blackTransparent)) return false;
+    std::vector<uint8_t> png;
+    if(!encodePNG32ToMemory(rgba,w,h,png)) return false;
+    return writeFile(dst,png);
+}
+
 static void writeLayerBundle(const std::string& base){
     std::string manifest;
     manifest += "Myth II layered-friendly bundle\n";
     manifest += "================================\n\n";
-    manifest += "Edit these files in order. The assembler will prefer them over the legacy paths when present.\n\n";
+    manifest += "Transparent PNG reference layers for image editors. Reimport uses the canonical files under terrain/, screens/, and strings/.\n\n";
 
     struct LayerItem {
         const char* src;
         const char* dst;
         const char* desc;
+        bool image;
+        bool blackTransparent;
     };
     const LayerItem items[] = {
-        {"terrain/terrain.bmp",        "layers/01_terrain.bmp",      "Terrain texture"},
-        {"terrain/passability.bmp",    "layers/02_passability.bmp",  "Passability overlay"},
-        {"terrain/water.bmp",          "layers/03_water.bmp",        "Water/media reference only"},
-        {"terrain/animation.bmp",      "layers/04_animation.bmp",    "Animated-water reference"},
-        {"terrain/shadow.bmp",         "layers/05_shadow.bmp",       "Terrain shadow map"},
-        {"terrain/reflection.bmp",     "layers/06_reflection.bmp",   "Reflection-area reference"},
-        {"screens/overhead.bmp",       "layers/10_overhead.bmp",     "Overhead screen"},
-        {"screens/pregame.bmp",        "layers/11_pregame.bmp",      "Pregame screen"},
-        {"screens/postgame.bmp",       "layers/12_postgame.bmp",     "Postgame screen"},
-        {"strings/name.txt",           "layers/20_name.txt",         "Map name text"}
+        {"terrain/terrain.bmp",        "layers/01_terrain.png",      "Terrain texture",           true,  false},
+        {"terrain/passability.bmp",    "layers/02_passability.png",  "Passability overlay",       true,  true},
+        {"terrain/water.bmp",          "layers/03_water.png",        "Water/media reference only",true,  true},
+        {"terrain/water_mask.bmp",     "layers/03_water_mask.png",   "Water OBJ texture mask",    true,  true},
+        {"terrain/animation.bmp",      "layers/04_animation.png",    "Animated-water reference",  true,  true},
+        {"terrain/shadow.bmp",         "layers/05_shadow.png",       "Terrain shadow map",        true,  false},
+        {"terrain/reflection.bmp",     "layers/06_reflection.png",   "Reflection-area reference", true,  true},
+        {"screens/overhead.bmp",       "layers/10_overhead.png",     "Overhead screen",           true,  false},
+        {"screens/pregame.bmp",        "layers/11_pregame.png",      "Pregame screen",            true,  false},
+        {"screens/postgame.bmp",       "layers/12_postgame.png",     "Postgame screen",           true,  false},
+        {"strings/name.txt",           "layers/20_name.txt",         "Map name text",             false, false}
     };
 
     for(const auto& item : items){
         std::string src = base + "/" + item.src;
         std::string dst = base + "/" + item.dst;
-        if(copyIfExists(src, dst)){
+        bool ok = item.image
+            ? writeLayerPNGIfExists(src,dst,item.blackTransparent)
+            : copyIfExists(src,dst);
+        if(ok){
             manifest += std::string(item.dst) + "  - " + item.desc + "\n";
         }
     }
@@ -550,6 +571,32 @@ static bool writeBMP8(const char* path, int w, int h,
     fwrite(pal256rgb4,1,1024,f);
     std::vector<uint8_t> row(stride,0);
     for(int y=h-1;y>=0;y--){memcpy(row.data(),px.data()+(size_t)y*w,w);fwrite(row.data(),1,stride,f);}
+    fclose(f); return true;
+}
+
+static bool writeBMP4(const char* path, int w, int h,
+                      const uint8_t* pal16bgra, const std::vector<uint8_t>& px)
+{
+    if((int)px.size() != w*h) return false;
+    FILE* f=fopen(path,"wb"); if(!f){fprintf(stderr,"Cannot create: %s\n",path);return false;}
+    int rawStride=(w+1)/2, stride=(rawStride+3)&~3, dataOff=14+40+64, fileSz=dataOff+stride*h;
+    uint8_t fh[14]={'B','M',0,0,0,0,0,0,0,0,0,0,0,0};
+    auto put32=[](uint8_t* b,int v){b[0]=v&0xFF;b[1]=(v>>8)&0xFF;b[2]=(v>>16)&0xFF;b[3]=(v>>24)&0xFF;};
+    put32(fh+2,fileSz); put32(fh+10,dataOff); fwrite(fh,1,14,f);
+    uint8_t ih[40]={}; ih[0]=40;
+    put32(ih+4,w); put32(ih+8,h); ih[12]=1; ih[14]=4; put32(ih+32,16); fwrite(ih,1,40,f);
+    fwrite(pal16bgra,1,64,f);
+    std::vector<uint8_t> row((size_t)stride,0);
+    for(int y=h-1;y>=0;y--){
+        std::fill(row.begin(),row.end(),0);
+        const uint8_t* src=px.data()+(size_t)y*w;
+        for(int x=0;x<w;x++){
+            uint8_t v=(uint8_t)(src[x]&0x0F);
+            if((x&1)==0) row[(size_t)x/2]=(uint8_t)(v<<4);
+            else row[(size_t)x/2]=(uint8_t)(row[(size_t)x/2]|v);
+        }
+        fwrite(row.data(),1,stride,f);
+    }
     fclose(f); return true;
 }
 
@@ -698,6 +745,22 @@ static const uint8_t TERRAIN_TYPE_COLORS[16][3] = {
     {0x00,0xFF,0x00}  // flying impassable
 };
 
+static void makeTerrainTypeBMPPalette(uint8_t pal[64]){
+    for(int i=0;i<16;i++){
+        pal[(size_t)i*4+0]=TERRAIN_TYPE_COLORS[i][2];
+        pal[(size_t)i*4+1]=TERRAIN_TYPE_COLORS[i][1];
+        pal[(size_t)i*4+2]=TERRAIN_TYPE_COLORS[i][0];
+        pal[(size_t)i*4+3]=0;
+    }
+}
+
+static void makeBinaryBMPPalette(uint8_t pal[64], uint8_t r, uint8_t g, uint8_t b){
+    memset(pal,0,64);
+    pal[4]=b;
+    pal[5]=g;
+    pal[6]=r;
+}
+
 static int getCellTriType(uint16_t flags, int which){
     return which ? (flags & 0x0F) : ((flags >> 4) & 0x0F);
 }
@@ -714,20 +777,22 @@ static void setRGB(std::vector<uint8_t>& img,int w,int x,int y,const uint8_t rgb
 }
 
 static void exportMeshMaps(const std::vector<uint8_t>& meshData, int submeshW, int submeshH,
-                           const std::string& waterBmp, const std::string& passBmp,
-                           const std::string& passTri0Bmp, const std::string& passTri1Bmp,
-                           const std::string& animationBmp, const std::string& reflectionBmp)
+                            const std::string& waterBmp, const std::string& passBmp,
+                            const std::string& waterMaskBmp,
+                            const std::string& animationBmp, const std::string& reflectionBmp)
 {
     const int cellW=submeshW*32, cellH=submeshH*32, pixPerCell=8;
     const int outW=cellW*pixPerCell, outH=cellH*pixPerCell;
-    std::vector<uint8_t> water((size_t)outW*outH*3,0);
-    std::vector<uint8_t> pass((size_t)outW*outH*3,0);
-    std::vector<uint8_t> passTri0((size_t)outW*outH*3,0);
-    std::vector<uint8_t> passTri1((size_t)outW*outH*3,0);
-    std::vector<uint8_t> reflection((size_t)outW*outH*3,0);
-    std::vector<uint8_t> animation((size_t)outW*outH*3,0);
-    const uint8_t orange[3]={0xFF,0x80,0x00};
-    const uint8_t white[3]={0xFF,0xFF,0xFF};
+    std::vector<uint8_t> water((size_t)outW*outH,6);
+    std::vector<uint8_t> waterMask((size_t)outW*outH,0);
+    std::vector<uint8_t> pass((size_t)outW*outH,0);
+    std::vector<uint8_t> reflection((size_t)outW*outH,0);
+    std::vector<uint8_t> animation((size_t)outW*outH,0);
+    uint8_t terrainTypePalette[64], waterMaskPalette[64], animationPalette[64], reflectionPalette[64];
+    makeTerrainTypeBMPPalette(terrainTypePalette);
+    makeBinaryBMPPalette(waterMaskPalette,0x80,0xC8,0xFF);
+    makeBinaryBMPPalette(animationPalette,0xFF,0xFF,0xFF);
+    makeBinaryBMPPalette(reflectionPalette,0xFF,0x80,0x00);
     for(int cy=0;cy<cellH;cy++){
         for(int cx=0;cx<cellW;cx++){
             size_t off=1024u + (size_t)(cy*cellW+cx)*12u;
@@ -748,26 +813,26 @@ static void exportMeshMaps(const std::vector<uint8_t>& meshData, int submeshW, i
                     bool wet=(tri==0)?w0:w1;
                     int ox=(cellW-1-cx)*pixPerCell + (pixPerCell-1-px);
                     int oy=cy*pixPerCell+py;
-                    setRGB(pass,outW,ox,oy,TERRAIN_TYPE_COLORS[type&15]);
-                    setRGB(passTri0,outW,ox,oy,TERRAIN_TYPE_COLORS[t0&15]);
-                    setRGB(passTri1,outW,ox,oy,TERRAIN_TYPE_COLORS[t1&15]);
-                    if(wet && type>=0 && type<4) setRGB(water,outW,ox,oy,TERRAIN_TYPE_COLORS[type]);
+                    pass[(size_t)oy*outW+ox]=(uint8_t)(type&15);
+                    if(wet && type>=0 && type<4){
+                        water[(size_t)oy*outW+ox]=(uint8_t)type;
+                        waterMask[(size_t)oy*outW+ox]=1;
+                    }
                     if(wet && animated){
-                        setRGB(animation,outW,ox,oy,white);
+                        animation[(size_t)oy*outW+ox]=1;
                     }
                     if(reflective){
-                        setRGB(reflection,outW,ox,oy,orange);
+                        reflection[(size_t)oy*outW+ox]=1;
                     }
                 }
             }
         }
     }
-    if(writeBMP24(waterBmp.c_str(),outW,outH,water)) printf("Extracted water.bmp from mesh\n");
-    if(writeBMP24(passBmp.c_str(),outW,outH,pass)) printf("Extracted passability.bmp from mesh\n");
-    if(writeBMP24(passTri0Bmp.c_str(),outW,outH,passTri0)) printf("Extracted passability_tri0.bmp from mesh\n");
-    if(writeBMP24(passTri1Bmp.c_str(),outW,outH,passTri1)) printf("Extracted passability_tri1.bmp from mesh\n");
-    if(writeBMP24(reflectionBmp.c_str(),outW,outH,reflection)) printf("Extracted reflection.bmp from mesh\n");
-    if(writeBMP24(animationBmp.c_str(),outW,outH,animation)) printf("Extracted animation.bmp from mesh\n");
+    if(writeBMP4(waterBmp.c_str(),outW,outH,terrainTypePalette,water)) printf("Extracted water.bmp from mesh\n");
+    if(writeBMP4(passBmp.c_str(),outW,outH,terrainTypePalette,pass)) printf("Extracted passability.bmp from mesh\n");
+    if(writeBMP4(waterMaskBmp.c_str(),outW,outH,waterMaskPalette,waterMask)) printf("Extracted water_mask.bmp from mesh\n");
+    if(writeBMP4(reflectionBmp.c_str(),outW,outH,reflectionPalette,reflection)) printf("Extracted reflection.bmp from mesh\n");
+    if(writeBMP4(animationBmp.c_str(),outW,outH,animationPalette,animation)) printf("Extracted animation.bmp from mesh\n");
 }
 
 static bool parseMeshRefs(const std::vector<uint8_t>& meshData, MeshRefs& m){
@@ -893,8 +958,7 @@ int main(int argc, char* argv[]){
     exportMeshMaps(meshData,refs.submeshW,refs.submeshH,
                    base+"/terrain/water.bmp",
                    base+"/terrain/passability.bmp",
-                   base+"/terrain/passability_tri0.bmp",
-                   base+"/terrain/passability_tri1.bmp",
+                   base+"/terrain/water_mask.bmp",
                    base+"/terrain/animation.bmp",
                    base+"/terrain/reflection.bmp");
 

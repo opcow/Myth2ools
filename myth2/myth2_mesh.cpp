@@ -326,9 +326,9 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs)
         for (int x = 0; x < vw; x++) {
             int vi = vertexIndex(x, y, vw);
             const Myth2Cell& c = mesh.cells[(size_t)cellIndexClamped(x, y, mesh.cellWidth, mesh.cellHeight)];
-            vx[vi] = (float)y - halfH;
+            vx[vi] = halfW - (float)x;
             vy[vi] = (float)c.physicalHeight * hs;
-            vz[vi] = (float)x - halfW;
+            vz[vi] = (float)y - halfH;
         }
     }
 

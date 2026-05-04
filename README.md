@@ -116,22 +116,24 @@ finds the requested `mesh` tag and its referenced assets, and writes to
 - `terrain/terrain.bmp`
 - `terrain/shadow.bmp`
 - `terrain/water.bmp`
+- `terrain/water_mask.bmp`
 - `terrain/reflection.bmp`
 - `terrain/animation.bmp`
 - `terrain/passability.bmp`
-- `terrain/passability_tri0.bmp`
-- `terrain/passability_tri1.bmp`
 - `screens/overhead.bmp` / `pregame.bmp` / `postgame.bmp` when present
 - `strings/name.txt`
-- `layers/` ordered bundle copies plus `layers/manifest.txt`
+- `layers/` transparent PNG reference layers plus `layers/manifest.txt`
 - `manifest.json`
 - `layers/map_layers.ora` when `--ora` is used
 
-The extra `passability_tri0.bmp` and `passability_tri1.bmp` files are
-diagnostic exports. They show the per-cell terrain type if only one stored
-triangle nibble is used across the whole cell, which is useful when comparing
-against tools that appear to collapse mixed cells to a single representative
-terrain/passability value.
+`terrain/passability.bmp`, `terrain/water.bmp`, `terrain/water_mask.bmp`,
+`terrain/reflection.bmp`, and `terrain/animation.bmp` are written as 4-bit
+indexed BMPs. The passability and water pixel indexes are the terrain/media type
+values the assembler reads back exactly. For `water.bmp`, indexes `0..3` mean
+wet media depths/types; dry pixels use index `6`. `water_mask.bmp` is a simple
+light-blue wet-area mask used as the water OBJ texture. `animation.bmp` is a
+diagnostic mask: index `0` is off and any nonzero index is on when imported with
+`--animation`.
 
 When `--ora` is enabled, the extractor also writes a layered OpenRaster archive
 containing the terrain-side layer stack:
@@ -142,6 +144,10 @@ containing the terrain-side layer stack:
 - passability
 - reflection
 - animation
+
+The loose files in `layers/` are PNGs so overlay/reference layers can carry
+transparency in regular image editors. The assembler reimports from the
+canonical files under `terrain/`, `screens/`, and `strings/`.
 
 ### `myth2_mesh`
 ```
@@ -159,7 +165,7 @@ myth2_water_mesh <tag_folder> [output.obj] [heightscale]
 
 Exports the current Myth II water surface as an OBJ aligned to the terrain OBJ.
 It uses `media_height` for vertex Y and writes only wet triangles, with an MTL
-that points to `terrain/water.bmp`.
+that points to `terrain/water_mask.bmp`.
 
 ### `myth2_water_depth`
 ```
@@ -277,7 +283,7 @@ and projectile flags.
 
 ### `myth2_assemble`
 ```
-myth2_assemble <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--mask]
+myth2_assemble <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation]
 ```
 
 Rebuilds a Myth II `dng2` plugin from an extracted map folder. The first pass
@@ -287,12 +293,13 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 - `--obj` imports Myth II terrain displacement from an OBJ into `raw/mesh_tag.bin`.
 - If `--obj` is omitted, `myth2_assemble --edit` auto-detects `<folder>/displacement.obj` when present.
 - `--water-obj` imports Myth II water-surface heights from an OBJ into wet cells' `media_height`.
-- If `--water-obj` is omitted, `myth2_assemble --edit` auto-detects `<folder>/<mesh_tag>_water.obj` when present.
+- If `--water-obj` is omitted, `myth2_assemble --edit` auto-detects `<folder>/water.obj` when present, then falls back to the old `<folder>/<mesh_tag>_water.obj` name.
 - During `--edit`, `terrain/water.bmp` is safely reapplied by default as flags/types only.
 - `--water` experimentally imports `terrain/water.bmp` with media-height changes as well.
 - `--water-flags` explicitly selects the same safe flags-only `terrain/water.bmp` path.
-- `--mask` experimentally imports `terrain/animation.bmp` back into the mesh during `--edit`.
-- The assembler now prefers the primary edit paths first and uses `layers/` only as fallback:
+- `--animation` experimentally imports `terrain/animation.bmp` back into the mesh during `--edit`; it is not imported by default.
+- `--mask` is accepted as a legacy alias for `--animation`.
+- The assembler reads editable assets from the canonical extracted paths:
   - `terrain/terrain.bmp`
   - `terrain/passability.bmp`
   - `terrain/water.bmp`
@@ -303,10 +310,14 @@ packs the mesh plus any extracted terrain, name, and screen tags.
   - `strings/name.txt`
 - `terrain/terrain.bmp` is reinjected into the terrain `.256` when present.
 - `terrain/passability.bmp` is converted back into Myth II terrain-type flags.
+  Indexed BMPs use exact pixel indexes; older RGB BMPs are matched by nearest
+  terrain-type color.
 - `terrain/water.bmp` is safely reinserted in flags-only form during `--edit`.
+  Indexed BMPs use indexes `0..3` as wet media depths/types and all other
+  indexes as dry; older RGB BMPs are still supported by color matching.
 - `terrain/reflection.bmp` is reinserted into the mesh reflection bit during `--edit`.
-- `terrain/reflection.bmp` marks reflective cells from the mesh: black = none, orange = reflective.
-- `terrain/animation.bmp` marks cells with the animated-media bit: black = none, white = animated.
+- `terrain/reflection.bmp` marks reflective cells from the mesh as a 4-bit indexed mask: index `0` = off, nonzero = reflective.
+- `terrain/animation.bmp` marks cells with the animated-media bit as a 4-bit indexed mask: index `0` = off, nonzero = animated.
 - In normal engine behavior, the animated-media bit is derived from wet topology: a vertex is marked animated only when the four cells meeting there are all fully wet.
 - Because the engine recomputes that bit from topology, `terrain/animation.bmp` is best treated as a diagnostic/reference layer rather than a stable standalone authoring control.
 - `screens/pregame.bmp`, `screens/overhead.bmp`, and `screens/postgame.bmp` are reinjected into their `.256` tags when present.

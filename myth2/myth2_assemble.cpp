@@ -9,7 +9,7 @@
 //   - includes screens/*_tag.bin when present
 //
 // Usage:
-//   myth2_assemble <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--mask]
+//   myth2_assemble <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation]
 
 #include <cstdio>
 #include <cstdlib>
@@ -138,6 +138,31 @@ static std::vector<uint8_t> readBMP8(const std::string& path, int& outW, int& ou
     for (int row = 0; row < h; row++) {
         const uint8_t* src = raw.data() + dataOff + (size_t)(h - 1 - row) * stride;
         memcpy(px.data() + (size_t)row * w, src, w);
+    }
+    return px;
+}
+
+static std::vector<uint8_t> readBMPIndexed4Or8(const std::string& path, int& outW, int& outH) {
+    auto raw = readFile(path);
+    if (raw.size() < 54 || raw[0] != 'B' || raw[1] != 'M') return {};
+    uint32_t dataOff = get32le(raw.data() + 10);
+    int32_t w = get32les(raw.data() + 18), h = get32les(raw.data() + 22);
+    uint16_t bits = get16le(raw.data() + 28);
+    if ((bits != 4 && bits != 8) || w <= 0 || h <= 0) return {};
+    outW = w;
+    outH = h;
+    int rawStride = (bits == 4) ? ((w + 1) / 2) : w;
+    int stride = (rawStride + 3) & ~3;
+    if (dataOff + (size_t)stride * h > raw.size()) return {};
+    std::vector<uint8_t> px((size_t)w * h);
+    for (int row = 0; row < h; row++) {
+        const uint8_t* src = raw.data() + dataOff + (size_t)(h - 1 - row) * stride;
+        uint8_t* dst = px.data() + (size_t)row * w;
+        for (int x = 0; x < w; x++) {
+            dst[x] = (bits == 4)
+                ? (uint8_t)((x & 1) ? (src[x / 2] & 0x0F) : (src[x / 2] >> 4))
+                : src[x];
+        }
     }
     return px;
 }
@@ -299,8 +324,8 @@ static bool parseOBJHeights(const std::string& path, float hs, int vertexW, int 
         if (line[0] != 'v' || line[1] != ' ') continue;
         float x = 0, y = 0, z = 0;
         if (sscanf(line + 2, "%f %f %f", &x, &y, &z) != 3) continue;
-        int col = (int)roundf(z + halfW);
-        int row = (int)roundf(x + halfH);
+        int col = (int)roundf(halfW - x);
+        int row = (int)roundf(z + halfH);
         if (col < 0 || col >= vertexW || row < 0 || row >= vertexH) continue;
         float hf = y / hs;
         int16_t h = (hf < -32768.0f) ? -32768 : (hf > 32767.0f) ? 32767 : (int16_t)roundf(hf);
@@ -419,7 +444,7 @@ static std::vector<RuntimeNormalEntry> buildRuntimeNormalTable() {
 }
 
 static NormalVec3 empiricalToRuntimeNormal(const NormalVec3& v) {
-    return normalNormalized(NormalVec3{v.z, v.x, v.y});
+    return normalNormalized(NormalVec3{-v.x, v.z, v.y});
 }
 
 static uint8_t nearestRuntimeNormalIndex(const NormalVec3& empiricalNormal,
@@ -465,8 +490,8 @@ static bool parseWaterOBJHeights(const std::string& path, float hs, int vertexW,
         if (line[0] != 'v' || line[1] != ' ') continue;
         float x = 0, y = 0, z = 0;
         if (sscanf(line + 2, "%f %f %f", &x, &y, &z) != 3) continue;
-        int col = (int)roundf(z + halfW);
-        int row = (int)roundf(x + halfH);
+        int col = (int)roundf(halfW - x);
+        int row = (int)roundf(z + halfH);
         if (col < 0 || col >= vertexW || row < 0 || row >= vertexH) continue;
         float hf = y / hs;
         int16_t h = (hf < -32768.0f) ? -32768 : (hf > 32767.0f) ? 32767 : (int16_t)roundf(hf);
@@ -530,10 +555,10 @@ static bool applyObjToMyth2Mesh(std::vector<uint8_t>& meshData, int submeshW, in
             if (!cornersChanged) {
                 continue;
             }
-            NormalVec3 pA{(double)y - halfH, (double)heights[(size_t)A] * MYTH2_WORLD_HEIGHT_SCALE, (double)x - halfW};
-            NormalVec3 pB{(double)y - halfH, (double)heights[(size_t)B] * MYTH2_WORLD_HEIGHT_SCALE, (double)(x + 1) - halfW};
-            NormalVec3 pC{(double)(y + 1) - halfH, (double)heights[(size_t)C] * MYTH2_WORLD_HEIGHT_SCALE, (double)(x + 1) - halfW};
-            NormalVec3 pD{(double)(y + 1) - halfH, (double)heights[(size_t)D] * MYTH2_WORLD_HEIGHT_SCALE, (double)x - halfW};
+            NormalVec3 pA{halfW - (double)x, (double)heights[(size_t)A] * MYTH2_WORLD_HEIGHT_SCALE, (double)y - halfH};
+            NormalVec3 pB{halfW - (double)(x + 1), (double)heights[(size_t)B] * MYTH2_WORLD_HEIGHT_SCALE, (double)y - halfH};
+            NormalVec3 pC{halfW - (double)(x + 1), (double)heights[(size_t)C] * MYTH2_WORLD_HEIGHT_SCALE, (double)(y + 1) - halfH};
+            NormalVec3 pD{halfW - (double)x, (double)heights[(size_t)D] * MYTH2_WORLD_HEIGHT_SCALE, (double)(y + 1) - halfH};
 
             NormalVec3 n0;
             NormalVec3 n1;
@@ -697,6 +722,12 @@ static size_t meshMapSampleOffset(int bmpW, int cellW, int x, int y, int localX,
     return ((size_t)pixelY * bmpW + mirroredX) * 3;
 }
 
+static size_t meshMapSampleIndexOffset(int bmpW, int cellW, int x, int y, int localX, int localY) {
+    int mirroredX = (cellW - 1 - x) * 8 + (7 - localX);
+    int pixelY = y * 8 + localY;
+    return (size_t)pixelY * bmpW + mirroredX;
+}
+
 static int16_t estimateMediaHeight(const std::vector<uint8_t>& meshData, int cellW, int cellH, int x, int y) {
     int16_t maxHeight = readCellPhysicalHeight(meshData, cellW, x, y);
     const int dx[4] = { 0, 1, 0, 1 };
@@ -810,10 +841,13 @@ static void flattenMediaRegions(std::vector<uint8_t>& meshData, int cellW, int c
 static bool applyAnimationToMyth2Mesh(std::vector<uint8_t>& meshData, int submeshW, int submeshH,
                                       const std::string& bmpPath) {
     int bW = 0, bH = 0;
-    auto bmp = readBMP24(bmpPath, bW, bH);
+    auto indexed = readBMPIndexed4Or8(bmpPath, bW, bH);
+    bool exactIndexed = !indexed.empty();
+    std::vector<uint8_t> bmp;
+    if (!exactIndexed) bmp = readBMP24(bmpPath, bW, bH);
     int cellW = submeshW * 32;
     int cellH = submeshH * 32;
-    if (bmp.empty()) return false;
+    if (!exactIndexed && bmp.empty()) return false;
     if (bW != cellW * 8 || bH != cellH * 8) {
         fprintf(stderr, "Animation map has wrong size: %s\n", bmpPath.c_str());
         return false;
@@ -822,8 +856,14 @@ static bool applyAnimationToMyth2Mesh(std::vector<uint8_t>& meshData, int submes
     int changed = 0;
     for (int y = 0; y < cellH; y++) {
         for (int x = 0; x < cellW; x++) {
-            size_t pc = meshMapSampleOffset(bW, cellW, x, y, 4, 4);
-            bool animated = ((int)bmp[pc + 0] + (int)bmp[pc + 1] + (int)bmp[pc + 2]) > 384;
+            bool animated = false;
+            if (exactIndexed) {
+                size_t pc = meshMapSampleIndexOffset(bW, cellW, x, y, 4, 4);
+                animated = indexed[pc] != 0;
+            } else {
+                size_t pc = meshMapSampleOffset(bW, cellW, x, y, 4, 4);
+                animated = ((int)bmp[pc + 0] + (int)bmp[pc + 1] + (int)bmp[pc + 2]) > 384;
+            }
             uint16_t flags = readCellFlags(meshData, cellW, x, y);
             bool wet = isCellTriMedia(flags, 0) || isCellTriMedia(flags, 1);
             uint16_t newFlags = animated && wet
@@ -843,10 +883,13 @@ static bool applyAnimationToMyth2Mesh(std::vector<uint8_t>& meshData, int submes
 static bool applyReflectionToMyth2Mesh(std::vector<uint8_t>& meshData, int submeshW, int submeshH,
                                        const std::string& bmpPath) {
     int bW = 0, bH = 0;
-    auto bmp = readBMP24(bmpPath, bW, bH);
+    auto indexed = readBMPIndexed4Or8(bmpPath, bW, bH);
+    bool exactIndexed = !indexed.empty();
+    std::vector<uint8_t> bmp;
+    if (!exactIndexed) bmp = readBMP24(bmpPath, bW, bH);
     int cellW = submeshW * 32;
     int cellH = submeshH * 32;
-    if (bmp.empty()) return false;
+    if (!exactIndexed && bmp.empty()) return false;
     if (bW != cellW * 8 || bH != cellH * 8) {
         fprintf(stderr, "Reflection map has wrong size: %s\n", bmpPath.c_str());
         return false;
@@ -855,8 +898,14 @@ static bool applyReflectionToMyth2Mesh(std::vector<uint8_t>& meshData, int subme
     int changed = 0;
     for (int y = 0; y < cellH; y++) {
         for (int x = 0; x < cellW; x++) {
-            size_t pc = meshMapSampleOffset(bW, cellW, x, y, 4, 4);
-            bool reflective = ((int)bmp[pc + 0] + (int)bmp[pc + 1] + (int)bmp[pc + 2]) > 24;
+            bool reflective = false;
+            if (exactIndexed) {
+                size_t pc = meshMapSampleIndexOffset(bW, cellW, x, y, 4, 4);
+                reflective = indexed[pc] != 0;
+            } else {
+                size_t pc = meshMapSampleOffset(bW, cellW, x, y, 4, 4);
+                reflective = ((int)bmp[pc + 0] + (int)bmp[pc + 1] + (int)bmp[pc + 2]) > 24;
+            }
             uint16_t flags = readCellFlags(meshData, cellW, x, y);
             uint16_t newFlags = reflective
                 ? (uint16_t)(flags | MYTH2_MESH_CELL_HAS_REFLECTION_FLAG)
@@ -875,10 +924,13 @@ static bool applyReflectionToMyth2Mesh(std::vector<uint8_t>& meshData, int subme
 static bool applyPassabilityToMyth2Mesh(std::vector<uint8_t>& meshData, int submeshW, int submeshH,
                                         const std::string& bmpPath) {
     int bW = 0, bH = 0;
-    auto bmp = readBMP24(bmpPath, bW, bH);
+    auto indexed = readBMPIndexed4Or8(bmpPath, bW, bH);
+    bool exactIndexed = !indexed.empty();
+    std::vector<uint8_t> bmp;
+    if (!exactIndexed) bmp = readBMP24(bmpPath, bW, bH);
     int cellW = submeshW * 32;
     int cellH = submeshH * 32;
-    if (bmp.empty()) return false;
+    if (!exactIndexed && bmp.empty()) return false;
     if (bW != cellW * 8 || bH != cellH * 8) {
         fprintf(stderr, "Passability map has wrong size: %s\n", bmpPath.c_str());
         return false;
@@ -889,10 +941,18 @@ static bool applyPassabilityToMyth2Mesh(std::vector<uint8_t>& meshData, int subm
         for (int x = 0; x < cellW; x++) {
             int tri0x, tri0y, tri1x, tri1y;
             sampleTriangleCenters(x, y, tri0x, tri0y, tri1x, tri1y);
-            size_t p0 = meshMapSampleOffset(bW, cellW, x, y, tri0x, tri0y);
-            size_t p1 = meshMapSampleOffset(bW, cellW, x, y, tri1x, tri1y);
-            int t0 = nearestTerrainType(bmp.data() + p0, 16);
-            int t1 = nearestTerrainType(bmp.data() + p1, 16);
+            int t0 = 0, t1 = 0;
+            if (exactIndexed) {
+                size_t p0 = meshMapSampleIndexOffset(bW, cellW, x, y, tri0x, tri0y);
+                size_t p1 = meshMapSampleIndexOffset(bW, cellW, x, y, tri1x, tri1y);
+                t0 = indexed[p0] & 0x0F;
+                t1 = indexed[p1] & 0x0F;
+            } else {
+                size_t p0 = meshMapSampleOffset(bW, cellW, x, y, tri0x, tri0y);
+                size_t p1 = meshMapSampleOffset(bW, cellW, x, y, tri1x, tri1y);
+                t0 = nearestTerrainType(bmp.data() + p0, 16);
+                t1 = nearestTerrainType(bmp.data() + p1, 16);
+            }
             uint16_t flags = readCellFlags(meshData, cellW, x, y);
             uint16_t newFlags = setCellTriType(setCellTriType(flags, 0, t0), 1, t1);
             if (newFlags != flags) {
@@ -909,10 +969,13 @@ static bool applyPassabilityToMyth2Mesh(std::vector<uint8_t>& meshData, int subm
 static bool applyWaterToMyth2MeshImpl(std::vector<uint8_t>& meshData, int submeshW, int submeshH,
                                       const std::string& bmpPath, bool updateHeights) {
     int bW = 0, bH = 0;
-    auto bmp = readBMP24(bmpPath, bW, bH);
+    auto indexed = readBMPIndexed4Or8(bmpPath, bW, bH);
+    bool exactIndexed = !indexed.empty();
+    std::vector<uint8_t> bmp;
+    if (!exactIndexed) bmp = readBMP24(bmpPath, bW, bH);
     int cellW = submeshW * 32;
     int cellH = submeshH * 32;
-    if (bmp.empty()) return false;
+    if (!exactIndexed && bmp.empty()) return false;
     if (bW != cellW * 8 || bH != cellH * 8) {
         fprintf(stderr, "Water map has wrong size: %s\n", bmpPath.c_str());
         return false;
@@ -923,13 +986,23 @@ static bool applyWaterToMyth2MeshImpl(std::vector<uint8_t>& meshData, int submes
         for (int x = 0; x < cellW; x++) {
             int tri0x, tri0y, tri1x, tri1y;
             sampleTriangleCenters(x, y, tri0x, tri0y, tri1x, tri1y);
-            size_t p0 = meshMapSampleOffset(bW, cellW, x, y, tri0x, tri0y);
-            size_t p1 = meshMapSampleOffset(bW, cellW, x, y, tri1x, tri1y);
-
-            bool wet0 = ((int)bmp[p0 + 0] + (int)bmp[p0 + 1] + (int)bmp[p0 + 2]) > 24;
-            bool wet1 = ((int)bmp[p1 + 0] + (int)bmp[p1 + 1] + (int)bmp[p1 + 2]) > 24;
-            int type0 = nearestTerrainType(bmp.data() + p0, 4);
-            int type1 = nearestTerrainType(bmp.data() + p1, 4);
+            bool wet0 = false, wet1 = false;
+            int type0 = 0, type1 = 0;
+            if (exactIndexed) {
+                size_t p0 = meshMapSampleIndexOffset(bW, cellW, x, y, tri0x, tri0y);
+                size_t p1 = meshMapSampleIndexOffset(bW, cellW, x, y, tri1x, tri1y);
+                type0 = indexed[p0] & 0x0F;
+                type1 = indexed[p1] & 0x0F;
+                wet0 = type0 < 4;
+                wet1 = type1 < 4;
+            } else {
+                size_t p0 = meshMapSampleOffset(bW, cellW, x, y, tri0x, tri0y);
+                size_t p1 = meshMapSampleOffset(bW, cellW, x, y, tri1x, tri1y);
+                wet0 = ((int)bmp[p0 + 0] + (int)bmp[p0 + 1] + (int)bmp[p0 + 2]) > 24;
+                wet1 = ((int)bmp[p1 + 0] + (int)bmp[p1 + 1] + (int)bmp[p1 + 2]) > 24;
+                type0 = nearestTerrainType(bmp.data() + p0, 4);
+                type1 = nearestTerrainType(bmp.data() + p1, 4);
+            }
 
             uint16_t flags = readCellFlags(meshData, cellW, x, y);
             uint16_t oldFlags = flags;
@@ -1205,7 +1278,7 @@ static void usage(const char* p) {
     fprintf(stderr,
         "Myth II Plugin Assembler\n\n"
         "Usage:\n"
-        "  %s <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--mask]\n\n"
+        "  %s <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation]\n\n"
         "  folder   Extracted Myth II map folder from myth2_extract\n"
         "  output   Output plugin path (default: <folder>_plugin)\n"
         "  --edit   Re-read edited assets from the folder before packing\n"
@@ -1213,7 +1286,8 @@ static void usage(const char* p) {
         "  --water-obj Import wet-cell media_height from a water-surface OBJ during --edit\n"
         "  --water  Experimentally import terrain/water.bmp including media-height changes\n"
         "  --water-flags Import only water flags/types from terrain/water.bmp (default under --edit)\n"
-        "  --mask   Experimentally import terrain/animation.bmp during --edit\n"
+        "  --animation Experimentally import terrain/animation.bmp during --edit\n"
+        "  --mask   Alias for --animation\n"
         "  --heightscale OBJ vertical scale, default 1/512\n",
         p);
 }
@@ -1229,7 +1303,7 @@ int main(int argc, char* argv[]) {
     bool edit = false;
     bool importWater = false;
     bool importWaterFlags = false;
-    bool importMask = false;
+    bool importAnimation = false;
     std::string objPath;
     bool objExplicit = false;
     std::string waterObjPath;
@@ -1243,8 +1317,8 @@ int main(int argc, char* argv[]) {
             importWater = true;
         } else if (a == "--water-flags") {
             importWaterFlags = true;
-        } else if (a == "--mask") {
-            importMask = true;
+        } else if (a == "--animation" || a == "--mask") {
+            importAnimation = true;
         } else if (a == "--obj") {
             objExplicit = true;
             if (i + 1 < argc) objPath = argv[++i];
@@ -1300,7 +1374,7 @@ int main(int argc, char* argv[]) {
     printf("Edit mode:     %s\n\n", edit ? "yes" : "no");
     if (edit && importWater) printf("Water import:  enabled (experimental)\n\n");
     if (edit && importWaterFlags && !importWater) printf("Water flags:   enabled\n\n");
-    if (edit && importMask) printf("Animation import: enabled (experimental)\n\n");
+    if (edit && importAnimation) printf("Animation import: enabled (experimental)\n\n");
 
     if (edit) {
         std::string effectiveObjPath = objPath;
@@ -1310,8 +1384,12 @@ int main(int argc, char* argv[]) {
             if (fileExists(autoObj)) effectiveObjPath = autoObj;
         }
         if (effectiveWaterObjPath.empty()) {
-            std::string autoWaterObj = folder + "/" + mf.meshTag + "_water.obj";
+            std::string autoWaterObj = folder + "/water.obj";
             if (fileExists(autoWaterObj)) effectiveWaterObjPath = autoWaterObj;
+            else {
+                std::string legacyWaterObj = folder + "/" + mf.meshTag + "_water.obj";
+                if (fileExists(legacyWaterObj)) effectiveWaterObjPath = legacyWaterObj;
+            }
         }
         if (!effectiveObjPath.empty()) printf("OBJ:           %s (scale %.9f)\n\n", effectiveObjPath.c_str(), objHeightScale);
         if (!effectiveWaterObjPath.empty()) printf("Water OBJ:     %s (scale %.9f)\n\n", effectiveWaterObjPath.c_str(), objHeightScale);
@@ -1418,14 +1496,14 @@ int main(int argc, char* argv[]) {
                         return 1;
                     }
                 }
-                if (importMask) {
-                    std::string maskBmp = firstExistingPath({
+                if (importAnimation) {
+                    std::string animationBmp = firstExistingPath({
                         folder + "/terrain/animation.bmp",
                         folder + "/layers/04_animation.bmp"
                     });
-                    if (fileExists(maskBmp)) {
-                        if (!applyAnimationToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, maskBmp)) {
-                            fprintf(stderr, "Animation map import failed: %s\n", maskBmp.c_str());
+                    if (fileExists(animationBmp)) {
+                        if (!applyAnimationToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, animationBmp)) {
+                            fprintf(stderr, "Animation map import failed: %s\n", animationBmp.c_str());
                             return 1;
                         }
                     }
