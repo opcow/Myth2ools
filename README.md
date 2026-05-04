@@ -4,7 +4,7 @@ Small console tools for extracting, editing, and rebuilding **Myth II: Soulbligh
 
 ## Upfront
 
-This project was originally based on my code and notes from the 1990s, which was made possible in large part by information discovered by many other brilliant map hackers in the Myth:TFL modding community at that time. I compiled the information, discovered some on my own, and I wrote the original code.
+This project was originally based on my code and notes from the 1990s, which was made possible in large part by information discovered by many other smart and generous map hackers in the Myth:TFL modding community at that time. I compiled the information, discovered some on my own, and I wrote the original code.
 
 The point: I am 65 years old with 3 dogs, a family, and other commitments. I have neither the time nor the inclination to spend days or weeks updating this code for modernity, but I have much nostalgia for Myth OG and Myth 2, and I thought it would be fun to see what could come of these old tools.
 
