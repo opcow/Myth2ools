@@ -2,11 +2,13 @@
 
 Small console tools for extracting, editing, and rebuilding **Myth II: Soulblighter** map assets.
 
+![Blender Image](images/blender.png)
+
 ## Upfront
 
 This project was originally based on my code and notes from the 1990s, which was made possible in large part by information discovered by many other smart and generous map hackers in the Myth:TFL modding community at that time. I compiled the information, discovered some on my own, and I wrote the original code.
 
-The point: I am 65 years old with 3 dogs, a family, and other commitments. I have neither the time nor the inclination to spend days or weeks updating this code for modernity, but I have much nostalgia for Myth OG and Myth 2, and I thought it would be fun to see what could come of these old tools.
+The point: I am 65 years old with 3 dogs, a family, and other commitments. I have neither the time nor the inclination to spend days or weeks updating this code for modernity, but I have a lot of nostalgia for Myth OG, Myth 2, and my time in the original Myth modding community. I thought it would be fun to see what could come of these old tools.
 
 And so I did, with the help of both Claude Code and Codex AI coding tools. Without them, this would have never happened. Regardless of all the hate for "vibe coding," these tools are incredibly useful. No apologies.
 
