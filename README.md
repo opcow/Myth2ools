@@ -28,14 +28,15 @@ The tools here were based on that old Metrowerks Codewarrior project. First work
 
 As with the original tools, a map maker can work with 2D images to draw in the terrain type flags, but we can use the displacement.obj in Blender to precisely create terrain flags in 3D at the triangle level.
 
-![New Workflow](images/blender_triangles.png)
+![Editing terrain types in Blender](images/blender_triangles.png)
 
 And, of course, you can use Blender to create or modify the 3D map surface.
 
 ## Building
 
 ### With CMake
-```
+
+```bash
 mkdir build && cd build
 cmake ..
 cmake --build .
@@ -47,7 +48,8 @@ cmake --build .
 - `myth2/` contains Myth II: Soulblighter tools and shared Myth II headers.
 
 ### Quick compile (MSVC)
-```
+
+```bash
 cl /EHsc /O2 tfl\myth_extract.cpp /Fe:myth_extract.exe
 cl /EHsc /O2 tfl\myth_assemble.cpp /Fe:myth_assemble.exe
 cl /EHsc /O2 tfl\myth_mesh.cpp /Fe:myth_mesh.exe
@@ -72,7 +74,8 @@ cl /EHsc /O2 myth2\myth2_assemble.cpp /Fe:myth2_assemble.exe
 ```
 
 ### Quick compile (GCC / Clang)
-```
+
+```bash
 g++ -std=c++17 -O2 tfl/myth_extract.cpp -o myth_extract
 g++ -std=c++17 -O2 tfl/myth_assemble.cpp -o myth_assemble
 g++ -std=c++17 -O2 tfl/myth_mesh.cpp -o myth_mesh
@@ -101,7 +104,8 @@ g++ -std=c++17 -O2 myth2/myth2_assemble.cpp -o myth2_assemble
 ## Tools
 
 ### `myth2_dump`
-```
+
+```bash
 myth2_dump <file>
 myth2_dump <file> list [type|all]
 myth2_dump <file> entrypoints
@@ -110,7 +114,8 @@ myth2_dump <file> entrypoints
 Lists tags in Myth II `dng2` plugin files and `mth2` local tag files.
 
 ### `myth2_extract`
-```
+
+```bash
 myth2_extract <tags_folder> <meshtag> [output_folder] [--ora]
 myth2_extract <tags_folder> <meshtag> --out <output_folder> [--ora]
 ```
@@ -158,7 +163,8 @@ transparency in regular image editors. The assembler reimports from the
 canonical files under `terrain/`, `screens/`, and `strings/`.
 
 ### `myth2_mesh`
-```
+
+```bash
 myth2_mesh <tag_folder> [output.obj] [heightscale]
 ```
 
@@ -167,7 +173,8 @@ the Myth II alternating cell diagonal pattern and a default height scale of
 `1/512`.
 
 ### `myth2_water_mesh`
-```
+
+```bash
 myth2_water_mesh <tag_folder> [output.obj] [heightscale]
 ```
 
@@ -176,7 +183,8 @@ It uses `media_height` for vertex Y and writes only wet triangles, with an MTL
 that points to `terrain/water_mask.bmp`.
 
 ### `myth2_water_depth`
-```
+
+```bash
 myth2_water_depth <tag_folder> <terrain.obj> <water.obj> [level1] [level2] [level3] [output.bmp] [heightscale] [--smooth]
 ```
 
@@ -187,7 +195,8 @@ and `3` at the optional raw-height thresholds you provide. `--smooth` runs a
 single image-space cleanup pass to reduce isolated jagged triangle spikes.
 
 ### `myth2_mesh_import`
-```
+
+```bash
 myth2_mesh_import <tag_folder> <input.obj> [heightscale]
 ```
 
@@ -195,7 +204,8 @@ Imports an edited Myth II OBJ back into `raw/mesh_tag.bin` by patching
 `physical_height` only. Other per-cell fields are preserved.
 
 ### `myth2_mesh_diff`
-```
+
+```bash
 myth2_mesh_diff <folder> <mesh_tag.bin|plugin>
 ```
 
@@ -203,7 +213,8 @@ Compares the extracted `raw/mesh_tag.bin` in a Myth II folder against another
 mesh tag or a rebuilt plugin and reports which per-cell fields changed.
 
 ### `myth2_mesh_dump`
-```
+
+```bash
 myth2_mesh_dump <folder> [mesh_tag.bin|plugin] [all|wet]
 ```
 
@@ -211,7 +222,8 @@ Dumps Myth II mesh cell fields as CSV-style text, with `wet` mode focusing on
 cells whose media bits are set.
 
 ### `myth2_mesh_summary`
-```
+
+```bash
 myth2_mesh_summary <folder> [mesh_tag.bin|plugin] [all|wet]
 ```
 
@@ -219,7 +231,8 @@ Groups Myth II mesh cells into repeated flag/height patterns and prints counts
 plus a few sample coordinates for each pattern.
 
 ### `myth2_normal_analyze`
-```
+
+```bash
 myth2_normal_analyze <folder> [index]
 ```
 
@@ -230,7 +243,8 @@ Without an `index`, it prints one summary row per used normal index. With an
 few sample triangles for that index.
 
 ### `myth2_normal_table`
-```
+
+```bash
 myth2_normal_table [index]
 ```
 
@@ -240,7 +254,8 @@ argument, it prints all 256 entries. With an `index` in `0..255`, it prints the
 decoded entry with fixed-point components and normalized floating-point values.
 
 ### `myth2_normal_compare`
-```
+
+```bash
 myth2_normal_compare <folder>
 ```
 
@@ -250,7 +265,8 @@ axis/sign permutations and reports the best basis alignment plus the lowest-
 error matching indices.
 
 ### `myth2_media_height`
-```
+
+```bash
 myth2_media_height <folder> <value>
 ```
 
@@ -259,7 +275,8 @@ extracted Myth II `raw/mesh_tag.bin`. This is a direct experiment tool for
 testing what a flat water-surface height does to a map.
 
 ### `myth2_media_dump`
-```
+
+```bash
 myth2_media_dump <file> list
 myth2_media_dump <file> <id>
 ```
@@ -270,7 +287,8 @@ Useful for inspecting stock media definitions such as `wate`, `wagr`, `wamu`,
 and `wame`.
 
 ### `myth2_core_dump`
-```
+
+```bash
 myth2_core_dump <file> list
 myth2_core_dump <file> <id>
 ```
@@ -280,7 +298,8 @@ Useful for inspecting the collection/tint side paired with `medi` tags such as
 `wate`, `wagr`, and `wamu`.
 
 ### `myth2_proj_dump`
-```
+
+```bash
 myth2_proj_dump <file> list
 myth2_proj_dump <file> <id>
 ```
@@ -290,7 +309,8 @@ fields such as inertia, detonation/media-detonation frequencies, rebound type,
 and projectile flags.
 
 ### `myth2_assemble`
-```
+
+```bash
 myth2_assemble <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation]
 ```
 
@@ -332,7 +352,8 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 - `strings/name.txt` is rebuilt into the map-name `stli` when present.
 
 ### `myth_extract`
-```
+
+```bash
 myth_extract [-o] <tags.gor> <meshtag>
 ```
 
@@ -343,7 +364,8 @@ myth_extract [-o] <tags.gor> <meshtag>
 | `meshtag` | 4-character mesh tag name (for example `sega`, `balo`, `00tm`) |
 
 ### `myth_assemble`
-```
+
+```bash
 myth_assemble <folder> [output.gor] [--edit] [--obj <input.obj>] [--heightscale <n>]
 ```
 
@@ -353,14 +375,16 @@ myth_assemble <folder> [output.gor] [--edit] [--obj <input.obj>] [--heightscale 
 - When OBJ import is used, `height.bmp` is skipped, but `passability.bmp`, `water.bmp`, `animation.bmp`, and `terrain.bmp` still apply.
 
 ### `myth_mesh`
-```
+
+```bash
 myth_mesh <tags.gor> <meshtag> [output.obj] [heightscale]
 ```
 
 Exports the terrain grid as a Wavefront OBJ for editing in Blender.
 
 ### `myth_mesh_import`
-```
+
+```bash
 myth_mesh_import <tag_folder> <input.obj> [heightscale]
 ```
 
@@ -371,12 +395,14 @@ Standalone OBJ importer for patching `raw/mesh_tag.bin` directly.
 ## Examples
 
 **Training map** (5x5 tiles, tag `00tm`, lives in `artsound.gor`):
-```
+
+```bash
 myth_extract artsound.gor 00tm 5 5 training_map.bmp
 ```
 
 **A level texture** — find the tag name from `docs/tags.txt` under the `.256` section, and the mesh dimensions from `docs/Maps.txt` or from reading the level's `mesh` tag:
-```
+
+```bash
 myth_extract artsound.gor 03di 5 5 diversion.bmp
 ```
 
@@ -388,6 +414,7 @@ Myth stores all game data in `.gor` archive files (`artsound.gor`, `tags.gor`).
 Texture maps live in `.256` tags inside these files.
 
 Each `.256` tag has:
+
 - A **320-byte header** (`_256Header`) describing the layout
 - A **2080-byte palette** (256 RGB colors, each stored as `uint8_t r, _, g, _, b, _, flag, _`)
 - A **section table** (128 bytes per entry) — one entry per tile in the mesh grid
