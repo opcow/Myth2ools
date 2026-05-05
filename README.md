@@ -26,11 +26,11 @@ The tools here were based on that old Metrowerks Codewarrior project. First work
 
 ## New Workflow
 
-As with the original tools, a map maker can work with 2D images to draw in the terrain type flags, but we can use the displacement.obj in Blender to precisely create terrain flags at the triangle level.
+As with the original tools, a map maker can work with 2D images to draw in the terrain type flags, but we can use the displacement.obj in Blender to precisely create terrain flags in 3D at the triangle level.
 
 And, of course, you can use Blender to create or modify the 3D map surface.
 
-![New Workflow](images/blender_triangles.jpg)
+![New Workflow](images/blender_triangles.png)
 
 
 
