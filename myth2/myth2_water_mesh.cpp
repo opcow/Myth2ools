@@ -255,7 +255,7 @@ static void addFaceNormal(int i0, int i1, int i2,
 
 static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs) {
     std::string mtlPath = dirOf(objPath) + stemOf(objPath) + ".mtl";
-    std::string textureBmp = "terrain/water_mask.bmp";
+    std::string texturePath = "layers/03_water_mask.png";
 
     FILE* obj = fopen(objPath.c_str(), "w");
     if (!obj) {
@@ -319,7 +319,7 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs)
     fprintf(mtl, "Kd 1.0 1.0 1.0\n");
     fprintf(mtl, "Ks 0.0 0.0 0.0\n");
     fprintf(mtl, "illum 1\n");
-    fprintf(mtl, "map_Kd %s\n", textureBmp.c_str());
+    fprintf(mtl, "map_Kd %s\n", texturePath.c_str());
     fclose(mtl);
 
     fprintf(obj, "# Myth II water surface -- %s\n", mesh.meshTag.c_str());
@@ -379,7 +379,7 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs)
     printf("Height scale:  %.9f\n", hs);
     printf("OBJ written:   %s\n", objPath.c_str());
     printf("MTL written:   %s\n", mtlPath.c_str());
-    printf("Texture path:  %s\n", textureBmp.c_str());
+    printf("Texture path:  %s\n", texturePath.c_str());
     printf("Vertices:      %d\n", totalVerts);
     printf("Wet triangles: %d\n", totalFaces);
     return true;
