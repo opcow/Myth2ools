@@ -221,10 +221,29 @@ static bool readUnitTypes(const std::vector<uint8_t>& d, const MeshHeader& h,
 // Object instance record (64 bytes each)
 // ---------------------------------------------------------------------------
 
+// marker_data (64 bytes) — exact layout from markers.h / markers.cpp byte-swap data:
+//   [0:4]   flags (uint32)
+//   [4:6]   type (int16)  — marker type enum (6 = _marker_model = scenery w/ geometry)
+//   [6:8]   palette_index (int16)  — index into marker palette table
+//   [8:10]  identifier (int16)
+//   [10:12] minimum_difficulty_level (int16)
+//   [12:16] position.x (int32, world_distance, WORLD_FRACTIONAL_BITS=9)
+//   [16:20] position.y (int32, world_distance)
+//   [20:24] position.z (int32, world_distance = height above datum)
+//   [24:30] velocity (3 × int16)
+//   [30:32] height above ground (int16)
+//   [32:34] yaw (uint16, 0..65535 = full circle)
+//   [34:36] pitch (uint16)
+//   [36:52] user_data[16]
+//   [52:54] roll (uint16)
+//   [54:56] unused
+//   [56:60] render_chain ptr (zeroed on disk)
+//   [60:62] data_index (int16)
+//   [62:64] data_identifier (int16)
 struct ObjectInstance {
-    uint16_t typeIdx=0;
-    int32_t xWorld=0, yWorld=0, zWorld=0;
-    int32_t facing=0;
+    uint16_t paletteIdx=0;  // index into marker palette table
+    int32_t posX=0, posY=0, posZ=0;  // world_distance, >>9 gives cell coordinate
+    uint16_t yaw=0;  // 0..65535 = 0..360 degrees
 };
 
 static bool readInstances(const std::vector<uint8_t>& d, const MeshHeader& h,
@@ -234,11 +253,11 @@ static bool readInstances(const std::vector<uint8_t>& d, const MeshHeader& h,
         size_t off=base+(size_t)i*64;
         if (off+64>d.size()) return false;
         ObjectInstance inst;
-        inst.typeIdx = readBE16u(d.data(), off+4);
-        inst.xWorld  = readBE32s(d.data(), off+8);
-        inst.yWorld  = readBE32s(d.data(), off+12);
-        inst.zWorld  = readBE32s(d.data(), off+16);
-        inst.facing  = readBE32s(d.data(), off+20);
+        inst.paletteIdx = readBE16u(d.data(), off+6);   // palette_index
+        inst.posX       = readBE32s(d.data(), off+12);  // position.x
+        inst.posY       = readBE32s(d.data(), off+16);  // position.y
+        inst.posZ       = readBE32s(d.data(), off+20);  // position.z (height)
+        inst.yaw        = readBE16u(d.data(), off+32);  // yaw angle
         out.push_back(inst);
     }
     return true;
@@ -673,14 +692,14 @@ int main(int argc, char* argv[]) {
         fprintf(stderr,"Failed to read instance table\n"); return 1;
     }
 
-    // Build map from row index (0..count-1) -> UnitType.
-    // Instance type_idx is the row index into the unit type table, not the
-    // per-class typeIndex field stored in the record.
+    // Build map from palette index (0..count-1) -> UnitType.
+    // Instance paletteIdx is the row index into the marker palette table.
+    // Palette entry type==6 (_marker_model) identifies 3D scenery objects.
     std::map<uint16_t,const UnitType*> typeByIdx;
     for (size_t i=0; i<unitTypes.size(); i++)
         typeByIdx[(uint16_t)i] = &unitTypes[i];
 
-    // Filter scenery types (w0=6)
+    // Filter scenery types (w0=6 = _marker_model in palette)
     std::vector<const UnitType*> sceneryTypes;
     for (const auto& t: unitTypes)
         if (t.w0==6) sceneryTypes.push_back(&t);
@@ -709,16 +728,9 @@ int main(int argc, char* argv[]) {
 
     static const uint32_t GROUP_GEOM = 0x67656F6Du; // 'geom'
 
-    // Compute map_base_x from all instances
-    int32_t baseX = INT32_MAX;
-    for (const auto& inst: instances) {
-        auto it2 = typeByIdx.find(inst.typeIdx);
-        if (it2==typeByIdx.end() || it2->second->w0!=6) continue;
-        int32_t xi = inst.xWorld >> 16;
-        if (xi < baseX) baseX = xi;
-    }
-    if (baseX==INT32_MAX) baseX=0;
-    printf("Scenery base_x: %d\n\n", baseX);
+    // No base offset needed — posX/posY are world_distance values (WORLD_FRACTIONAL_BITS=9).
+    // Cell coordinate = posX >> 9 (integer part), sub-cell = posX & 511 (fraction).
+    // Use float division for smooth placement: cellX = posX / WORLD_ONE.
 
     // Create output directories
     makeDirs(outFolder+"/models");
@@ -791,26 +803,24 @@ int main(int argc, char* argv[]) {
     // ---- Write placement.json + build combined instance list ----
     std::string json;
     json += "{\n";
-    json += "  \"base_x\": ";
-    json += std::to_string(baseX);
-    json += ",\n";
     json += "  \"instances\": [\n";
 
     std::vector<PlacedInstance> placedInstances;
     bool firstInst=true;
 
     for (const auto& inst: instances) {
-        auto it2=typeByIdx.find(inst.typeIdx);
+        auto it2=typeByIdx.find(inst.paletteIdx);
         if (it2==typeByIdx.end() || it2->second->w0!=6) continue;
 
         const UnitType* t=it2->second;
         std::string tagStr=tagToString(t->typeTag);
 
-        float cellX = (float)((inst.xWorld>>16) - baseX);
-        float cellY = (float)inst.yWorld / 512.0f;
-        float cellZ = (float)inst.zWorld / 512.0f;
-        float facingDeg = (float)std::fmod(((double)(uint32_t)inst.facing / 65536.0) * 360.0, 360.0);
-        if (facingDeg < 0.0f) facingDeg += 360.0f;
+        // world_distance uses WORLD_FRACTIONAL_BITS=9 (WORLD_ONE=512).
+        // posX and posY are the horizontal cell axes; posZ is height (matches terrain physical_height).
+        float cellX = (float)inst.posX / WORLD_ONE;
+        float cellY = (float)inst.posY / WORLD_ONE;
+        float cellZ = (float)inst.posZ / WORLD_ONE;
+        float facingDeg = (float)(((double)inst.yaw / 65536.0) * 360.0);
 
         if (!firstInst) json += ",\n";
         firstInst=false;
@@ -821,8 +831,8 @@ int main(int argc, char* argv[]) {
         snprintf(buf,sizeof(buf),
                  ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
                  ", \"facing_deg\": %.4f"
-                 ", \"type_idx\": %d}",
-                 cellX, cellY, cellZ, facingDeg, (int)inst.typeIdx);
+                 ", \"pal_idx\": %d}",
+                 cellX, cellY, cellZ, facingDeg, (int)inst.paletteIdx);
         json += buf;
 
         // Accumulate for combined OBJ if geom was loaded
