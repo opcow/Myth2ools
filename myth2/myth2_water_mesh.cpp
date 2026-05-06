@@ -12,6 +12,9 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 static uint32_t swap32(uint32_t n) {
     return ((n & 0xFF000000u) >> 24) | ((n & 0x00FF0000u) >> 8)
@@ -253,9 +256,18 @@ static void addFaceNormal(int i0, int i1, int i2,
     nx[i2] += cx; ny[i2] += cy; nz[i2] += cz;
 }
 
-static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs) {
+static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
+                     const std::string& folder) {
     std::string mtlPath = dirOf(objPath) + stemOf(objPath) + ".mtl";
-    std::string texturePath = "layers/03_water_mask.png";
+
+    std::string texName = "water_mask.png";
+    std::string texDest = dirOf(objPath) + "textures/" + texName;
+    std::error_code ec;
+    fs::create_directories(dirOf(objPath) + "textures", ec);
+    std::string texSrc = folder + "/layers/03_water_mask.png";
+    if (fs::exists(texSrc))
+        fs::copy_file(texSrc, texDest, fs::copy_options::overwrite_existing, ec);
+    std::string texturePath = fs::exists(texDest) ? ("textures/" + texName) : (folder + "/layers/03_water_mask.png");
 
     FILE* obj = fopen(objPath.c_str(), "w");
     if (!obj) {
@@ -412,7 +424,9 @@ int main(int argc, char** argv) {
     Manifest manifest;
     if (!readManifest(folder + "/manifest.json", manifest)) return 1;
 
-    std::string objPath = argc >= 3 ? argv[2] : (folder + "/water.obj");
+    std::string objPath = argc >= 3 ? argv[2] : (folder + "/models/water.obj");
+    std::error_code ec;
+    fs::create_directories(fs::path(objPath).parent_path(), ec);
 
     printf("Myth II Water Surface Exporter\n");
     printf("==============================\n");
@@ -421,7 +435,7 @@ int main(int argc, char** argv) {
 
     MeshInfo mesh;
     if (!readMesh(folder, mesh)) return 1;
-    if (!writeOBJ(objPath, mesh, heightScale)) return 1;
+    if (!writeOBJ(objPath, mesh, heightScale, folder)) return 1;
 
     printf("\nDone.\n");
     return 0;
