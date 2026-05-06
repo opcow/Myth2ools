@@ -532,9 +532,70 @@ struct PlacedInstance {
     float halfW, halfH; // half grid dimensions, for terrain-matching coordinate transform
 };
 
+// Append a terrain OBJ (displacement.obj) into the combined OBJ string,
+// re-indexing all face indices by the current vBase/vtBase/vnBase offsets.
+static void appendTerrainOBJ(const std::string& terrainObjPath,
+                              std::string& obj,
+                              int vBase, int vtBase, int vnBase) {
+    FILE* f = fopen(terrainObjPath.c_str(), "r");
+    if (!f) {
+        fprintf(stderr, "Warning: could not open terrain OBJ: %s\n", terrainObjPath.c_str());
+        return;
+    }
+
+    // Collect mtllib reference from terrain file to include in combined header
+    // (already handled by caller; here we just emit geometry)
+    obj += "o terrain\ng terrain\n";
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        std::string s(line);
+        // Strip trailing newline
+        while (!s.empty() && (s.back()=='\n'||s.back()=='\r')) s.pop_back();
+
+        if (s.substr(0,2)=="v " || s.substr(0,3)=="vt " || s.substr(0,3)=="vn ") {
+            obj += s; obj += '\n';
+        } else if (s.substr(0,7)=="usemtl ") {
+            obj += s; obj += '\n';
+        } else if (s.substr(0,2)=="f ") {
+            // Re-index: each token after "f " is v/vt/vn or v//vn or v
+            obj += "f";
+            const char* p = s.c_str() + 2;
+            while (*p) {
+                while (*p==' ') ++p;
+                if (!*p) break;
+                // parse v[/vt[/vn]]
+                char* end;
+                long v = strtol(p, &end, 10);  p = end;
+                long vt = 0, vn = 0;
+                if (*p=='/') {
+                    ++p;
+                    if (*p!='/') { vt = strtol(p, &end, 10); p = end; }
+                    if (*p=='/') { ++p; vn = strtol(p, &end, 10); p = end; }
+                }
+                char tok[64];
+                if (vn && vt)
+                    snprintf(tok,sizeof(tok)," %ld/%ld/%ld", v+vBase-1, vt+vtBase-1, vn+vnBase-1);
+                else if (vt)
+                    snprintf(tok,sizeof(tok)," %ld/%ld", v+vBase-1, vt+vtBase-1);
+                else if (vn)
+                    snprintf(tok,sizeof(tok)," %ld//%ld", v+vBase-1, vn+vnBase-1);
+                else
+                    snprintf(tok,sizeof(tok)," %ld", v+vBase-1);
+                obj += tok;
+            }
+            obj += '\n';
+        }
+        // skip comments, mtllib, o, g lines from terrain file
+    }
+    fclose(f);
+    obj += '\n';
+}
+
 static bool exportCombinedOBJ(const std::string& objPath,
                                const std::string& mtlPath,
-                               const std::vector<PlacedInstance>& instances) {
+                               const std::vector<PlacedInstance>& instances,
+                               const std::string& terrainObjPath = "") {
     // MTL: one entry per instance+material combination (typeTag_instIdx_matname).
     // Using per-instance names avoids any cross-instance material sharing in Blender.
     std::string mtl;
@@ -552,8 +613,14 @@ static bool exportCombinedOBJ(const std::string& objPath,
     writeText(mtlPath, mtl);
 
     std::string obj;
-    obj += "# Myth II combined map scenery\nmtllib ";
+    obj += "# Myth II combined map scenery + terrain\nmtllib ";
     obj += fs::path(mtlPath).filename().string();
+    if (!terrainObjPath.empty()) {
+        // Also reference the terrain MTL (assumed to be displacement.mtl alongside displacement.obj)
+        fs::path tp(terrainObjPath);
+        std::string terrainMtl = tp.stem().string() + ".mtl";
+        obj += "\nmtllib " + terrainMtl;
+    }
     obj += "\n\n";
 
     int vBase = 1;  // 1-based OBJ vertex counter
@@ -651,6 +718,9 @@ static bool exportCombinedOBJ(const std::string& objPath,
         obj += "\n";
     }
 
+    if (!terrainObjPath.empty())
+        appendTerrainOBJ(terrainObjPath, obj, vBase, uvBase, 1);
+
     return writeText(objPath, obj);
 }
 
@@ -676,7 +746,7 @@ static void usage(const char* p) {
     fprintf(stderr,
         "Myth II 3D Model Extractor\n\n"
         "Usage:\n"
-        "  %s <tags_folder> <out_folder>\n\n"
+        "  %s <tags_folder> <out_folder> [terrain.obj]\n\n"
         "Arguments:\n"
         "  tags_folder   folder containing Myth II tag files (e.g. 'small install')\n"
         "  out_folder    extracted map folder (e.g. out/le3e, must contain raw/mesh_tag.bin)\n\n"
@@ -688,10 +758,11 @@ static void usage(const char* p) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc!=3) { usage(argv[0]); return 1; }
+    if (argc!=3 && argc!=4) { usage(argv[0]); return 1; }
 
-    std::string tagsFolder = argv[1];
-    std::string outFolder  = argv[2];
+    std::string tagsFolder   = argv[1];
+    std::string outFolder    = argv[2];
+    std::string terrainObjPath = argc==4 ? argv[3] : "";
     // trim trailing slashes
     while (!tagsFolder.empty() && (tagsFolder.back()=='/'||tagsFolder.back()=='\\'))
         tagsFolder.pop_back();
@@ -943,9 +1014,10 @@ int main(int argc, char* argv[]) {
     if (!placedInstances.empty()) {
         std::string combinedObj = outFolder+"/models/map_combined.obj";
         std::string combinedMtl = outFolder+"/models/map_combined.mtl";
-        if (exportCombinedOBJ(combinedObj, combinedMtl, placedInstances))
-            printf("Combined map:    %s (%zu instances)\n",
-                   combinedObj.c_str(), placedInstances.size());
+        if (exportCombinedOBJ(combinedObj, combinedMtl, placedInstances, terrainObjPath))
+            printf("Combined map:    %s (%zu instances%s)\n",
+                   combinedObj.c_str(), placedInstances.size(),
+                   terrainObjPath.empty() ? "" : " + terrain");
     }
 
     return 0;
