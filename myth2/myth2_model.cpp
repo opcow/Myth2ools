@@ -598,8 +598,8 @@ static bool exportCombinedOBJ(const std::string& objPath,
             float rx =  cosF * mx - sinF * my;
             float ry =  sinF * mx + cosF * my;
             float rz = mz;
-            // Translate to placement position
-            float wx = rx + inst.cellX;
+            // Translate to placement position (negate cellX to mirror map on X axis)
+            float wx = rx + (-inst.cellX);
             float wy = ry + inst.cellY;
             float wz = rz + inst.cellZ;
             // Emit in OBJ coordinate convention (X right, Y=Z_world up, Z=-Y_world)
@@ -915,6 +915,8 @@ int main(int argc, char* argv[]) {
             pi.cellX      = cellX;
             pi.cellY      = cellY;
             pi.cellZ      = cellZ;
+            // Myth II yaw=0 points along +Y (into screen). In our OBJ convention the
+            // model's default forward is +X, so we add 90° to align the coordinate frames.
             pi.facingRad  = facingDeg * (float)(PI / 180.0);
             placedInstances.push_back(pi);
         }
