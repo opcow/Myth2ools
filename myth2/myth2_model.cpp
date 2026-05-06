@@ -240,9 +240,34 @@ static bool readUnitTypes(const std::vector<uint8_t>& d, const MeshHeader& h,
 //   [56:60] render_chain ptr (zeroed on disk)
 //   [60:62] data_index (int16)
 //   [62:64] data_identifier (int16)
+// marker_data (64 bytes) — exact layout from markers.h / markers.cpp byte-swap data:
+//   [0:4]   flags (uint32)
+//   [4:6]   type (int16)  — marker type enum:
+//             0=team, 1=scenery(collision), 3=monster, 5=effect, 6=_marker_model(placed 3D), 9=netgame, 11=local_ctrl
+//   [6:8]   palette_index (int16)  — index into marker palette table
+//   [8:10]  identifier (int16)
+//   [10:12] minimum_difficulty_level (int16)
+//   [12:16] position.x (int32, world_distance, WORLD_FRACTIONAL_BITS=9)
+//   [16:20] position.y (int32, world_distance)
+//   [20:24] position.z (int32, world_distance = height above datum, matches cell.physical_height)
+//   [24:30] velocity (3 × int16)
+//   [30:32] height above ground (int16)
+//   [32:34] yaw (uint16, 0..65535 = full circle)
+//   [34:36] pitch (uint16)
+//   [36:52] user_data[16]
+//   [52:54] roll (uint16)
+//   [54:56] unused
+//   [56:60] render_chain ptr (zeroed on disk)
+//   [60:62] data_index (int16)
+//   [62:64] data_identifier (int16)
+//
+// Only markers with markerType==6 (_marker_model) are actual placed 3D scenery instances.
+// Other types (1=collision marker, 3=monster with model ref) use the same struct but are not
+// placed scenery.
 struct ObjectInstance {
+    int16_t  markerType=0;  // instance's own type: 6 = _marker_model (placed 3D scenery)
     uint16_t paletteIdx=0;  // index into marker palette table
-    int32_t posX=0, posY=0, posZ=0;  // world_distance, >>9 gives cell coordinate
+    int32_t posX=0, posY=0, posZ=0;  // world_distance, /512 gives cell coordinate
     uint16_t yaw=0;  // 0..65535 = 0..360 degrees
 };
 
@@ -253,6 +278,7 @@ static bool readInstances(const std::vector<uint8_t>& d, const MeshHeader& h,
         size_t off=base+(size_t)i*64;
         if (off+64>d.size()) return false;
         ObjectInstance inst;
+        inst.markerType = readBE16s(d.data(), off+4);   // marker type
         inst.paletteIdx = readBE16u(d.data(), off+6);   // palette_index
         inst.posX       = readBE32s(d.data(), off+12);  // position.x
         inst.posY       = readBE32s(d.data(), off+16);  // position.y
@@ -503,15 +529,15 @@ struct PlacedInstance {
 static bool exportCombinedOBJ(const std::string& objPath,
                                const std::string& mtlPath,
                                const std::vector<PlacedInstance>& instances) {
-    // MTL: one entry per unique material name (prefixed by type to avoid collisions)
+    // MTL: one entry per instance+material combination (typeTag_instIdx_matname).
+    // Using per-instance names avoids any cross-instance material sharing in Blender.
     std::string mtl;
-    std::set<std::string> writtenMats;
-    for (const auto& inst: instances) {
-        for (const auto& mat: inst.geom->materials) {
-            std::string qname = inst.typeTag + "_" +
-                                (mat.name.empty() ? "mat" : mat.name);
-            if (writtenMats.count(qname)) continue;
-            writtenMats.insert(qname);
+    for (size_t ii = 0; ii < instances.size(); ii++) {
+        const PlacedInstance& inst = instances[ii];
+        for (size_t mi = 0; mi < inst.geom->materials.size(); mi++) {
+            const auto& mat = inst.geom->materials[mi];
+            std::string qname = inst.typeTag + "_" + std::to_string(ii) + "_" +
+                                (mat.name.empty() ? "mat" + std::to_string(mi) : mat.name);
             mtl += "newmtl " + qname + "\n";
             mtl += "Ka 1.0 1.0 1.0\nKd 1.0 1.0 1.0\nKs 0.0 0.0 0.0\nillum 1\n";
             mtl += "# collection: " + tagToString(inst.geom->collectionRefTag) + "\n\n";
@@ -560,7 +586,9 @@ static bool exportCombinedOBJ(const std::string& objPath,
         float sinF = std::sin(inst.facingRad);
 
         char buf[128];
-        obj += "# instance " + std::to_string(instIdx) + " " + inst.typeTag + "\n";
+        // Named object + group per instance so Blender keeps each mesh separate
+        std::string instName = inst.typeTag + "_" + std::to_string(instIdx);
+        obj += "o " + instName + "\ng " + instName + "\n";
         for (const auto& vtx: g.vertices) {
             // Scale from world units to cell units
             float mx = vtx.x / WORLD_ONE;
@@ -591,11 +619,11 @@ static bool exportCombinedOBJ(const std::string& objPath,
         for (const auto& tri: tris) {
             std::string matName;
             if (tri.mat >= 0 && tri.mat < (int)g.materials.size())
-                matName = inst.typeTag + "_" +
+                matName = inst.typeTag + "_" + std::to_string(instIdx) + "_" +
                           (g.materials[tri.mat].name.empty()
                            ? "mat" + std::to_string(tri.mat)
                            : g.materials[tri.mat].name);
-            else matName = inst.typeTag + "_unknown";
+            else matName = inst.typeTag + "_" + std::to_string(instIdx) + "_unknown";
 
             if (matName != lastMat) {
                 obj += "usemtl " + matName + "\n";
@@ -692,14 +720,18 @@ int main(int argc, char* argv[]) {
         fprintf(stderr,"Failed to read instance table\n"); return 1;
     }
 
-    // Build map from palette index (0..count-1) -> UnitType.
-    // Instance paletteIdx is the row index into the marker palette table.
-    // Palette entry type==6 (_marker_model) identifies 3D scenery objects.
-    std::map<uint16_t,const UnitType*> typeByIdx;
-    for (size_t i=0; i<unitTypes.size(); i++)
-        typeByIdx[(uint16_t)i] = &unitTypes[i];
+    // The on-disk marker.palette_index is type-relative: it counts how many palette
+    // entries of the same type (marker_data.type) precede the referenced entry.
+    // This matches the Myth II engine's save/load format (confirmed in TMeshForm.cpp).
+    // To resolve: for marker with (markerType=T, palette_index=N),
+    // find the Nth palette entry where palette_entry.w0 == T.
+    //
+    // Build per-marker-type ordered list: markerTypeRelIdx[T][N] -> &UnitType
+    std::map<int16_t, std::vector<const UnitType*>> typeRelIdx;
+    for (const auto& t: unitTypes)
+        typeRelIdx[(int16_t)t.w0].push_back(&t);
 
-    // Filter scenery types (w0=6 = _marker_model in palette)
+    // Also build a flat helper for scenery export (all type-6 palette entries in order)
     std::vector<const UnitType*> sceneryTypes;
     for (const auto& t: unitTypes)
         if (t.w0==6) sceneryTypes.push_back(&t);
@@ -727,6 +759,7 @@ int main(int argc, char* argv[]) {
     printf("Tags loaded: %zu entries\n\n", tags.size());
 
     static const uint32_t GROUP_GEOM = 0x67656F6Du; // 'geom'
+    static const uint32_t GROUP_MODE = 0x6d6f6465u; // 'mode'
 
     // No base offset needed — posX/posY are world_distance values (WORLD_FRACTIONAL_BITS=9).
     // Cell coordinate = posX >> 9 (integer part), sub-cell = posX & 511 (fraction).
@@ -740,34 +773,54 @@ int main(int argc, char* argv[]) {
     std::map<uint32_t,Geometry> geomCache;  // typeTag -> loaded geometry
     int modelsExported=0, spritesSkipped=0;
 
-    printf("%-8s  %-6s  %-7s  %-7s  %-7s  %s\n",
-           "tag","class","verts","surfs","tris","result");
-    printf("%s\n", std::string(60,'-').c_str());
+    printf("%-8s  %-12s  %-7s  %-7s  %-7s  %s\n",
+           "tag","geom_ref","verts","surfs","tris","result");
+    printf("%s\n", std::string(68,'-').c_str());
 
     for (const auto* t: sceneryTypes) {
         std::string tagStr = tagToString(t->typeTag);
         if (exportedTypes.count(t->typeTag)) continue;
         exportedTypes.insert(t->typeTag);
 
-        const TagEntry* geomEntry = findTag(tags, GROUP_GEOM, t->typeTag);
+        // Resolve geom via the mode tag: mode.geometry_tag -> geom subgroup.
+        // Direct lookup by type_tag would find wrong geom tags from other maps
+        // (e.g. 'corn' -> cornerWall_geom, 'oute' -> outerWallSep_geom).
+        const TagEntry* modeEntry = findTag(tags, GROUP_MODE, t->typeTag);
+        if (!modeEntry) {
+            printf("%-8s  %-12s  %-7s  %-7s  %-7s  SPRITE (no mode tag)\n",
+                   tagStr.c_str(), "-", "-", "-", "-");
+            spritesSkipped++;
+            continue;
+        }
+        std::vector<uint8_t> modeData;
+        if (!readTagData(*modeEntry, modeData) || modeData.size() < 8) {
+            printf("%-8s  %-12s  %-7s  %-7s  %-7s  ERROR reading mode\n",
+                   tagStr.c_str(), "-", "-", "-", "-");
+            continue;
+        }
+        // model_definition header: [4:8] geometry_tag (subgroup ID of the geom tag)
+        uint32_t geomRefTag = readBE32u(modeData.data(), 4);
+        std::string geomRefStr = tagToString(geomRefTag);
+
+        const TagEntry* geomEntry = findTag(tags, GROUP_GEOM, geomRefTag);
         if (!geomEntry) {
-            printf("%-8s  %-6d  %-7s  %-7s  %-7s  SPRITE (no geom tag)\n",
-                   tagStr.c_str(), t->w0, "-", "-", "-");
+            printf("%-8s  %-12s  %-7s  %-7s  %-7s  SPRITE (no geom tag)\n",
+                   tagStr.c_str(), geomRefStr.c_str(), "-", "-", "-");
             spritesSkipped++;
             continue;
         }
 
         std::vector<uint8_t> geomData;
         if (!readTagData(*geomEntry, geomData)) {
-            printf("%-8s  %-6d  %-7s  %-7s  %-7s  ERROR reading geom\n",
-                   tagStr.c_str(), t->w0, "-", "-", "-");
+            printf("%-8s  %-12s  %-7s  %-7s  %-7s  ERROR reading geom\n",
+                   tagStr.c_str(), geomRefStr.c_str(), "-", "-", "-");
             continue;
         }
 
         Geometry g;
         if (!parseGeometry(geomData, g)) {
-            printf("%-8s  %-6d  %-7s  %-7s  %-7s  ERROR parsing geom\n",
-                   tagStr.c_str(), t->w0, "-", "-", "-");
+            printf("%-8s  %-12s  %-7s  %-7s  %-7s  ERROR parsing geom\n",
+                   tagStr.c_str(), geomRefStr.c_str(), "-", "-", "-");
             continue;
         }
 
@@ -786,8 +839,8 @@ int main(int argc, char* argv[]) {
         std::string mtlPath = outFolder+"/models/"+tagStr+".mtl";
 
         bool ok = exportOBJ(objPath, mtlPath, tagStr, g);
-        printf("%-8s  %-6d  %-7d  %-7d  %-7d  %s (coll: %s)\n",
-               tagStr.c_str(), t->w0,
+        printf("%-8s  %-12s  %-7d  %-7d  %-7d  %s (coll: %s)\n",
+               tagStr.c_str(), geomRefStr.c_str(),
                (int)g.vertices.size(), (int)g.surfaces.size(), validTris,
                ok ? "OK" : "FAILED",
                tagToString(g.collectionRefTag).c_str());
@@ -808,11 +861,25 @@ int main(int argc, char* argv[]) {
     std::vector<PlacedInstance> placedInstances;
     bool firstInst=true;
 
-    for (const auto& inst: instances) {
-        auto it2=typeByIdx.find(inst.paletteIdx);
-        if (it2==typeByIdx.end() || it2->second->w0!=6) continue;
+    printf("%-5s  %-6s  %-8s  %-8s  %-8s  %-8s  %s\n",
+           "inst","pal","tag","x","y","z","facing");
+    printf("%s\n", std::string(60,'-').c_str());
 
-        const UnitType* t=it2->second;
+    for (size_t ii=0; ii<instances.size(); ii++) {
+        const auto& inst = instances[ii];
+        // Only _marker_model (type 6) markers are actual placed 3D scenery instances.
+        // Other types (1=collision marker, 3=monster ref) are not visual placements.
+        if (inst.markerType != 6) continue;
+
+        // Resolve type-relative palette_index -> UnitType
+        // palette_index is the Nth entry in the palette where entry.w0 == markerType
+        auto itTR = typeRelIdx.find(inst.markerType);
+        if (itTR == typeRelIdx.end()) continue;
+        const auto& sameTypeEntries = itTR->second;
+        if ((size_t)inst.paletteIdx >= sameTypeEntries.size()) continue;
+        const UnitType* t = sameTypeEntries[inst.paletteIdx];
+        if (t->w0 != 6) continue;  // should always be true since markerType==6
+
         std::string tagStr=tagToString(t->typeTag);
 
         // world_distance uses WORLD_FRACTIONAL_BITS=9 (WORLD_ONE=512).
@@ -821,6 +888,10 @@ int main(int argc, char* argv[]) {
         float cellY = (float)inst.posY / WORLD_ONE;
         float cellZ = (float)inst.posZ / WORLD_ONE;
         float facingDeg = (float)(((double)inst.yaw / 65536.0) * 360.0);
+
+        printf("%-5zu  %-6d  %-8s  %-8.2f  %-8.2f  %-8.2f  %.1f\n",
+               ii, (int)inst.paletteIdx, tagStr.c_str(),
+               cellX, cellY, cellZ, facingDeg);
 
         if (!firstInst) json += ",\n";
         firstInst=false;
@@ -831,8 +902,8 @@ int main(int argc, char* argv[]) {
         snprintf(buf,sizeof(buf),
                  ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
                  ", \"facing_deg\": %.4f"
-                 ", \"pal_idx\": %d}",
-                 cellX, cellY, cellZ, facingDeg, (int)inst.paletteIdx);
+                 ", \"pal_idx\": %d, \"marker_idx\": %zu}",
+                 cellX, cellY, cellZ, facingDeg, (int)inst.paletteIdx, ii);
         json += buf;
 
         // Accumulate for combined OBJ if geom was loaded
@@ -848,6 +919,7 @@ int main(int argc, char* argv[]) {
             placedInstances.push_back(pi);
         }
     }
+    printf("\n");
 
     json += "\n  ]\n}\n";
 
