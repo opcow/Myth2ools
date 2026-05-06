@@ -28,6 +28,15 @@
 #include <algorithm>
 #include <filesystem>
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#include <objidl.h>
+#include <wincodec.h>
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "windowscodecs.lib")
+#endif
+
 namespace fs = std::filesystem;
 
 // ---------------------------------------------------------------------------
@@ -96,6 +105,152 @@ static bool writeText(const std::string& path, const std::string& text) {
 
 static void makeDirs(const std::string& path) {
     fs::create_directories(path);
+}
+
+static bool writePNG(const std::string& path, const std::vector<uint8_t>& rgba, int w, int h) {
+#ifdef _WIN32
+    IWICImagingFactory* factory = nullptr;
+    IWICBitmapEncoder* encoder = nullptr;
+    IWICBitmapFrameEncode* frame = nullptr;
+    IPropertyBag2* props = nullptr;
+    IStream* stream = nullptr;
+    HGLOBAL hMem = nullptr;
+    bool coInit = false;
+
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (SUCCEEDED(hr)) coInit = true;
+    else if (hr != RPC_E_CHANGED_MODE) return false;
+
+    auto cleanup = [&]() {
+        if (props) props->Release();
+        if (frame) frame->Release();
+        if (encoder) encoder->Release();
+        if (stream) stream->Release();
+        if (factory) factory->Release();
+        if (coInit) CoUninitialize();
+    };
+
+    hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
+    if (FAILED(hr)) { cleanup(); return false; }
+    hr = CreateStreamOnHGlobal(nullptr, TRUE, &stream);
+    if (FAILED(hr)) { cleanup(); return false; }
+    hr = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
+    if (FAILED(hr)) { cleanup(); return false; }
+    hr = encoder->Initialize(stream, WICBitmapEncoderNoCache);
+    if (FAILED(hr)) { cleanup(); return false; }
+    hr = encoder->CreateNewFrame(&frame, &props);
+    if (FAILED(hr)) { cleanup(); return false; }
+    hr = frame->Initialize(props);
+    if (FAILED(hr)) { cleanup(); return false; }
+    hr = frame->SetSize((UINT)w, (UINT)h);
+    if (FAILED(hr)) { cleanup(); return false; }
+    WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppBGRA;
+    hr = frame->SetPixelFormat(&fmt);
+    if (FAILED(hr) || fmt != GUID_WICPixelFormat32bppBGRA) { cleanup(); return false; }
+
+    std::vector<uint8_t> bgra((size_t)w * h * 4);
+    for (int i = 0; i < w * h; i++) {
+        bgra[(size_t)i*4+0] = rgba[(size_t)i*4+2];
+        bgra[(size_t)i*4+1] = rgba[(size_t)i*4+1];
+        bgra[(size_t)i*4+2] = rgba[(size_t)i*4+0];
+        bgra[(size_t)i*4+3] = rgba[(size_t)i*4+3];
+    }
+    hr = frame->WritePixels((UINT)h, (UINT)(w*4), (UINT)bgra.size(), bgra.data());
+    if (FAILED(hr)) { cleanup(); return false; }
+    hr = frame->Commit();
+    if (FAILED(hr)) { cleanup(); return false; }
+    hr = encoder->Commit();
+    if (FAILED(hr)) { cleanup(); return false; }
+
+    hr = GetHGlobalFromStream(stream, &hMem);
+    if (FAILED(hr) || !hMem) { cleanup(); return false; }
+    SIZE_T sz = GlobalSize(hMem);
+    const void* mem = GlobalLock(hMem);
+    if (!mem || sz == 0) { if (mem) GlobalUnlock(hMem); cleanup(); return false; }
+
+    FILE* f = fopen(path.c_str(), "wb");
+    bool ok = f && (fwrite(mem, 1, sz, f) == sz);
+    if (f) fclose(f);
+    GlobalUnlock(hMem);
+    cleanup();
+    return ok;
+#else
+    (void)path; (void)rgba; (void)w; (void)h;
+    return false;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// .256 collection texture extraction
+// ---------------------------------------------------------------------------
+// Extracts a single palette-indexed bitmap frame from a Myth II .256 collection
+// tag (COLORMAP type) and writes it as a PNG.
+//
+// The .256 header (320 bytes, all BE) layout used here:
+//   [4]   type  (256 = COLORMAP, 12 = sprite)
+//   [68]  palette_offset  (from bulk_offset)
+//   [96]  num_sectioninfo
+//   [100] sectioninfo_offset  (from bulk_offset)
+//   [256] bulk_offset  (from start of tag data)
+//
+// Each sectioninfo is 128 bytes:
+//   [64] imagedata_offset  (from bulk_offset)
+//   [68] imagedata_length
+//
+// Each image is preceded by a 52-byte bitmapinfo header:
+//   [18] img_x  (int16 BE, width)
+//   [20] img_y  (int16 BE, height)
+//
+// Palette: 2080 bytes at bulk_offset + palette_offset:
+//   [0:4]   num_colors (int32 BE)
+//   [32:]   color[256], each 8 bytes: r,fr,g,fg,b,fb,flag,ff
+
+static bool extractDot256Texture(const std::vector<uint8_t>& d,
+                                  int seqIndex,
+                                  const std::string& outPng) {
+    if (d.size() < 320) return false;
+    const uint8_t* hdr = d.data();
+
+    int32_t bulkOff    = readBE32s(hdr, 248);
+    int32_t palOff     = readBE32s(hdr, 68);
+    int32_t numSec     = readBE32s(hdr, 96);
+    int32_t secOff     = readBE32s(hdr, 100);
+
+    if (seqIndex < 0 || seqIndex >= numSec) return false;
+
+    // Palette: 2080 bytes — at bulkOff + palOff, skip 32-byte palette header to reach color[0]
+    size_t palAbs = (size_t)(bulkOff + palOff);
+    if (palAbs + 2080 > d.size()) return false;
+    const uint8_t* palData = d.data() + palAbs + 32;
+
+    // sectioninfo for this sequence (128 bytes each)
+    // [64] imagedata_offset (from bulkOff), [68] imagedata_length
+    // [76] width (int16 BE), [78] height (int16 BE)
+    size_t secBase = (size_t)(bulkOff + secOff);
+    size_t secEntry = secBase + (size_t)seqIndex * 128;
+    if (secEntry + 128 > d.size()) return false;
+    int32_t imgDataOff = readBE32s(d.data(), secEntry + 64);
+    int w = (int)readBE16s(d.data(), secEntry + 76);
+    int h = (int)readBE16s(d.data(), secEntry + 78);
+    if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return false;
+
+    // Pixel data follows the 52-byte bitmapinfo header
+    size_t pixAbs = (size_t)(bulkOff + imgDataOff) + 52;
+    if (pixAbs + (size_t)w * h > d.size()) return false;
+    const uint8_t* pix = d.data() + pixAbs;
+
+    // Decode indexed pixels to RGBA using Myth palette (r,fr,g,fg,b,fb,flag,ff per entry)
+    std::vector<uint8_t> rgba((size_t)w * h * 4);
+    for (int i = 0; i < w * h; i++) {
+        uint8_t idx = pix[i];
+        const uint8_t* c = palData + (size_t)idx * 8;
+        rgba[(size_t)i*4+0] = c[0]; // r
+        rgba[(size_t)i*4+1] = c[2]; // g
+        rgba[(size_t)i*4+2] = c[4]; // b
+        rgba[(size_t)i*4+3] = 255;
+    }
+
+    return writePNG(outPng, rgba, w, h);
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +467,8 @@ struct GeomSurface {
 
 struct GeomMaterial {
     std::string name;
+    int16_t sequenceIndex = 0;  // index into .256 collection sectioninfo array
+    std::string texturePng;     // path to extracted PNG (filled after extraction)
 };
 
 struct Geometry {
@@ -344,13 +501,14 @@ static bool parseGeometry(const std::vector<uint8_t>& d, Geometry& g) {
     size_t vtxAbs = dataOff + vtxRelOff;
     size_t srfAbs = dataOff + srfRelOff;
 
-    // Materials: 64 bytes each, name at [0:32]
+    // Materials: 64 bytes each, name at [0:32], sequence_index at [32:34]
     if (matAbs + (size_t)matCount*64 > d.size()) return false;
     g.materials.resize(matCount);
     for (int i=0; i<matCount; i++) {
         size_t o=matAbs+(size_t)i*64;
         g.materials[i].name=std::string((const char*)d.data()+o,
                                         strnlen((const char*)d.data()+o,32));
+        g.materials[i].sequenceIndex = readBE16s(d.data(), o+32);
     }
 
     // Vertices: 6 bytes each — x,y,z as int16
@@ -399,6 +557,9 @@ static bool parseGeometry(const std::vector<uint8_t>& d, Geometry& g) {
     return true;
 }
 
+// WORLD_ONE: raw vertex units per mesh cell (WORLD_FRACTIONAL_BITS=9 → 1<<9=512).
+static constexpr float WORLD_ONE = 512.0f;
+
 // ---------------------------------------------------------------------------
 // OBJ / MTL export
 // ---------------------------------------------------------------------------
@@ -439,17 +600,20 @@ static bool exportOBJ(const std::string& objPath, const std::string& mtlPath,
     {
         std::string mtl;
         for (int i=0; i<(int)g.materials.size(); i++) {
+            const auto& mat = g.materials[i];
             mtl += "newmtl ";
-            mtl += (g.materials[i].name.empty() ? "mat"+std::to_string(i) : g.materials[i].name);
+            mtl += (mat.name.empty() ? "mat"+std::to_string(i) : mat.name);
             mtl += "\n";
             mtl += "Ka 1.0 1.0 1.0\n";
             mtl += "Kd 1.0 1.0 1.0\n";
             mtl += "Ks 0.0 0.0 0.0\n";
             mtl += "illum 1\n";
-            // texture reference: caller can add map_Kd lines after extraction
-            mtl += "# collection: ";
-            mtl += tagToString(g.collectionRefTag);
-            mtl += "\n\n";
+            if (!mat.texturePng.empty()) {
+                mtl += "map_Kd ";
+                mtl += fs::path(mat.texturePng).filename().string();
+                mtl += "\n";
+            }
+            mtl += "\n";
         }
         writeText(mtlPath, mtl);
     }
@@ -463,11 +627,14 @@ static bool exportOBJ(const std::string& objPath, const std::string& mtlPath,
         obj += fs::path(mtlPath).filename().string();
         obj += "\n\n";
 
-        // Vertices: Myth II coordinate system is X right, Y into screen, Z up.
-        // Export as X=x, Y=z (height), Z=-y so Blender Z-up import looks correct.
+        // Subtract center, scale to cell units, mirror X to match map convention.
+        // Emit as OBJ X/Y/Z = world X, height, world Y (Blender Z-up import).
         for (const auto& vtx: g.vertices) {
+            float mx = -((vtx.x - g.cx) / WORLD_ONE);
+            float my =   (vtx.y - g.cy) / WORLD_ONE;
+            float mz =   (vtx.z - g.cz) / WORLD_ONE;
             char buf[80];
-            snprintf(buf,sizeof(buf),"v %.6f %.6f %.6f\n", vtx.x, vtx.z, -vtx.y);
+            snprintf(buf,sizeof(buf),"v %.6f %.6f %.6f\n", mx, mz, my);
             obj += buf;
         }
         obj += "\n";
@@ -519,9 +686,6 @@ static bool exportOBJ(const std::string& objPath, const std::string& mtlPath,
 // Combined map OBJ export
 // ---------------------------------------------------------------------------
 
-// WORLD_ONE: raw vertex units per mesh cell. Oute spans 1024 world units and
-// fits visually in ~2 mesh cells, giving WORLD_ONE = 512.
-static constexpr float WORLD_ONE = 512.0f;
 static constexpr double PI = 3.14159265358979323846;
 
 struct PlacedInstance {
@@ -607,7 +771,12 @@ static bool exportCombinedOBJ(const std::string& objPath,
                                 (mat.name.empty() ? "mat" + std::to_string(mi) : mat.name);
             mtl += "newmtl " + qname + "\n";
             mtl += "Ka 1.0 1.0 1.0\nKd 1.0 1.0 1.0\nKs 0.0 0.0 0.0\nillum 1\n";
-            mtl += "# collection: " + tagToString(inst.geom->collectionRefTag) + "\n\n";
+            if (!mat.texturePng.empty()) {
+                mtl += "map_Kd ";
+                mtl += fs::path(mat.texturePng).filename().string();
+                mtl += "\n";
+            }
+            mtl += "\n";
         }
     }
     writeText(mtlPath, mtl);
@@ -902,6 +1071,26 @@ int main(int argc, char* argv[]) {
             printf("%-8s  %-12s  %-7s  %-7s  %-7s  ERROR parsing geom\n",
                    tagStr.c_str(), geomRefStr.c_str(), "-", "-", "-");
             continue;
+        }
+
+        // Extract textures from the .256 collection tag
+        static const uint32_t GROUP_256 = 0x2E323536u; // '.256'
+        const TagEntry* collEntry = findTag(tags, GROUP_256, g.collectionRefTag);
+        if (collEntry) {
+            std::vector<uint8_t> collData;
+            if (readTagData(*collEntry, collData)) {
+                std::string texDir = outFolder + "/models/textures";
+                makeDirs(texDir);
+                std::string collStr = tagToString(g.collectionRefTag);
+                for (auto& mat: g.materials) {
+                    std::string pngName = collStr + "_" + std::to_string(mat.sequenceIndex) + ".png";
+                    std::string pngPath = texDir + "/" + pngName;
+                    if (!fs::exists(pngPath))
+                        extractDot256Texture(collData, mat.sequenceIndex, pngPath);
+                    if (fs::exists(pngPath))
+                        mat.texturePng = pngPath;
+                }
+            }
         }
 
         // Count valid tris
