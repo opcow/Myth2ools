@@ -524,6 +524,7 @@ struct PlacedInstance {
     std::string typeTag;
     float cellX, cellY, cellZ;
     float facingRad;  // rotation around up axis
+    float halfW, halfH; // half grid dimensions, for terrain-matching coordinate transform
 };
 
 static bool exportCombinedOBJ(const std::string& objPath,
@@ -591,19 +592,21 @@ static bool exportCombinedOBJ(const std::string& objPath,
         obj += "o " + instName + "\ng " + instName + "\n";
         for (const auto& vtx: g.vertices) {
             // Scale from world units to cell units
-            float mx = vtx.x / WORLD_ONE;
+            float mx = -(vtx.x / WORLD_ONE);  // mirror geometry in X
             float my = vtx.y / WORLD_ONE;
             float mz = vtx.z / WORLD_ONE;
             // Rotate around Z (up) by facing angle
             float rx =  cosF * mx - sinF * my;
             float ry =  sinF * mx + cosF * my;
             float rz = mz;
-            // Translate to placement position (negate cellX to mirror map on X axis)
-            float wx = rx + (-inst.cellX);
-            float wy = ry + inst.cellY;
+            // Translate to placement position.
+            // Terrain mesh uses vx = halfW - cellX, vz = cellY - halfH (see myth2_mesh.cpp).
+            // Match that convention so models align with the terrain.
+            float wx = rx + (inst.halfW - inst.cellX);
+            float wy = ry + (inst.cellY - inst.halfH);
             float wz = rz + inst.cellZ;
-            // Emit in OBJ coordinate convention (X right, Y=Z_world up, Z=-Y_world)
-            snprintf(buf, sizeof(buf), "v %.6f %.6f %.6f\n", wx, wz, -wy);
+            // Match terrain OBJ convention: X=halfW-cellX, Z=cellY-halfH, Y=height
+            snprintf(buf, sizeof(buf), "v %.6f %.6f %.6f\n", wx, wz, wy);
             obj += buf;
         }
 
@@ -915,9 +918,9 @@ int main(int argc, char* argv[]) {
             pi.cellX      = cellX;
             pi.cellY      = cellY;
             pi.cellZ      = cellZ;
-            // Myth II yaw=0 points along +Y (into screen). In our OBJ convention the
-            // model's default forward is +X, so we add 90° to align the coordinate frames.
-            pi.facingRad  = facingDeg * (float)(PI / 180.0);
+            pi.facingRad  = (facingDeg - 90.0f) * (float)(PI / 180.0);
+            pi.halfW      = (float)(mh.submeshW * 32) * 0.5f;
+            pi.halfH      = (float)(mh.submeshH * 32) * 0.5f;
             placedInstances.push_back(pi);
         }
     }
