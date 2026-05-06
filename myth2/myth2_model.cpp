@@ -205,36 +205,83 @@ static bool writePNG(const std::string& path, const std::vector<uint8_t>& rgba, 
 //   [0:4]   num_colors (int32 BE)
 //   [32:]   color[256], each 8 bytes: r,fr,g,fg,b,fb,flag,ff
 
+// Returns the number of views in a sequence, or 0 on error.
+static int dot256SequenceViewCount(const std::vector<uint8_t>& d, int seqIndex) {
+    if (d.size() < 320) return 0;
+    int32_t bulkOff  = readBE32s(d.data(), 248);
+    int32_t seqCount = readBE32s(d.data(), 128);
+    int32_t seqOff   = readBE32s(d.data(), 132);
+    if (seqIndex < 0 || seqIndex >= seqCount) return 0;
+    size_t seqRefEntry = (size_t)(bulkOff + seqOff) + (size_t)seqIndex * 128;
+    if (seqRefEntry + 68 > d.size()) return 0;
+    int32_t seqDataOff = readBE32s(d.data(), seqRefEntry + 64);
+    size_t seqDataAbs = (size_t)(bulkOff + seqDataOff);
+    if (seqDataAbs + 12 > d.size()) return 0;
+    int16_t nv = readBE16s(d.data(), seqDataAbs + 8);
+    return nv > 0 ? nv : 1;
+}
+
+// Extract one view from a sequence in a .256 collection tag.
+// Follows: sequence_reference -> sequence_data -> sequence_frame_data ->
+//          bitmap_instance_indexes[viewIndex] -> bitmap_instance_data -> bitmap_reference -> pixels
 static bool extractDot256Texture(const std::vector<uint8_t>& d,
                                   int seqIndex,
+                                  int viewIndex,
                                   const std::string& outPng) {
     if (d.size() < 320) return false;
-    const uint8_t* hdr = d.data();
 
-    int32_t bulkOff    = readBE32s(hdr, 248);
-    int32_t palOff     = readBE32s(hdr, 68);
-    int32_t numSec     = readBE32s(hdr, 96);
-    int32_t secOff     = readBE32s(hdr, 100);
+    int32_t bulkOff        = readBE32s(d.data(), 248);
+    int32_t palOff         = readBE32s(d.data(), 68);   // color_tables_offset
+    int32_t bitmapCount    = readBE32s(d.data(), 96);
+    int32_t bitmapRefsOff  = readBE32s(d.data(), 100);
+    int32_t bitmapInstCount= readBE32s(d.data(), 112);
+    int32_t bitmapInstsOff = readBE32s(d.data(), 116);
+    int32_t seqCount       = readBE32s(d.data(), 128);
+    int32_t seqRefsOff     = readBE32s(d.data(), 132);
 
-    if (seqIndex < 0 || seqIndex >= numSec) return false;
+    if (seqIndex < 0 || seqIndex >= seqCount) return false;
 
-    // Palette: 2080 bytes — at bulkOff + palOff, skip 32-byte palette header to reach color[0]
+    // Palette: at bulkOff + palOff, skip 32-byte color_table header to reach color[0]
     size_t palAbs = (size_t)(bulkOff + palOff);
     if (palAbs + 2080 > d.size()) return false;
     const uint8_t* palData = d.data() + palAbs + 32;
 
-    // sectioninfo for this sequence (128 bytes each)
-    // [64] imagedata_offset (from bulkOff), [68] imagedata_length
-    // [76] width (int16 BE), [78] height (int16 BE)
-    size_t secBase = (size_t)(bulkOff + secOff);
-    size_t secEntry = secBase + (size_t)seqIndex * 128;
-    if (secEntry + 128 > d.size()) return false;
-    int32_t imgDataOff = readBE32s(d.data(), secEntry + 64);
-    int w = (int)readBE16s(d.data(), secEntry + 76);
-    int h = (int)readBE16s(d.data(), secEntry + 78);
+    // sequence_reference[seqIndex]: 128 bytes, data offset at +64
+    size_t seqRefEntry = (size_t)(bulkOff + seqRefsOff) + (size_t)seqIndex * 128;
+    if (seqRefEntry + 68 > d.size()) return false;
+    int32_t seqDataOff = readBE32s(d.data(), seqRefEntry + 64);
+
+    // sequence_data: 64 bytes, number_of_views at +8, frames_per_view at +10
+    size_t seqDataAbs = (size_t)(bulkOff + seqDataOff);
+    if (seqDataAbs + 64 > d.size()) return false;
+    int16_t numViews   = readBE16s(d.data(), seqDataAbs + 8);
+    if (numViews < 1) numViews = 1;
+    if (viewIndex < 0 || viewIndex >= numViews) return false;
+
+    // sequence_frame_data[0]: 46 bytes immediately after sequence_data,
+    // followed by bitmap_instance_indexes[numViews] (2 bytes each)
+    size_t biiBase = seqDataAbs + 64 + 46;
+    if (biiBase + (size_t)numViews * 2 > d.size()) return false;
+    int16_t bii = readBE16s(d.data(), biiBase + (size_t)viewIndex * 2);
+
+    if (bii < 0 || bii >= bitmapInstCount) return false;
+
+    // bitmap_instance_data[bii]: 64 bytes, bitmap_index at +28
+    size_t biInstEntry = (size_t)(bulkOff + bitmapInstsOff) + (size_t)bii * 64;
+    if (biInstEntry + 30 > d.size()) return false;
+    int16_t bi = readBE16s(d.data(), biInstEntry + 28);
+
+    if (bi < 0 || bi >= bitmapCount) return false;
+
+    // bitmap_reference[bi]: 128 bytes, data offset at +64, width at +76, height at +78
+    size_t bitmapRefEntry = (size_t)(bulkOff + bitmapRefsOff) + (size_t)bi * 128;
+    if (bitmapRefEntry + 128 > d.size()) return false;
+    int32_t imgDataOff = readBE32s(d.data(), bitmapRefEntry + 64);
+    int w = (int)readBE16s(d.data(), bitmapRefEntry + 76);
+    int h = (int)readBE16s(d.data(), bitmapRefEntry + 78);
     if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return false;
 
-    // Pixel data follows the 52-byte bitmapinfo header
+    // Pixel data follows the 52-byte bitmap_data header
     size_t pixAbs = (size_t)(bulkOff + imgDataOff) + 52;
     if (pixAbs + (size_t)w * h > d.size()) return false;
     const uint8_t* pix = d.data() + pixAbs;
@@ -424,6 +471,8 @@ struct ObjectInstance {
     uint16_t paletteIdx=0;  // index into marker palette table
     int32_t posX=0, posY=0, posZ=0;  // world_distance, /512 gives cell coordinate
     uint16_t yaw=0;  // 0..65535 = 0..360 degrees
+    uint8_t userData[16]={};  // marker-type-specific data at [36:52]
+    uint8_t permutationIndex=0;  // user_data[1]: 0-based permutation/variant index
 };
 
 static bool readInstances(const std::vector<uint8_t>& d, const MeshHeader& h,
@@ -439,6 +488,8 @@ static bool readInstances(const std::vector<uint8_t>& d, const MeshHeader& h,
         inst.posY       = readBE32s(d.data(), off+16);  // position.y
         inst.posZ       = readBE32s(d.data(), off+20);  // position.z (height)
         inst.yaw        = readBE16u(d.data(), off+32);  // yaw angle
+        memcpy(inst.userData, d.data()+off+36, 16);     // user_data[16]
+        inst.permutationIndex = inst.userData[1];        // 0-based permutation index
         out.push_back(inst);
     }
     return true;
@@ -643,7 +694,7 @@ static bool exportOBJ(const std::string& objPath, const std::string& mtlPath,
         for (const auto& tri: tris) {
             for (int c=0; c<3; c++) {
                 char buf[80];
-                snprintf(buf,sizeof(buf),"vt %.6f %.6f\n", tri.u[c], 1.0f - tri.v[c]);
+                snprintf(buf,sizeof(buf),"vt %.6f %.6f\n", tri.v[c], 1.0f - tri.u[c]);
                 obj += buf;
             }
         }
@@ -854,7 +905,7 @@ static bool exportCombinedOBJ(const std::string& objPath,
 
         for (const auto& tri: tris) {
             for (int c = 0; c < 3; c++) {
-                snprintf(buf, sizeof(buf), "vt %.6f %.6f\n", tri.u[c], 1.0f - tri.v[c]);
+                snprintf(buf, sizeof(buf), "vt %.6f %.6f\n", tri.v[c], 1.0f - tri.u[c]);
                 obj += buf;
             }
         }
@@ -1019,7 +1070,10 @@ int main(int argc, char* argv[]) {
 
     // ---- Export 3D models per scenery type ----
     std::set<uint32_t> exportedTypes;
-    std::map<uint32_t,Geometry> geomCache;  // typeTag -> loaded geometry
+    std::map<uint32_t,Geometry> geomCache;         // typeTag -> loaded geometry
+    std::map<uint32_t,std::vector<uint8_t>> collCache; // typeTag -> .256 collection data
+    // permCache: typeTag -> permutations table [permIndex][matIndex] = view index (0xFF = not rendered)
+    std::map<uint32_t,std::vector<std::vector<uint8_t>>> permCache;
     int modelsExported=0, spritesSkipped=0;
 
     printf("%-8s  %-12s  %-7s  %-7s  %-7s  %s\n",
@@ -1047,9 +1101,28 @@ int main(int argc, char* argv[]) {
                    tagStr.c_str(), "-", "-", "-", "-");
             continue;
         }
-        // model_definition header: [4:8] geometry_tag (subgroup ID of the geom tag)
+        // model_definition header (64 bytes): [4:8] geometry_tag, [12:14] permutation_count,
+        // [24:28] permutations_offset (relative to data start at byte 64)
         uint32_t geomRefTag = readBE32u(modeData.data(), 4);
         std::string geomRefStr = tagToString(geomRefTag);
+
+        // Parse model_permutation_data table from mode tag
+        {
+            int16_t permCount = readBE16s(modeData.data(), 12);
+            int32_t permRelOff = readBE32s(modeData.data(), 24);
+            size_t permBase = 64 + (size_t)permRelOff;
+            std::vector<std::vector<uint8_t>> perms;
+            for (int pi = 0; pi < permCount; pi++) {
+                size_t pe = permBase + (size_t)pi * 64;
+                if (pe + 34 > modeData.size()) break;
+                // permutations[32] starts at byte 2 within the 64-byte struct
+                std::vector<uint8_t> matViews(32);
+                memcpy(matViews.data(), modeData.data() + pe + 2, 32);
+                perms.push_back(std::move(matViews));
+            }
+            if (!perms.empty())
+                permCache[t->typeTag] = std::move(perms);
+        }
 
         const TagEntry* geomEntry = findTag(tags, GROUP_GEOM, geomRefTag);
         if (!geomEntry) {
@@ -1083,13 +1156,18 @@ int main(int argc, char* argv[]) {
                 makeDirs(texDir);
                 std::string collStr = tagToString(g.collectionRefTag);
                 for (auto& mat: g.materials) {
-                    std::string pngName = collStr + "_" + std::to_string(mat.sequenceIndex) + ".png";
-                    std::string pngPath = texDir + "/" + pngName;
-                    if (!fs::exists(pngPath))
-                        extractDot256Texture(collData, mat.sequenceIndex, pngPath);
-                    if (fs::exists(pngPath))
-                        mat.texturePng = pngPath;
+                    int numViews = dot256SequenceViewCount(collData, mat.sequenceIndex);
+                    for (int vi = 0; vi < numViews; vi++) {
+                        std::string pngName = collStr + "_" + std::to_string(mat.sequenceIndex)
+                                            + "_" + std::to_string(vi) + ".png";
+                        std::string pngPath = texDir + "/" + pngName;
+                        if (!fs::exists(pngPath))
+                            extractDot256Texture(collData, mat.sequenceIndex, vi, pngPath);
+                        if (vi == 0 && fs::exists(pngPath))
+                            mat.texturePng = pngPath;
+                    }
                 }
+                collCache[t->typeTag] = std::move(collData);
             }
         }
 
@@ -1159,9 +1237,9 @@ int main(int argc, char* argv[]) {
         float cellZ = (float)inst.posZ / WORLD_ONE;
         float facingDeg = (float)(((double)inst.yaw / 65536.0) * 360.0);
 
-        printf("%-5zu  %-6d  %-8s  %-8.2f  %-8.2f  %-8.2f  %.1f\n",
+        printf("%-5zu  %-6d  %-8s  %-8.2f  %-8.2f  %-8.2f  %.1f  perm=%d\n",
                ii, (int)inst.paletteIdx, tagStr.c_str(),
-               cellX, cellY, cellZ, facingDeg);
+               cellX, cellY, cellZ, facingDeg, (int)inst.permutationIndex);
 
         if (!firstInst) json += ",\n";
         firstInst=false;
@@ -1172,13 +1250,52 @@ int main(int argc, char* argv[]) {
         snprintf(buf,sizeof(buf),
                  ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
                  ", \"facing_deg\": %.4f"
+                 ", \"permutation\": %d"
                  ", \"pal_idx\": %d, \"marker_idx\": %zu}",
-                 cellX, cellY, cellZ, facingDeg, (int)inst.paletteIdx, ii);
+                 cellX, cellY, cellZ, facingDeg,
+                 (int)inst.permutationIndex, (int)inst.paletteIdx, ii);
         json += buf;
 
         // Accumulate for combined OBJ if geom was loaded
         auto git = geomCache.find(t->typeTag);
         if (git != geomCache.end()) {
+            const Geometry& g = git->second;
+
+            // Emit per-instance OBJ+MTL with permutation-specific textures
+            auto cit = collCache.find(t->typeTag);
+            if (cit != collCache.end()) {
+                const std::vector<uint8_t>& collData = cit->second;
+                std::string collStr = tagToString(g.collectionRefTag);
+                std::string texDir = outFolder + "/models/textures";
+                int perm = (int)inst.permutationIndex;
+
+                std::string instObjPath = outFolder + "/models/" + tagStr + "_" + std::to_string(ii) + ".obj";
+                std::string instMtlPath = outFolder + "/models/" + tagStr + "_" + std::to_string(ii) + ".mtl";
+
+                // Build a copy of the geometry with per-permutation texture paths.
+                // Look up view index per material from the mode tag permutation table.
+                // permutations[matIndex] = view index; 0xFF = material not rendered.
+                Geometry instGeom = g;
+                auto pit = permCache.find(t->typeTag);
+                const std::vector<uint8_t>* matViews = nullptr;
+                if (pit != permCache.end() && perm < (int)pit->second.size())
+                    matViews = &pit->second[perm];
+
+                for (int mi = 0; mi < (int)instGeom.materials.size(); mi++) {
+                    auto& mat = instGeom.materials[mi];
+                    int vi = 0;
+                    if (matViews && mi < (int)matViews->size() && (*matViews)[mi] != 0xFF)
+                        vi = (int)(*matViews)[mi];
+                    int numViews = dot256SequenceViewCount(collData, mat.sequenceIndex);
+                    if (vi >= numViews) vi = 0;
+                    std::string pngName = collStr + "_" + std::to_string(mat.sequenceIndex)
+                                        + "_" + std::to_string(vi) + ".png";
+                    std::string pngPath = texDir + "/" + pngName;
+                    mat.texturePng = fs::exists(pngPath) ? pngPath : "";
+                }
+                exportOBJ(instObjPath, instMtlPath, tagStr, instGeom);
+            }
+
             PlacedInstance pi;
             pi.geom       = &git->second;
             pi.typeTag    = tagStr;
