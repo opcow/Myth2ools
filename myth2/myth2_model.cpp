@@ -613,12 +613,19 @@ static bool parseGeometry(const std::vector<uint8_t>& d, Geometry& g) {
 // WORLD_ONE: raw vertex units per mesh cell (WORLD_FRACTIONAL_BITS=9 → 1<<9=512).
 static constexpr float WORLD_ONE = 512.0f;
 
+struct WorldTransform {
+    float cellX, cellY, cellZ;
+    float facingRad;
+    float halfW, halfH;
+};
+
 // ---------------------------------------------------------------------------
 // OBJ / MTL export
 // ---------------------------------------------------------------------------
 
 static bool exportOBJ(const std::string& objPath, const std::string& mtlPath,
-                      const std::string& typeTag, const Geometry& g) {
+                      const std::string& typeTag, const Geometry& g,
+                      const WorldTransform* wt = nullptr) {
     // Only export surfaces with all valid vertex indices
     // Collect valid triangles
     struct Tri {
@@ -680,14 +687,24 @@ static bool exportOBJ(const std::string& objPath, const std::string& mtlPath,
         obj += fs::path(mtlPath).filename().string();
         obj += "\n\n";
 
-        // Subtract center, scale to cell units, mirror X to match map convention.
-        // Emit as OBJ X/Y/Z = world X, height, world Y (Blender Z-up import).
         for (const auto& vtx: g.vertices) {
             float mx = -((vtx.x - g.cx) / WORLD_ONE);
             float my =   (vtx.y - g.cy) / WORLD_ONE;
             float mz =   (vtx.z - g.cz) / WORLD_ONE;
+            float ox, oy, oz;
+            if (wt) {
+                float cosF = std::cos(wt->facingRad);
+                float sinF = std::sin(wt->facingRad);
+                float rx =  cosF * mx - sinF * my;
+                float ry =  sinF * mx + cosF * my;
+                ox = rx + (wt->halfW - wt->cellX);
+                oy = ry + (wt->cellY - wt->halfH);
+                oz = mz + wt->cellZ;
+            } else {
+                ox = mx; oy = my; oz = mz;
+            }
             char buf[80];
-            snprintf(buf,sizeof(buf),"v %.6f %.6f %.6f\n", mx, mz, my);
+            snprintf(buf, sizeof(buf), "v %.6f %.6f %.6f\n", ox, oz, oy);
             obj += buf;
         }
         obj += "\n";
@@ -968,28 +985,48 @@ static void usage(const char* p) {
     fprintf(stderr,
         "Myth II 3D Model Extractor\n\n"
         "Usage:\n"
-        "  %s <tags_folder> <out_folder> [terrain.obj]\n\n"
+        "  %s <tags_folder> <out_folder> [terrain.obj] [--world-space]\n\n"
         "Arguments:\n"
-        "  tags_folder   folder containing Myth II tag files (e.g. 'small install')\n"
-        "  out_folder    extracted map folder (e.g. out/le3e, must contain raw/mesh_tag.bin)\n\n"
+        "  tags_folder    folder containing Myth II tag files (e.g. 'small install')\n"
+        "  out_folder     extracted map folder (e.g. out/le3e, must contain raw/mesh_tag.bin)\n"
+        "  terrain.obj    terrain OBJ to inline into map_combined.obj\n"
+        "                 (auto-detected from models/displacement.obj if present)\n"
+        "  --world-space  per-instance OBJs use world (map) coordinates instead of local origin\n\n"
         "Output:\n"
-        "  <out_folder>/models/<tag>.obj   per-type geometry\n"
-        "  <out_folder>/models/<tag>.mtl   per-type material\n"
-        "  <out_folder>/placement.json     all scenery instance placements\n",
+        "  <out_folder>/models/<tag>.obj      per-type geometry (local origin)\n"
+        "  <out_folder>/models/<tag>.mtl\n"
+        "  <out_folder>/models/<tag>_<N>.obj  per-instance geometry\n"
+        "  <out_folder>/models/<tag>_<N>.mtl\n"
+        "  <out_folder>/placement.json        all scenery instance placements\n",
         p);
 }
 
 int main(int argc, char* argv[]) {
-    if (argc!=3 && argc!=4) { usage(argv[0]); return 1; }
+    if (argc < 3) { usage(argv[0]); return 1; }
 
     std::string tagsFolder   = argv[1];
     std::string outFolder    = argv[2];
-    std::string terrainObjPath = argc==4 ? argv[3] : "";
+    std::string terrainObjPath;
+    bool worldSpace = false;
+
+    for (int i = 3; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--world-space") worldSpace = true;
+        else if (terrainObjPath.empty()) terrainObjPath = a;
+        else { usage(argv[0]); return 1; }
+    }
     // trim trailing slashes
     while (!tagsFolder.empty() && (tagsFolder.back()=='/'||tagsFolder.back()=='\\'))
         tagsFolder.pop_back();
     while (!outFolder.empty() && (outFolder.back()=='/'||outFolder.back()=='\\'))
         outFolder.pop_back();
+
+    // Auto-detect terrain OBJ from models/ if not specified on command line
+    if (terrainObjPath.empty()) {
+        std::string candidate = outFolder + "/models/displacement.obj";
+        if (fs::exists(candidate))
+            terrainObjPath = candidate;
+    }
 
     // Load mesh tag
     std::string meshPath = outFolder+"/raw/mesh_tag.bin";
@@ -1295,7 +1332,14 @@ int main(int argc, char* argv[]) {
                     std::string pngPath = texDir + "/" + pngName;
                     mat.texturePng = fs::exists(pngPath) ? pngPath : "";
                 }
-                exportOBJ(instObjPath, instMtlPath, tagStr, instGeom);
+                WorldTransform wt;
+                wt.cellX     = cellX;
+                wt.cellY     = cellY;
+                wt.cellZ     = cellZ;
+                wt.facingRad = (facingDeg - 90.0f) * (float)(PI / 180.0);
+                wt.halfW     = (float)(mh.submeshW * 32) * 0.5f;
+                wt.halfH     = (float)(mh.submeshH * 32) * 0.5f;
+                exportOBJ(instObjPath, instMtlPath, tagStr, instGeom, worldSpace ? &wt : nullptr);
             }
 
             PlacedInstance pi;
