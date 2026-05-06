@@ -57,6 +57,7 @@ cl /EHsc /O2 tfl\myth_mesh_import.cpp /Fe:myth_mesh_import.exe
 cl /EHsc /O2 myth2\myth2_dump.cpp /Fe:myth2_dump.exe
 cl /EHsc /O2 myth2\myth2_extract.cpp /Fe:myth2_extract.exe
 cl /EHsc /O2 myth2\myth2_mesh.cpp /Fe:myth2_mesh.exe
+cl /EHsc /O2 myth2\myth2_model.cpp /Fe:myth2_model.exe
 cl /EHsc /O2 myth2\myth2_water_mesh.cpp /Fe:myth2_water_mesh.exe
 cl /EHsc /O2 myth2\myth2_water_depth.cpp /Fe:myth2_water_depth.exe
 cl /EHsc /O2 myth2\myth2_mesh_import.cpp /Fe:myth2_mesh_import.exe
@@ -83,6 +84,7 @@ g++ -std=c++17 -O2 tfl/myth_mesh_import.cpp -o myth_mesh_import
 g++ -std=c++17 -O2 myth2/myth2_dump.cpp -o myth2_dump
 g++ -std=c++17 -O2 myth2/myth2_extract.cpp -o myth2_extract
 g++ -std=c++17 -O2 myth2/myth2_mesh.cpp -o myth2_mesh
+g++ -std=c++17 -O2 myth2/myth2_model.cpp -o myth2_model
 g++ -std=c++17 -O2 myth2/myth2_water_mesh.cpp -o myth2_water_mesh
 g++ -std=c++17 -O2 myth2/myth2_water_depth.cpp -o myth2_water_depth
 g++ -std=c++17 -O2 myth2/myth2_mesh_import.cpp -o myth2_mesh_import
@@ -171,6 +173,27 @@ myth2_mesh <tag_folder> [output.obj] [heightscale]
 Exports an extracted Myth II mesh folder as Wavefront `OBJ`. The exporter uses
 the Myth II alternating cell diagonal pattern and a default height scale of
 `1/512`.
+
+### `myth2_model`
+
+![Models on the map](images/models.png)  
+
+```bash
+myth2_model <tags_folder> <out_folder> [terrain.obj]
+```
+
+Extracts 3D scenery models and placement data from an extracted Myth II mesh tag
+(`raw/mesh_tag.bin`). For each scenery type that has a `geom` tag, it writes:
+
+- `models/<tag>.obj` + `.mtl` — per-type geometry with UV coordinates
+- `models/map_combined.obj` + `.mtl` — all scenery instances placed at their
+  correct map positions and orientations, ready to import into Blender
+- `placement.json` — all instance positions (cell coords) and facing angles
+
+When an optional `terrain.obj` path is supplied (e.g. the `displacement.obj`
+produced by `myth2_mesh`), the terrain mesh is appended to `map_combined.obj`
+as a separate named object (`o terrain`), giving a single file with both the
+terrain surface and all placed scenery.
 
 ### `myth2_water_mesh`
 
