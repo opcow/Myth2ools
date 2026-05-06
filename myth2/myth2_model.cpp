@@ -316,6 +316,7 @@ struct GeomMaterial {
 
 struct Geometry {
     uint32_t collectionRefTag=0;  // .256 texture collection tag
+    float cx=0, cy=0, cz=0;      // center (local origin) from geom header [16:22]
     std::vector<GeomMaterial> materials;
     std::vector<GeomVertex> vertices;
     std::vector<GeomSurface> surfaces;
@@ -329,6 +330,10 @@ static bool parseGeometry(const std::vector<uint8_t>& d, Geometry& g) {
     int matCount   = (int)readBE16u(hdr, 8);
     int vtxCount   = (int)readBE16u(hdr, 10);
     int srfCount   = (int)readBE16u(hdr, 12);
+    // center: short_world_point3d at [16:22] — local origin in geometry space
+    g.cx = (float)readBE16s(hdr, 16);
+    g.cy = (float)readBE16s(hdr, 18);
+    g.cz = (float)readBE16s(hdr, 20);
 
     uint32_t dataOff      = 128;
     uint32_t matRelOff    = readBE32u(hdr, 28);
@@ -592,9 +597,10 @@ static bool exportCombinedOBJ(const std::string& objPath,
         obj += "o " + instName + "\ng " + instName + "\n";
         for (const auto& vtx: g.vertices) {
             // Scale from world units to cell units
-            float mx = -(vtx.x / WORLD_ONE);  // mirror geometry in X
-            float my = vtx.y / WORLD_ONE;
-            float mz = vtx.z / WORLD_ONE;
+            // Subtract center to get vertex relative to local origin, then mirror X
+            float mx = -((vtx.x - inst.geom->cx) / WORLD_ONE);
+            float my = (vtx.y - inst.geom->cy) / WORLD_ONE;
+            float mz = (vtx.z - inst.geom->cz) / WORLD_ONE;
             // Rotate around Z (up) by facing angle
             float rx =  cosF * mx - sinF * my;
             float ry =  sinF * mx + cosF * my;
@@ -842,6 +848,7 @@ int main(int argc, char* argv[]) {
         std::string mtlPath = outFolder+"/models/"+tagStr+".mtl";
 
         bool ok = exportOBJ(objPath, mtlPath, tagStr, g);
+        printf("  center: (%.1f, %.1f, %.1f)\n", g.cx, g.cy, g.cz);
         printf("%-8s  %-12s  %-7d  %-7d  %-7d  %s (coll: %s)\n",
                tagStr.c_str(), geomRefStr.c_str(),
                (int)g.vertices.size(), (int)g.surfaces.size(), validTris,
