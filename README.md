@@ -10,7 +10,7 @@ This project was originally based on my code and notes from the 1990s, which was
 
 The point: I am 65 years old with 3 dogs, a family, and other commitments. I have neither the time nor the inclination to spend days or weeks updating this code for modernity, but I have a lot of nostalgia for Myth OG, Myth 2, and my time in the original Myth modding community. I thought it would be fun to see what could come of these old tools.
 
-And so I did, with the help of both Claude Code and Codex AI coding tools. Without them, this would have never happened. Regardless of all the hate for "vibe coding," these tools are incredibly useful. No apologies.
+And so I did, with the help of both Claude Code and Codex AI coding tools. Without them, I just wouldn't have been able to do this. Regardless of all the hate for "vibe coding," these tools are incredibly useful. No apologies.
 
 This is largely an academic exercise. I know there are other tools out there, and some of this is redundant, but I do hope others may find this project interesting or useful.
 
