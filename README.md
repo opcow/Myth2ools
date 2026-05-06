@@ -44,6 +44,18 @@ cmake ..
 cmake --build .
 ```
 
+### Or choose config
+
+```bash
+cmake --build . --config <Release | Debug>
+```
+
+### Clean
+
+```bash
+cmake --build . --config <Release | Debug> --target clean
+```
+
 ### Source Layout
 
 - `tfl/` contains Myth: The Fallen Lords-era tools and exploratory helpers.
