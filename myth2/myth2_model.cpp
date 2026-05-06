@@ -286,15 +286,17 @@ static bool extractDot256Texture(const std::vector<uint8_t>& d,
     if (pixAbs + (size_t)w * h > d.size()) return false;
     const uint8_t* pix = d.data() + pixAbs;
 
-    // Decode indexed pixels to RGBA using Myth palette (r,fr,g,fg,b,fb,flag,ff per entry)
+    // Decode indexed pixels to RGBA using Myth palette (rgb_color: word r, g, b, flags each).
+    // Index 0 is always the transparent void color in Myth II.
     std::vector<uint8_t> rgba((size_t)w * h * 4);
     for (int i = 0; i < w * h; i++) {
         uint8_t idx = pix[i];
         const uint8_t* c = palData + (size_t)idx * 8;
-        rgba[(size_t)i*4+0] = c[0]; // r
-        rgba[(size_t)i*4+1] = c[2]; // g
-        rgba[(size_t)i*4+2] = c[4]; // b
-        rgba[(size_t)i*4+3] = 255;
+        uint8_t alpha = (idx == 0) ? 0 : 255;
+        rgba[(size_t)i*4+0] = alpha ? c[0] : 0; // r — zero transparent pixels to avoid color bleed
+        rgba[(size_t)i*4+1] = alpha ? c[2] : 0; // g
+        rgba[(size_t)i*4+2] = alpha ? c[4] : 0; // b
+        rgba[(size_t)i*4+3] = alpha;
     }
 
     return writePNG(outPng, rgba, w, h);
@@ -660,7 +662,7 @@ static bool exportOBJ(const std::string& objPath, const std::string& mtlPath,
             mtl += "Ks 0.0 0.0 0.0\n";
             mtl += "illum 1\n";
             if (!mat.texturePng.empty()) {
-                mtl += "map_Kd ";
+                mtl += "map_Kd textures/";
                 mtl += fs::path(mat.texturePng).filename().string();
                 mtl += "\n";
             }
@@ -823,7 +825,7 @@ static bool exportCombinedOBJ(const std::string& objPath,
             mtl += "newmtl " + qname + "\n";
             mtl += "Ka 1.0 1.0 1.0\nKd 1.0 1.0 1.0\nKs 0.0 0.0 0.0\nillum 1\n";
             if (!mat.texturePng.empty()) {
-                mtl += "map_Kd ";
+                mtl += "map_Kd textures/";
                 mtl += fs::path(mat.texturePng).filename().string();
                 mtl += "\n";
             }
@@ -1325,6 +1327,7 @@ int main(int argc, char* argv[]) {
                    combinedObj.c_str(), placedInstances.size(),
                    terrainObjPath.empty() ? "" : " + terrain");
     }
+
 
     return 0;
 }

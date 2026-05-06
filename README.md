@@ -32,6 +32,8 @@ As with the original tools, a map maker can work with 2D images to draw in the t
 
 And, of course, you can use Blender to create or modify the 3D map surface.
 
+![Models on the map](images/models.png)  
+
 ## Building
 
 ### With CMake
@@ -175,8 +177,6 @@ the Myth II alternating cell diagonal pattern and a default height scale of
 `1/512`.
 
 ### `myth2_model`
-
-![Models on the map](images/models.png)  
 
 ```bash
 myth2_model <tags_folder> <out_folder> [terrain.obj]
