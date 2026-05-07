@@ -276,13 +276,35 @@ static bool injectTerrainColor(std::vector<uint8_t>& terrain,
 
 static bool injectSingleImage256(std::vector<uint8_t>& data, const std::vector<uint8_t>& bmpRaw,
                                  const std::vector<uint8_t>& bmp, int bW, int bH) {
-    if (data.size() < 4008) return false;
-    int w = (int)readBE16s(data.data(), 2812);
-    int h = (int)readBE16s(data.data(), 2814);
-    if (w <= 0 || w > 4096 || h <= 0 || h > 4096) { w = 377; h = 190; }
+    const size_t HDR = 320, TEXHDR = 52, BITMAP_REF_SIZE = 128;
+    if (data.size() < HDR + sizeof(Myth256Palette)) return false;
+    int32_t bulkOff = readBE32s(data.data(), 248);
+    int32_t palOff = readBE32s(data.data(), 68);
+    int32_t bitmapCount = readBE32s(data.data(), 96);
+    int32_t bitmapRefsOff = readBE32s(data.data(), 100);
+    if (bulkOff < 0 || palOff < 0 || bitmapRefsOff < 0 || bitmapCount < 1 || bitmapCount > 4096) return false;
+
+    int w = 0, h = 0;
+    long pixDataOff = -1;
+    size_t refBase = (size_t)bulkOff + (size_t)bitmapRefsOff;
+    for (int bi = 0; bi < bitmapCount; bi++) {
+        size_t ref = refBase + (size_t)bi * BITMAP_REF_SIZE;
+        if (ref + BITMAP_REF_SIZE > data.size()) return false;
+        int32_t imgDataOff = readBE32s(data.data(), ref + 64);
+        int candidateW = (int)readBE16s(data.data(), ref + 76);
+        int candidateH = (int)readBE16s(data.data(), ref + 78);
+        long candidatePix = (long)bulkOff + (long)imgDataOff + (long)TEXHDR;
+        if (candidateW <= 0 || candidateW > 4096 || candidateH <= 0 || candidateH > 4096) continue;
+        if (candidatePix < 0 || candidatePix + (long)candidateW * candidateH > (long)data.size()) continue;
+        w = candidateW;
+        h = candidateH;
+        pixDataOff = candidatePix;
+        break;
+    }
+    if (pixDataOff < 0) return false;
     if (bW != w || bH != h) return false;
 
-    size_t colorBase = 320 + 32;
+    size_t colorBase = (size_t)bulkOff + (size_t)palOff + 32;
     if (colorBase + 256 * 8 > data.size()) return false;
     if (bmpRaw.size() >= 54) {
         uint32_t dibSz = get32le(bmpRaw.data() + 14);
@@ -303,7 +325,6 @@ static bool injectSingleImage256(std::vector<uint8_t>& data, const std::vector<u
         }
     }
 
-    long pixDataOff = (w == 377 && h == 190) ? 4008 : (2912 + 4L * h);
     if (pixDataOff < 0 || pixDataOff + (long)w * h > (long)data.size()) return false;
     memcpy(data.data() + pixDataOff, bmp.data(), (size_t)w * h);
     return true;

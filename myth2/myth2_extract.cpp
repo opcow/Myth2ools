@@ -700,14 +700,36 @@ static std::vector<uint8_t> assembleTilesFromData(const std::vector<uint8_t>& da
 }
 
 static bool extractSingleImage256FromData(const std::vector<uint8_t>& data, const std::string& outPath){
-    if(data.size()<4008) return false;
-    int w=(int)readBE16s(data.data(),2812);
-    int h=(int)readBE16s(data.data(),2814);
-    if(w<=0||w>4096||h<=0||h>4096){ w=377; h=190; }
+    const size_t HDR=320, TEXHDR=52, BITMAP_REF_SIZE=128;
+    if(data.size()<HDR+sizeof(Myth256Palette)) return false;
+    int32_t bulkOff = readBE32s(data.data(),248);
+    int32_t palOff = readBE32s(data.data(),68);
+    int32_t bitmapCount = readBE32s(data.data(),96);
+    int32_t bitmapRefsOff = readBE32s(data.data(),100);
+    if(bulkOff<0 || palOff<0 || bitmapRefsOff<0 || bitmapCount<1 || bitmapCount>4096) return false;
+
     Myth256Palette pal;
-    if(data.size()<320+sizeof(pal)) return false;
-    memcpy(&pal,data.data()+320,sizeof(pal));
-    long pixOff=(w==377&&h==190)?4008:(2912+4L*h);
+    size_t palAbs = (size_t)bulkOff + (size_t)palOff;
+    if(palAbs + sizeof(pal) > data.size()) return false;
+    memcpy(&pal,data.data()+palAbs,sizeof(pal));
+
+    int w=0, h=0;
+    long pixOff=-1;
+    size_t refBase = (size_t)bulkOff + (size_t)bitmapRefsOff;
+    for(int bi=0; bi<bitmapCount; bi++){
+        size_t ref = refBase + (size_t)bi * BITMAP_REF_SIZE;
+        if(ref + BITMAP_REF_SIZE > data.size()) return false;
+        int32_t imgDataOff = readBE32s(data.data(), ref + 64);
+        int candidateW = (int)readBE16s(data.data(), ref + 76);
+        int candidateH = (int)readBE16s(data.data(), ref + 78);
+        long candidatePix = (long)bulkOff + (long)imgDataOff + (long)TEXHDR;
+        if(candidateW<=0 || candidateW>4096 || candidateH<=0 || candidateH>4096) continue;
+        if(candidatePix<0 || candidatePix + (long)candidateW*candidateH > (long)data.size()) continue;
+        w = candidateW;
+        h = candidateH;
+        pixOff = candidatePix;
+        break;
+    }
     if(pixOff<0 || pixOff+(long)w*h>(long)data.size()) return false;
     std::vector<uint8_t> px((size_t)w*h);
     memcpy(px.data(),data.data()+pixOff,(size_t)w*h);
