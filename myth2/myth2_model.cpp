@@ -1148,7 +1148,7 @@ int main(int argc, char* argv[]) {
         // Parse model_permutation_data table from mode tag
         {
             int16_t permCount = readBE16s(modeData.data(), 12);
-            int32_t permRelOff = readBE32s(modeData.data(), 24);
+            int32_t permRelOff = readBE32s(modeData.data(), 28);
             size_t permBase = 64 + (size_t)permRelOff;
             std::vector<std::vector<uint8_t>> perms;
             for (int pi = 0; pi < permCount; pi++) {

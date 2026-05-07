@@ -79,7 +79,7 @@ The `mode` tag (subgroup = scenery type_tag) wraps a `model_definition`:
 model_definition header (64 bytes, all offsets relative to byte 64):
   [4:8]   geometry_tag        — subgroup ID for the geom tag
   [12:14] permutation_count   (int16)
-  [24:28] permutations_offset (int32, relative to byte 64)
+  [28:32] permutations_offset (int32, relative to byte 64)
 
 model_permutation_data (64 bytes each):
   [0:2]   collection_reference_permutation  (color table index)

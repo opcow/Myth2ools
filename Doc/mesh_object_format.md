@@ -179,7 +179,7 @@ SIZEOF_STRUCT_MODEL_DEFINITION = 64 bytes header
   [14:16] model_cell_count
   [16:20] model_geometry_vertex_offset
   [20:24] model_geometry_vertex_size
-  [24:28] model_permutations_offset
+  [28:32] model_permutations_offset
   [28:32] model_permutations_size
   [32:36] model_cell_offset
   [36:40] model_cell_size
