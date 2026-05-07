@@ -138,10 +138,10 @@ sequence_reference[seqIndex]   128 bytes at bulk+seqRefsOff + seqIndex*128
   [+64:+68] seqDataOff (int32)
 
 sequence_data                  64 bytes at bulk+seqDataOff
-  [+8:+10]  number_of_views (int16)  — number of variant views
+  [+8:+10]  number_of_views (int16)  — stored count (often UNDERreports; real count determined by scanning bii array)
 
 sequence_frame_data[0]         46 bytes immediately after sequence_data (at seqDataAbs+64)
-  followed by bitmap_instance_indexes[numViews] (int16 each)
+  followed by bitmap_instance_indexes[] (int16 each, count = entries with bii >= 0 && bii < bitmapInstCount)
   → bii = bitmap_instance_indexes[viewIndex]
 
 bitmap_instance_data[bii]      64 bytes at bulk+bitmapInstsOff + bii*64

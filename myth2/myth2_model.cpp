@@ -205,7 +205,9 @@ static bool writePNG(const std::string& path, const std::vector<uint8_t>& rgba, 
 //   [0:4]   num_colors (int32 BE)
 //   [32:]   color[256], each 8 bytes: r,fr,g,fg,b,fb,flag,ff
 
-// Returns the number of views in a sequence, or 0 on error.
+// Returns the number of views in a sequence by scanning the bitmap_instance_indexes
+// array for valid entries (positive bii < bitmapInstCount). Falls back to the stored
+// count field if scanning fails, returns at least 1.
 static int dot256SequenceViewCount(const std::vector<uint8_t>& d, int seqIndex) {
     if (d.size() < 320) return 0;
     int32_t bulkOff  = readBE32s(d.data(), 248);
@@ -216,9 +218,23 @@ static int dot256SequenceViewCount(const std::vector<uint8_t>& d, int seqIndex) 
     if (seqRefEntry + 68 > d.size()) return 0;
     int32_t seqDataOff = readBE32s(d.data(), seqRefEntry + 64);
     size_t seqDataAbs = (size_t)(bulkOff + seqDataOff);
-    if (seqDataAbs + 12 > d.size()) return 0;
-    int16_t nv = readBE16s(d.data(), seqDataAbs + 8);
-    return nv > 0 ? nv : 1;
+    if (seqDataAbs + 64 + 46 > d.size()) return 0;
+    int32_t bitmapInstCount = readBE32s(d.data(), 112);
+    size_t biiBase = seqDataAbs + 64 + 46;
+    int count = 0;
+    for (int vi = 0; ; vi++) {
+        size_t off = biiBase + (size_t)vi * 2;
+        if (off + 2 > d.size()) break;
+        int16_t bii = readBE16s(d.data(), off);
+        if (bii < 0 || bii >= bitmapInstCount) break;
+        count++;
+    }
+    // Fall back to the stored count field if scanning found nothing
+    if (count == 0) {
+        int16_t nv = readBE16s(d.data(), seqDataAbs + 8);
+        count = nv > 0 ? nv : 1;
+    }
+    return count;
 }
 
 // Extract one view from a sequence in a .256 collection tag.
@@ -254,14 +270,11 @@ static bool extractDot256Texture(const std::vector<uint8_t>& d,
     // sequence_data: 64 bytes, number_of_views at +8, frames_per_view at +10
     size_t seqDataAbs = (size_t)(bulkOff + seqDataOff);
     if (seqDataAbs + 64 > d.size()) return false;
-    int16_t numViews   = readBE16s(d.data(), seqDataAbs + 8);
-    if (numViews < 1) numViews = 1;
-    if (viewIndex < 0 || viewIndex >= numViews) return false;
-
     // sequence_frame_data[0]: 46 bytes immediately after sequence_data,
-    // followed by bitmap_instance_indexes[numViews] (2 bytes each)
+    // followed by bitmap_instance_indexes[] (2 bytes each)
     size_t biiBase = seqDataAbs + 64 + 46;
-    if (biiBase + (size_t)numViews * 2 > d.size()) return false;
+    if (viewIndex < 0) return false;
+    if (biiBase + (size_t)viewIndex * 2 + 2 > d.size()) return false;
     int16_t bii = readBE16s(d.data(), biiBase + (size_t)viewIndex * 2);
 
     if (bii < 0 || bii >= bitmapInstCount) return false;
@@ -1340,8 +1353,9 @@ int main(int argc, char* argv[]) {
                     int vi = 0;
                     if (matViews && mi < (int)matViews->size() && (*matViews)[mi] != 0xFF)
                         vi = (int)(*matViews)[mi];
-                    int numViews = dot256SequenceViewCount(collData, mat.sequenceIndex);
-                    if (vi >= numViews) { vi = 0; }
+                    int nv = dot256SequenceViewCount(collData, mat.sequenceIndex);
+                    if (nv > 0) vi %= nv;
+                    else vi = 0;
                     std::string pngName = collStr + "_" + std::to_string(mat.sequenceIndex)
                                         + "_" + std::to_string(vi) + ".png";
                     std::string pngPath = texDir + "/" + pngName;

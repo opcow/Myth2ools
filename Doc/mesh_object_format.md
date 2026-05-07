@@ -171,6 +171,10 @@ From Malice source `model_definitions.h`:
 
 ```
 SIZEOF_STRUCT_MODEL_DEFINITION = 64 bytes header
+
+All multi-byte integers are big-endian (PowerPC origin). Runtime pointers are
+zeroed on disk.
+
   [0:4]   flags
   [4:8]   geometry_tag (4-char subgroup ID for the geom tag)
   [8:10]  geometry_index
@@ -179,12 +183,16 @@ SIZEOF_STRUCT_MODEL_DEFINITION = 64 bytes header
   [14:16] model_cell_count
   [16:20] model_geometry_vertex_offset
   [20:24] model_geometry_vertex_size
-  [28:32] model_permutations_offset
-  [28:32] model_permutations_size
-  [32:36] model_cell_offset
-  [36:40] model_cell_size
-  [40:44] data_offset
-  [44:48] data_size
+  [24:28] vertex_flags (runtime pointer, zeroed on disk)
+  [28:32] model_permutations_offset   ← critical for permutation models
+  [32:36] model_permutations_size
+  [36:40] model_permutations (runtime pointer, zeroed on disk)
+  [40:44] model_cell_offset
+  [44:48] model_cell_size
+  [48:52] model_cells (runtime pointer, zeroed on disk)
+  [52:56] data_offset
+  [56:60] data_size
+  [60:64] data (runtime pointer, zeroed on disk)
 
 SIZEOF_STRUCT_MODEL_PERMUTATION_DATA = 64 bytes
   [0:2]   collection_reference_permutation

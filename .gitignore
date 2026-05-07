@@ -18,3 +18,5 @@ myth2_tags/
 Doc/session_log.md
 .settings.local.json
 .claude/
+*.py
+*.dng2
