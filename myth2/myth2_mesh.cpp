@@ -12,7 +12,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
-#include <cctype>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -66,44 +65,6 @@ static std::string stemOf(const std::string& path) {
     std::string n = s == std::string::npos ? path : path.substr(s + 1);
     size_t d = n.rfind('.');
     return d == std::string::npos ? n : n.substr(0, d);
-}
-
-static std::string lowerExtOf(const std::string& path) {
-    size_t dot = path.find_last_of('.');
-    if (dot == std::string::npos) return "";
-    std::string ext = path.substr(dot);
-    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
-        return (char)std::tolower(c);
-    });
-    return ext;
-}
-
-static void writeID4(FILE* f, const char id[4]) {
-    fwrite(id, 1, 4, f);
-}
-
-static void writeBE32(FILE* f, uint32_t v) {
-    uint8_t b[4] = {
-        (uint8_t)((v >> 24) & 0xFF),
-        (uint8_t)((v >> 16) & 0xFF),
-        (uint8_t)((v >> 8) & 0xFF),
-        (uint8_t)(v & 0xFF)
-    };
-    fwrite(b, 1, 4, f);
-}
-
-static void writePaddedString(std::vector<uint8_t>& out, const std::string& s) {
-    out.insert(out.end(), s.begin(), s.end());
-    out.push_back(0);
-    if (out.size() & 1) out.push_back(0);
-}
-
-static bool writeChunk(FILE* f, const char id[4], const std::vector<uint8_t>& data) {
-    writeID4(f, id);
-    writeBE32(f, (uint32_t)data.size());
-    if (!data.empty()) fwrite(data.data(), 1, data.size(), f);
-    if (data.size() & 1) fputc(0, f);
-    return !ferror(f);
 }
 
 static int jsonInt(const std::string& j, const std::string& key, int def = 0) {
@@ -313,7 +274,11 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
     std::string texSrc = folder + "/layers/01_terrain.png";
     if (fs::exists(texSrc))
         fs::copy_file(texSrc, texDest, fs::copy_options::overwrite_existing, ec);
-    std::string texturePath = fs::exists(texDest) ? ("textures/" + texName) : (folder + "/layers/01_terrain.png");
+    std::string texturePath;
+    if (fs::exists(texDest))
+        texturePath = "textures/" + texName;
+    else if (fs::exists(texSrc))
+        texturePath = texSrc;
 
     FILE* obj = fopen(objPath.c_str(), "w");
     if (!obj) {
@@ -375,7 +340,8 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
     fprintf(mtl, "Kd 1.0 1.0 1.0\n");
     fprintf(mtl, "Ks 0.0 0.0 0.0\n");
     fprintf(mtl, "illum 1\n");
-    fprintf(mtl, "map_Kd %s\n", texturePath.c_str());
+    if (!texturePath.empty())
+        fprintf(mtl, "map_Kd %s\n", texturePath.c_str());
     fclose(mtl);
 
     fprintf(obj, "# Myth II terrain -- %s\n", mesh.meshTag.c_str());
@@ -432,7 +398,7 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
     printf("Height scale:  %.9f\n", hs);
     printf("OBJ written:   %s\n", objPath.c_str());
     printf("MTL written:   %s\n", mtlPath.c_str());
-    printf("Texture path:  %s\n", texturePath.c_str());
+    printf("Texture path:  %s\n", texturePath.empty() ? "(none)" : texturePath.c_str());
     printf("Vertices:      %d\n", totalVerts);
     printf("Triangles:     %d\n", totalFaces);
     return true;
@@ -461,9 +427,6 @@ int main(int argc, char** argv) {
 
     std::string folder = argv[1];
     float heightScale = argc >= 4 ? (float)atof(argv[3]) : (1.0f / 512.0f);
-
-    Manifest manifest;
-    if (!readManifest(folder + "/manifest.json", manifest)) return 1;
 
     std::string outPath = argc >= 3 ? argv[2] : (folder + "/models/displacement.obj");
     std::error_code ec;

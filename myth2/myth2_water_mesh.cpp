@@ -183,6 +183,10 @@ static bool readMesh(const std::string& folder, MeshInfo& out) {
                 expectedBytes, cellOffset, raw.size());
         return false;
     }
+    if (manifest.meshSize > 0 && manifest.meshSize != expectedBytes) {
+        fprintf(stderr, "Warning: manifest mesh_size is %d but computed cell bytes are %d\n",
+                manifest.meshSize, expectedBytes);
+    }
 
     out.meshTag = manifest.meshTag;
     out.submeshWidth = manifest.submeshWidth;
@@ -267,7 +271,11 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
     std::string texSrc = folder + "/layers/03_water_mask.png";
     if (fs::exists(texSrc))
         fs::copy_file(texSrc, texDest, fs::copy_options::overwrite_existing, ec);
-    std::string texturePath = fs::exists(texDest) ? ("textures/" + texName) : (folder + "/layers/03_water_mask.png");
+    std::string texturePath;
+    if (fs::exists(texDest))
+        texturePath = "textures/" + texName;
+    else if (fs::exists(texSrc))
+        texturePath = texSrc;
 
     FILE* obj = fopen(objPath.c_str(), "w");
     if (!obj) {
@@ -331,7 +339,8 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
     fprintf(mtl, "Kd 1.0 1.0 1.0\n");
     fprintf(mtl, "Ks 0.0 0.0 0.0\n");
     fprintf(mtl, "illum 1\n");
-    fprintf(mtl, "map_Kd %s\n", texturePath.c_str());
+    if (!texturePath.empty())
+        fprintf(mtl, "map_Kd %s\n", texturePath.c_str());
     fclose(mtl);
 
     fprintf(obj, "# Myth II water surface -- %s\n", mesh.meshTag.c_str());
@@ -391,7 +400,7 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
     printf("Height scale:  %.9f\n", hs);
     printf("OBJ written:   %s\n", objPath.c_str());
     printf("MTL written:   %s\n", mtlPath.c_str());
-    printf("Texture path:  %s\n", texturePath.c_str());
+    printf("Texture path:  %s\n", texturePath.empty() ? "(none)" : texturePath.c_str());
     printf("Vertices:      %d\n", totalVerts);
     printf("Wet triangles: %d\n", totalFaces);
     return true;
@@ -420,9 +429,6 @@ int main(int argc, char** argv) {
 
     std::string folder = argv[1];
     float heightScale = argc >= 4 ? (float)atof(argv[3]) : (1.0f / 512.0f);
-
-    Manifest manifest;
-    if (!readManifest(folder + "/manifest.json", manifest)) return 1;
 
     std::string objPath = argc >= 3 ? argv[2] : (folder + "/models/water.obj");
     std::error_code ec;
