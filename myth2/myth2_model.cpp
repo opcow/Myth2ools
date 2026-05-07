@@ -21,6 +21,7 @@
 #include <cstring>
 #include <cstdint>
 #include <cmath>
+#include <cctype>
 #include <string>
 #include <vector>
 #include <map>
@@ -74,6 +75,26 @@ static std::string tagToString(uint32_t tag) {
         if (c<32||c>126) s[i]='_';
     }
     return std::string(s,4);
+}
+
+static std::string tagToFileStem(uint32_t tag) {
+    std::string out;
+    char hex[4];
+    for (int i = 0; i < 4; i++) {
+        unsigned char c = (unsigned char)((tag >> (24 - i * 8)) & 0xFF);
+        bool illegal = c < 32 || c > 126 ||
+                       c == '<' || c == '>' || c == ':' || c == '"' ||
+                       c == '/' || c == '\\' || c == '|' || c == '?' || c == '*';
+        if (illegal) {
+            snprintf(hex, sizeof(hex), "_%02X", c);
+            out += hex;
+        } else {
+            out += (char)c;
+        }
+    }
+    while (!out.empty() && (out.back() == ' ' || out.back() == '.'))
+        out += '_';
+    return out.empty() ? "tag" : out;
 }
 
 static uint32_t tagFromString(const std::string& s) {
@@ -364,11 +385,47 @@ static const TagEntry* findTag(const std::vector<TagEntry>& tags, uint32_t group
     return nullptr;
 }
 
-static const TagEntry* findTagInFile(const std::vector<TagEntry>& tags, uint32_t group, uint32_t subgroup, const std::string& sourceFile) {
-    for (const auto& e: tags)
-        if (e.groupTag==group && e.subgroupTag==subgroup && e.sourceFile==sourceFile) return &e;
-    // fallback: any file
-    return findTag(tags, group, subgroup);
+static std::string normalizedTextureName(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return (char)std::tolower(c);
+    });
+    auto trim = [](std::string& v) {
+        while (!v.empty() && std::isspace((unsigned char)v.front()))
+            v.erase(v.begin());
+        while (!v.empty() && std::isspace((unsigned char)v.back()))
+            v.pop_back();
+    };
+    trim(s);
+    for (const char* suffix : {" textures", " texture"}) {
+        size_t n = strlen(suffix);
+        if (s.size() >= n && s.compare(s.size() - n, n, suffix) == 0) {
+            s.resize(s.size() - n);
+            trim(s);
+            break;
+        }
+    }
+    return s;
+}
+
+static const TagEntry* findTextureCollection(const std::vector<TagEntry>& tags,
+                                             uint32_t collectionRefTag) {
+    static const uint32_t GROUP_CORE = 0x636F7265u; // 'core'
+    static const uint32_t GROUP_256  = 0x2E323536u; // '.256'
+
+    const TagEntry* coreEntry = findTag(tags, GROUP_CORE, collectionRefTag);
+    if (coreEntry) {
+        std::string wanted = normalizedTextureName(coreEntry->name);
+        if (!wanted.empty()) {
+            for (const auto& e: tags) {
+                if (e.groupTag == GROUP_256 &&
+                    normalizedTextureName(e.name) == wanted) {
+                    return &e;
+                }
+            }
+        }
+    }
+
+    return findTag(tags, GROUP_256, collectionRefTag);
 }
 
 static bool readTagData(const TagEntry& e, std::vector<uint8_t>& out) {
@@ -1138,6 +1195,7 @@ int main(int argc, char* argv[]) {
 
     for (const auto* t: sceneryTypes) {
         std::string tagStr = tagToString(t->typeTag);
+        std::string tagFile = tagToFileStem(t->typeTag);
         if (exportedTypes.count(t->typeTag)) continue;
         exportedTypes.insert(t->typeTag);
 
@@ -1206,16 +1264,17 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
-        // Extract textures from the .256 collection tag
-        // Prefer the tag from the same source file as the mode tag
-        static const uint32_t GROUP_256 = 0x2E323536u; // '.256'
-        const TagEntry* collEntry = findTagInFile(tags, GROUP_256, g.collectionRefTag, modeEntry->sourceFile);
+        // Geometry stores a texture collection reference. Some maps point this
+        // at a core texture-reference tag rather than directly at the .256 tag.
+        const uint32_t originalCollectionRef = g.collectionRefTag;
+        const TagEntry* collEntry = findTextureCollection(tags, originalCollectionRef);
         if (collEntry) {
+            g.collectionRefTag = collEntry->subgroupTag;
             std::vector<uint8_t> collData;
             if (readTagData(*collEntry, collData)) {
                 std::string texDir = outFolder + "/models/textures";
                 makeDirs(texDir);
-                std::string collStr = tagToString(g.collectionRefTag);
+                std::string collStr = tagToFileStem(g.collectionRefTag);
                 for (auto& mat: g.materials) {
                     int numViews = dot256SequenceViewCount(collData, mat.sequenceIndex);
                     for (int vi = 0; vi < numViews; vi++) {
@@ -1243,15 +1302,18 @@ int main(int argc, char* argv[]) {
             if (ok) validTris++;
         }
 
-        std::string objPath = outFolder+"/models/"+tagStr+".obj";
-        std::string mtlPath = outFolder+"/models/"+tagStr+".mtl";
+        std::string objPath = outFolder+"/models/"+tagFile+".obj";
+        std::string mtlPath = outFolder+"/models/"+tagFile+".mtl";
 
         bool ok = exportOBJ(objPath, mtlPath, tagStr, g);
+        std::string collNote = tagToString(g.collectionRefTag);
+        if (g.collectionRefTag != originalCollectionRef)
+            collNote += " via " + tagToString(originalCollectionRef);
         printf("%-8s  %-12s  %-7d  %-7d  %-7d  %s (coll: %s)\n",
                tagStr.c_str(), geomRefStr.c_str(),
                (int)g.vertices.size(), (int)g.surfaces.size(), validTris,
                ok ? "OK" : "FAILED",
-               tagToString(g.collectionRefTag).c_str());
+               collNote.c_str());
         if (ok) {
             modelsExported++;
             geomCache[t->typeTag] = std::move(g);
@@ -1289,6 +1351,7 @@ int main(int argc, char* argv[]) {
         if (t->w0 != 6) continue;  // should always be true since markerType==6
 
         std::string tagStr=tagToString(t->typeTag);
+        std::string tagFile=tagToFileStem(t->typeTag);
 
         // world_distance uses WORLD_FRACTIONAL_BITS=9 (WORLD_ONE=512).
         // posX and posY are the horizontal cell axes; posZ is height (matches terrain physical_height).
@@ -1327,12 +1390,12 @@ int main(int argc, char* argv[]) {
             auto cit = collCache.find(t->typeTag);
             if (cit != collCache.end()) {
                 const std::vector<uint8_t>& collData = cit->second;
-                std::string collStr = tagToString(g.collectionRefTag);
+                std::string collStr = tagToFileStem(g.collectionRefTag);
                 std::string texDir = outFolder + "/models/textures";
                 int perm = (int)inst.permutationIndex;
 
-                std::string instObjPath = outFolder + "/models/" + tagStr + "_" + std::to_string(ii) + ".obj";
-                std::string instMtlPath = outFolder + "/models/" + tagStr + "_" + std::to_string(ii) + ".mtl";
+                std::string instObjPath = outFolder + "/models/" + tagFile + "_" + std::to_string(ii) + ".obj";
+                std::string instMtlPath = outFolder + "/models/" + tagFile + "_" + std::to_string(ii) + ".mtl";
 
                 // Build a copy of the geometry with per-permutation texture paths.
                 // Look up view index per material from the mode tag permutation table.
