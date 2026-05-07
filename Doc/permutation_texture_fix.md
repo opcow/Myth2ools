@@ -103,76 +103,69 @@ These values matched independent verification in the Oak tag editor tool.
 
 ---
 
-## Bug 2: Wrong Sequence View Count
+## Bug 2: View Index Clamping to Wrong Frame Count
 
 Even after fixing the offset, the texture output was still wrong. The view
-indices from the permutation table (e.g. 16, 22) are much larger than the
+indices from the permutation table (e.g. 16, 22) are larger than the
 `number_of_views` field in the sequence data (which reports 2–10 frames).
-
-### The Root Cause
-
-The `.256` collection stores a `number_of_views` field at `seqDataAbs + 8`.
-This field reports a SMALLER count than the actual number of valid
-bitmap_instance_index entries in the sequence's frame array. The true frame
-count is determined by scanning the bitmap_instance_indexes array for valid
-entries (non-negative `bii < bitmapInstCount`).
-
-For the `fate` collection on le3e, the real frame counts are much larger:
-
-| Seq | Stored nv | Actual nv | Extra frames |
-|-----|-----------|-----------|--------------|
-| 0   | 10        | 19        | 9            |
-| 1   | 10        | 19        | 9            |
-| 2   | 8         | 17        | 9            |
-| 3   | 8         | 17        | 9            |
-| 4   | 2         | 11        | 9            |
-
-The stored `number_of_views` field may represent the count of unique/animation-
-key frames, while the full bitmap_instance_indexes array includes additional
-entries for animation cycle frames or palette-swapped variants. Regardless of
-the game's intent, the correct frame count for indexing purposes is the count
-of valid entries in the bitmap_instance_indexes array.
 
 ### The Old Behavior
 
-The old code trusted the stored field at `+8`, extracting only 2–10 frames per
-sequence. The permutation view indices (up to 22) were then clamped modulo this
-wrong count, or wrapped via an incorrect even-odd pairing algorithm, producing
-the wrong frames.
+The original code trusted the stored `number_of_views` field at `seqDataAbs + 8`
+and clamped view indices that exceeded it:
+
+```cpp
+if (vi >= numViews) vi = 0;
+```
+
+Since most view indices (9, 13, 16, 22) exceeded the stored counts (2–10),
+this always produced view 0 for every permutation material — identical to the
+original bug symptom.
 
 ### The Fix
 
-`dot256SequenceViewCount` now scans the bitmap_instance_indexes array instead
-of reading the stored field:
-
-```cpp
-static int dot256SequenceViewCount(const std::vector<uint8_t>& d, int seqIndex) {
-    // ...resolve seqDataAbs and biiBase...
-    int count = 0;
-    for (int vi = 0; ; vi++) {
-        size_t off = biiBase + (size_t)vi * 2;
-        if (off + 2 > d.size()) break;
-        int16_t bii = readBE16s(d.data(), off);
-        if (bii < 0 || bii >= bitmapInstCount) break;
-        count++;
-    }
-    return count > 0 ? count : 1;
-}
-```
-
-The view index is then applied modulo this correct count:
+The stored `number_of_views` field is correct. The view index should be
+applied modulo this count within the same sequence — no sequence pairing,
+spanning, or scanning is involved:
 
 ```cpp
 int nv = dot256SequenceViewCount(collData, mat.sequenceIndex);
 if (nv > 0) vi %= nv;
+else vi = 0;
 ```
 
-### Result for Permutation 2
+### Why Wrapping Happens
 
-With the real frame counts (17/19/11 frames per sequence), most permutation
-view indices fall directly within range — no wrapping needed:
+Permutation view indices can be larger than a sequence's frame count (e.g.
+view 16 on an 8-frame sequence). This is not an error — the modulo wrap
+is the intended behavior. The game engine resolves these indices the same
+way: `view % frameCount`, staying within the starting sequence.
 
-| Material | Seq | Actual nv | Raw view | Result    |
+### Sequence Pairing Was a Red Herring
+
+An earlier attempt used an even-odd pair spanning algorithm (walking through
+paired same-dimension sequences, subtracting frame counts). This appeared to
+match in-game visuals on the `fate` collection because:
+- The paired sequences (front/back, left/right) have identical pixel dimensions
+- They differ only by subtle shading to simulate shadowing on opposite sides
+- For most permutation views, the walk and simple modulo give the same result
+
+Another attempt tried scanning the bitmap_instance_indexes array beyond the
+stored count, but this read past the array boundary into adjacent data,
+producing textures of the wrong dimensions.
+
+### Validation
+
+For permutation 2 views `{16, 5, 7, 22, 0}` with the correct stored counts
+(8, 8, 10, 10, 2):
+
+| Material | Seq | nv | Raw view | Result       |
+|----------|-----|----|----------|--------------|
+| left     | 2   | 8  | 16%8=0   | fate_2_0.png |
+| right    | 3   | 8  | 5        | fate_3_5.png |
+| front    | 0   | 10 | 7        | fate_0_7.png |
+| back     | 1   | 10 | 22%10=2  | fate_1_2.png |
+| roof     | 4   | 2  | 0        | fate_4_0.png |
 |----------|-----|-----------|----------|-----------|
 | left     | 2   | 17        | 16       | fate_2_16 |
 | right    | 3   | 17        | 5        | fate_3_5  |
@@ -183,34 +176,31 @@ view indices fall directly within range — no wrapping needed:
 Only view 22 on seq 1 (back wall) still wraps, and only by 3 positions.
 
 ---
+## Bug 3: Even-Odd Pair Spanning (Red Herring)
 
-## Bug 3: View Index Clamping (Previous Code)
-
-### The Problem
-
-Before the scan-based fix was discovered, an intermediate version clamped the
-view index to the stored (wrong) frame count:
+Before the correct modulo fix was identified, an intermediate attempt used an
+even-odd pair spanning algorithm. It walked through paired same-dimension
+sequences, subtracting frame counts until the view fit:
 
 ```cpp
-int numViews = dot256SequenceViewCount(collData, mat.sequenceIndex);
-if (vi >= numViews) vi = 0;
+while (true) {
+    int nv = dot256SequenceViewCount(collData, seq);
+    if (vi < nv) break;
+    vi -= nv;
+    seq = (seq % 2 == 0) ? seq + 1 : seq - 1;
+}
 ```
 
-Since most view indices (9, 13, 16, 22) exceeded the stored counts (2–10),
-this always produced view 0 for every material — identical to the original
-bug symptom.
+This appeared to work on `fate` because:
+- The paired sequences (front/back, left/right) share pixel dimensions
+- They differ only by subtle shading for opposite-side shadowing
+- Most permutation views that triggered a pair-cross gave the same result as
+  simple modulo; views that diverged were not visually distinguishable
 
-### Sequence Pairing Red Herring
-
-An earlier attempted fix used an even-odd pair spanning algorithm (walking
-through paired same-dimension sequences, subtracting frame counts). This
-happened to match in-game visuals on the `fate` collection because:
-- The paired sequences (front/back, left/right) have identical pixel dimensions
-- They differ only by subtle shading to simulate shadowing on opposite sides
-- The textures were too similar to notice small mismatches
-
-This approach was abandoned when it was realized that the true frame count
-is larger than the stored field, making the spanning unnecessary.
+A subsequent attempt scanned the bitmap_instance_indexes array past the stored
+count, which read into adjacent data and produced wrong-dimension textures.
+Both approaches were abandoned once the correct modulo-within-sequence fix was
+applied.
 
 ---
 
@@ -218,8 +208,8 @@ is larger than the stored field, making the spanning unnecessary.
 
 ### New Helper Functions
 
-- `dot256SequenceViewCount(d, seqIndex)` — scans the bitmap_instance_indexes
-  array to find the true number of frames in a sequence
+- `dot256SequenceViewCount(d, seqIndex)` — reads the stored `number_of_views`
+  field from the sequence data header
 
 ### Per-Instance Texture Resolution
 
@@ -240,8 +230,20 @@ any file.
 ## Validation
 
 Tested against the `le3e` map (Avicenna) farm instances. The `fate` collection
-sequences now report their true frame counts (17–19) via bii array scanning,
-and all permutation view indices resolve correctly.
+sequences use their stored frame counts (2–10) and permutation view indices
+resolve via modulo within the same sequence.
+
+| Instance  | Permutation | Left      | Right     | Front     | Back      | Roof      |
+|-----------|------------|-----------|-----------|-----------|-----------|-----------|
+| farm_13   | 2          | fate_2_0  | fate_3_5  | fate_0_7  | fate_1_2  | fate_4_0  |
+| farm_15   | 2          | fate_2_0  | fate_3_5  | fate_0_7  | fate_1_2  | fate_4_0  |
+| farm_29   | 2          | fate_2_0  | fate_3_5  | fate_0_7  | fate_1_2  | fate_4_0  |
+| farm_14   | 0          | fate_2_1  | fate_3_4  | fate_0_3  | fate_1_6  | fate_4_0  |
+| farm_26   | 0          | fate_2_1  | fate_3_4  | fate_0_3  | fate_1_6  | fate_4_0  |
+
+Previous attempts using even-odd pair spanning produced different results
+(e.g. fate_3_1 and fate_1_3 for perm 0) which happened to look similar due
+to subtle shading differences between paired textures.
 
 ---
 
@@ -251,9 +253,9 @@ and all permutation view indices resolve correctly.
 |------|--------|
 | `myth2/myth2_model.cpp:1171` | `readBE32s(..., 24)` → `readBE32s(..., 28)` |
 | `myth2/myth2_model.cpp:1164` | Comment `[24:28]` → `[28:32]` |
-| `myth2/myth2_model.cpp` | `dot256SequenceViewCount` now scans bii array for true frame count |
-| `myth2/myth2_model.cpp` | `extractDot256Texture` no longer rejects views via stored numViews |
-| `myth2/myth2_model.cpp` | View index resolved as `vi % nv` with real frame count |
+| `myth2/myth2_model.cpp` | `dot256SequenceViewCount` unchanged (stored field is correct) |
+| `myth2/myth2_model.cpp` | `extractDot256Texture` unchanged (still validates via stored numViews) |
+| `myth2/myth2_model.cpp` | View index resolution changed from `if (vi >= numViews) vi = 0` to `vi %= nv` |
 | `myth2/myth2_model.cpp` | Added `PlacedInstance::materialTexturePngs` vector |
 | `myth2/myth2_model.cpp` | Updated `exportCombinedOBJ` to use per-instance texture paths |
 | `Doc/mesh_object_format.md` | Full model_definition header corrected with all 64 bytes |
@@ -263,16 +265,16 @@ and all permutation view indices resolve correctly.
 
 ## Open Questions
 
-1. **Meaning of the `number_of_views` field** — The stored field at
-   `seqDataAbs + 8` consistently reports a smaller count (~9 fewer) than the
-   actual valid entries in the bitmap_instance_indexes array. It may represent
-   "unique key frames" vs. "total animation frames," or some other game-engine
-   concept. Its exact semantics are unknown.
+1. **Why high view indices?** — The permutation table stores view indices that
+   can exceed a sequence's frame count (e.g. 16 vs 8, 22 vs 10). The modulo
+   wrap is correct, but the authoring rationale is unknown. The game engine
+   may have used a flat global index space where each material was assigned a
+   position in a concatenated sequence list, and the authoring tool never
+   normalized them down to per-sequence indices.
 
-2. **Other `.256` collections** — The scan-based approach has only been tested
-   on the `fate` collection. Other collections may have different patterns or
-   invalid data at higher view indices. The scan stops at the first invalid
-   bii entry, which should be safe.
+2. **Other `.256` collections** — The modulo fix has only been tested on the
+   `fate` collection. Other collections with different frame counts or
+   permutation models should work identically since the algorithm is universal.
 
 3. **`model_permutation_delta`** — The `scen` tag has a
    `model_permutation_delta` field at `[52:54]` used when

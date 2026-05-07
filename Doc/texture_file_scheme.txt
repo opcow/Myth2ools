@@ -13,7 +13,7 @@ PNG naming convention: <collection_tag>_<sequence>_<view>.png
 
 Root Cause
 ----------
-Three independent bugs caused permutation models to always emit textures from
+Two independent bugs caused permutation models to always emit textures from
 view index 0 instead of the correct variant:
 
 Bug 1 -- Wrong offset for permutations_offset (myth2_model.cpp:1171)
@@ -28,39 +28,31 @@ Bug 1 -- Wrong offset for permutations_offset (myth2_model.cpp:1171)
 
   Fix: readBE32s(modeData.data(), 24) -> readBE32s(modeData.data(), 28)
 
-Bug 2 -- Wrong sequence view count
-  The .256 collection's sequence_data struct stores a number_of_views field
-  at offset +8, but this is NOT the true frame count. The actual number of
-  frames is determined by scanning the bitmap_instance_indexes array for
-  valid entries (non-negative bii < bitmapInstCount).
+Bug 2 -- View index clamped instead of modulo
+  The old code clamped: if (vi >= numViews) vi = 0. Since most permutation
+  view indices (9, 13, 16, 22) exceeded the stored sequence frame counts
+  (2-10), this always gave view 0 for every material.
 
-  For the fate collection, the stored field reports 2-10 frames, but the
-  real counts are 17-19 (about 9 extra frames per sequence).
+  The stored number_of_views field at seqDataAbs+8 is correct. The fix is
+  modulo arithmetic within the same sequence:
 
-  Fix: dot256SequenceViewCount now scans the bii array instead of reading
-  the stored field.
-
-Bug 3 -- View index clamped to stored (wrong) frame count (fix for Bug 2
-         made Bug 3's original fix obsolete)
-  The old code clamped: if (vi >= numViews) vi = 0. Since most view indices
-  (9, 13, 16, 22) exceeded the stored counts (2-10), this always gave view 0.
-  With the correct frame count from Bug 2's scan, most view indices fall
-  directly within range, and modulo gives the right result for the remainder.
-
-  Fix: vi %= nv where nv is the scanned frame count.
+  Fix: vi %= nv
 
   An earlier attempt used an even-odd pair spanning algorithm, which appeared
   correct because the paired sequences (front/back, left/right) have identical
   pixel dimensions and only differ by subtle shading (simulating shadow on
   opposite sides of symmetrical buildings). The textures were too similar to
-  notice the mismatch. This attempt was abandoned once Bug 2 was identified.
+  notice the mismatch.
 
-View Resolution Algorithm (myth2_model.cpp, dot256SequenceViewCount + modulo)
------------------------------------------------------------------------------
-  // Step 1: Get true frame count by scanning bii array
+  Another attempt scanned the bitmap_instance_indexes array past the stored
+  count, but this read into adjacent data and produced wrong textures.
+
+View Resolution Algorithm (myth2_model.cpp, modulo within sequence)
+-------------------------------------------------------------------
+  // Step 1: Get frame count from stored sequence header field
   int nv = dot256SequenceViewCount(collData, mat.sequenceIndex);
 
-  // Step 2: Resolve view index within correct frame count
+  // Step 2: Resolve view index within this count (same sequence only)
   int vi = (int)(*matViews)[mi];
   if (nv > 0) vi %= nv;
   else vi = 0;
@@ -71,8 +63,7 @@ View Resolution Algorithm (myth2_model.cpp, dot256SequenceViewCount + modulo)
 Files Modified
 --------------
   myth2_model.cpp:1171 -- readBE32s offset 24 -> 28
-  myth2_model.cpp -- dot256SequenceViewCount now scans bii array
-  myth2_model.cpp -- extractDot256Texture no longer rejects views via numViews
+  myth2_model.cpp -- view resolution changed from clamp to modulo
   Doc/mesh_object_format.md -- model_definition header shows all 64 bytes
   Doc/model_extraction.md -- [24:28] -> [28:32] for permutations_offset
 
@@ -89,17 +80,18 @@ Context: Tag Install Strategy
 
 Validated
 ---------
-  Tested against le3e farmhouse instances with fate collection. The scan-
-  based frame counts (17-19 per sequence) allow most permutation view
-  indices to resolve directly, with modulo covering the few remaining
-  indices that still exceed the real count.
+  Tested against le3e farmhouse instances with fate collection. Sequence
+  frame counts: seq 0=10, seq 1=10, seq 2=8, seq 3=8, seq 4=2.
 
-  For perm 2 views {16, 5, 7, 22, 0} with real counts (17, 17, 19, 19, 11):
-    left  (seq 2) view 16 -> fate_2_16 (direct, 16 < 17)
-    right (seq 3) view 5  -> fate_3_5  (direct, 5 < 17)
-    front (seq 0) view 7  -> fate_0_7  (direct, 7 < 19)
-    back  (seq 1) view 22 -> fate_1_3  (22 % 19 = 3)
-    roof  (seq 4) view 0  -> fate_4_0  (direct, 0 < 11)
+  For perm 2 views {16, 5, 7, 22, 0}:
+    left  (seq 2) view 16 % 8      -> fate_2_0
+    right (seq 3) view 5           -> fate_3_5
+    front (seq 0) view 7           -> fate_0_7
+    back  (seq 1) view 22 % 10     -> fate_1_2
+    roof  (seq 4) view 0           -> fate_4_0
+
+  The permutation view indices wrap via modulo within each sequence.
+  No sequence pairing or spanning is involved.
 
 Appendix: model_permutation_delta (scen tag, bytes [52:54])
 ----------------------------------------------------------
