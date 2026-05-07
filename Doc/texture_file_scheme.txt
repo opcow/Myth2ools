@@ -93,6 +93,31 @@ Validated
   The permutation view indices wrap via modulo within each sequence.
   No sequence pairing or spanning is involved.
 
+Why Raw View Selectors Can Exceed number_of_views
+-------------------------------------------------
+  The mode permutation byte should be treated as a raw view selector, not as
+  an already-normalized index into the material sequence's bitmap list. Oak
+  exposes the same condition in its editor, for example "view 17 of 8" or
+  "view 23 of 10"; Oak's display is 1-based, so these correspond to stored
+  selector values 16 and 22.
+
+  This is expected:
+
+    stored 16 on an 8-view sequence  -> 16 % 8  -> view 0
+    stored 22 on a 10-view sequence -> 22 % 10 -> view 2
+
+  The best current interpretation is that the selector records the authored
+  variation phase for a material, and the .256 sequence lookup resolves that
+  selector against the sequence's own number_of_views. Different building
+  sides can therefore share one permutation row while each side has a different
+  frame count: fate_0 and fate_1 have 10 views, fate_2 and fate_3 have 8, and
+  fate_4 has 2.
+
+  Keeping the raw selector is useful to the authoring pipeline because it does
+  not destroy information. If a sequence later gains more frames, selector 16
+  is no longer equivalent to normalized view 0. The shipped tags and Oak both
+  preserve the raw value, while the runtime result matches modulo resolution.
+
 Appendix: model_permutation_delta (scen tag, bytes [52:54])
 ----------------------------------------------------------
   The scen tag's scenery_definition struct has a model_permutation_delta

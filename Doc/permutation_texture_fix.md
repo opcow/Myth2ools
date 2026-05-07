@@ -265,12 +265,29 @@ to subtle shading differences between paired textures.
 
 ## Open Questions
 
-1. **Why high view indices?** — The permutation table stores view indices that
-   can exceed a sequence's frame count (e.g. 16 vs 8, 22 vs 10). The modulo
-   wrap is correct, but the authoring rationale is unknown. The game engine
-   may have used a flat global index space where each material was assigned a
-   position in a concatenated sequence list, and the authoring tool never
-   normalized them down to per-sequence indices.
+1. **Why high view indices?** — The permutation table stores raw view selector
+   values, not pre-normalized indexes into the material sequence's current
+   bitmap list. These selectors can exceed a sequence's frame count (e.g.
+   16 vs 8, 22 vs 10), and both in-game appearance and Oak's tag editor output
+   support resolving them with modulo against that material sequence's
+   `number_of_views`.
+
+   Oak displays the same raw condition as "view 17 of 8" or "view 23 of 10"
+   because Oak's UI is 1-based while the stored mode permutation bytes are
+   0-based. In code terms, those examples are stored selectors 16 and 22:
+
+   ```
+   16 % 8  -> 0
+   22 % 10 -> 2
+   ```
+
+   The likely authoring model is that the permutation byte represents a shared
+   variation phase or raw collection view selector. Each material side then
+   resolves that selector within its own sequence length. This preserves more
+   intent than canonicalizing every value down to the current sequence count:
+   if a sequence later gained more frames, a raw selector such as 16 would no
+   longer be equivalent to 0. The shipped tools/tags appear to preserve the raw
+   selector and rely on runtime sequence lookup to wrap it.
 
 2. **Other `.256` collections** — The modulo fix has only been tested on the
    `fate` collection. Other collections with different frame counts or
