@@ -364,6 +364,13 @@ static const TagEntry* findTag(const std::vector<TagEntry>& tags, uint32_t group
     return nullptr;
 }
 
+static const TagEntry* findTagInFile(const std::vector<TagEntry>& tags, uint32_t group, uint32_t subgroup, const std::string& sourceFile) {
+    for (const auto& e: tags)
+        if (e.groupTag==group && e.subgroupTag==subgroup && e.sourceFile==sourceFile) return &e;
+    // fallback: any file
+    return findTag(tags, group, subgroup);
+}
+
 static bool readTagData(const TagEntry& e, std::vector<uint8_t>& out) {
     FILE* f=fopen(e.sourceFile.c_str(),"rb");
     if (!f) return false;
@@ -764,6 +771,7 @@ struct PlacedInstance {
     float cellX, cellY, cellZ;
     float facingRad;  // rotation around up axis
     float halfW, halfH; // half grid dimensions, for terrain-matching coordinate transform
+    std::vector<std::string> materialTexturePngs; // per-material texture paths (permutation-specific)
 };
 
 // Append a terrain OBJ (displacement.obj) into the combined OBJ string,
@@ -841,9 +849,14 @@ static bool exportCombinedOBJ(const std::string& objPath,
                                 (mat.name.empty() ? "mat" + std::to_string(mi) : mat.name);
             mtl += "newmtl " + qname + "\n";
             mtl += "Ka 1.0 1.0 1.0\nKd 1.0 1.0 1.0\nKs 0.0 0.0 0.0\nillum 1\n";
-            if (!mat.texturePng.empty()) {
+            std::string tex;
+            if (mi < inst.materialTexturePngs.size() && !inst.materialTexturePngs[mi].empty())
+                tex = inst.materialTexturePngs[mi];
+            else if (!mat.texturePng.empty())
+                tex = mat.texturePng;
+            if (!tex.empty()) {
                 mtl += "map_Kd textures/";
-                mtl += fs::path(mat.texturePng).filename().string();
+                mtl += fs::path(tex).filename().string();
                 mtl += "\n";
             }
             mtl += "\n";
@@ -1186,8 +1199,9 @@ int main(int argc, char* argv[]) {
         }
 
         // Extract textures from the .256 collection tag
+        // Prefer the tag from the same source file as the mode tag
         static const uint32_t GROUP_256 = 0x2E323536u; // '.256'
-        const TagEntry* collEntry = findTag(tags, GROUP_256, g.collectionRefTag);
+        const TagEntry* collEntry = findTagInFile(tags, GROUP_256, g.collectionRefTag, modeEntry->sourceFile);
         if (collEntry) {
             std::vector<uint8_t> collData;
             if (readTagData(*collEntry, collData)) {
@@ -1299,6 +1313,7 @@ int main(int argc, char* argv[]) {
         auto git = geomCache.find(t->typeTag);
         if (git != geomCache.end()) {
             const Geometry& g = git->second;
+            std::vector<std::string> permTexPngs;
 
             // Emit per-instance OBJ+MTL with permutation-specific textures
             auto cit = collCache.find(t->typeTag);
@@ -1326,11 +1341,12 @@ int main(int argc, char* argv[]) {
                     if (matViews && mi < (int)matViews->size() && (*matViews)[mi] != 0xFF)
                         vi = (int)(*matViews)[mi];
                     int numViews = dot256SequenceViewCount(collData, mat.sequenceIndex);
-                    if (vi >= numViews) vi = 0;
+                    if (vi >= numViews) { vi = 0; }
                     std::string pngName = collStr + "_" + std::to_string(mat.sequenceIndex)
                                         + "_" + std::to_string(vi) + ".png";
                     std::string pngPath = texDir + "/" + pngName;
                     mat.texturePng = fs::exists(pngPath) ? pngPath : "";
+                    permTexPngs.push_back(mat.texturePng);
                 }
                 WorldTransform wt;
                 wt.cellX     = cellX;
@@ -1351,6 +1367,7 @@ int main(int argc, char* argv[]) {
             pi.facingRad  = (facingDeg - 90.0f) * (float)(PI / 180.0);
             pi.halfW      = (float)(mh.submeshW * 32) * 0.5f;
             pi.halfH      = (float)(mh.submeshH * 32) * 0.5f;
+            pi.materialTexturePngs = permTexPngs;
             placedInstances.push_back(pi);
         }
     }
