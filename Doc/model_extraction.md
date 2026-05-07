@@ -243,8 +243,15 @@ The MTL selects textures based on the permutation table:
 perm = user_data[1]
 matViews = permCache[typeTag][perm]        // [matIndex] → viewIndex
 vi = matViews[matIndex]                    // 0xFF = not rendered → vi=0 fallback
+vi = vi % sequence.number_of_views         // raw selector wraps within this material sequence
 png = "<collTag>_<seqIndex>_<vi>.png"
 ```
+
+The `viewIndex` byte is a raw view selector rather than a value already normalized to the
+sequence's frame count. It can be larger than `sequence.number_of_views`; for example, Oak
+may display this as "view 17 of 8" because Oak's UI is 1-based while the stored selector is
+0-based (`16 % 8 == 0`). This appears to match the engine behavior: resolve the raw selector
+modulo the material sequence's own `number_of_views`, with no cross-sequence spanning.
 
 MTL `map_Kd` paths use `textures/<filename>` relative to the `models/` output folder.
 

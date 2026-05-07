@@ -11,7 +11,7 @@
 // listed in the output but skipped for 3D export.
 //
 // Usage:
-//   myth2_model <tags_folder> <out_folder>
+//   myth2_model <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite]
 //
 // Example:
 //   myth2_model myth2_tags/small\ install out/le3e
@@ -434,25 +434,6 @@ static bool readUnitTypes(const std::vector<uint8_t>& d, const MeshHeader& h,
 
 // marker_data (64 bytes) — exact layout from markers.h / markers.cpp byte-swap data:
 //   [0:4]   flags (uint32)
-//   [4:6]   type (int16)  — marker type enum (6 = _marker_model = scenery w/ geometry)
-//   [6:8]   palette_index (int16)  — index into marker palette table
-//   [8:10]  identifier (int16)
-//   [10:12] minimum_difficulty_level (int16)
-//   [12:16] position.x (int32, world_distance, WORLD_FRACTIONAL_BITS=9)
-//   [16:20] position.y (int32, world_distance)
-//   [20:24] position.z (int32, world_distance = height above datum)
-//   [24:30] velocity (3 × int16)
-//   [30:32] height above ground (int16)
-//   [32:34] yaw (uint16, 0..65535 = full circle)
-//   [34:36] pitch (uint16)
-//   [36:52] user_data[16]
-//   [52:54] roll (uint16)
-//   [54:56] unused
-//   [56:60] render_chain ptr (zeroed on disk)
-//   [60:62] data_index (int16)
-//   [62:64] data_identifier (int16)
-// marker_data (64 bytes) — exact layout from markers.h / markers.cpp byte-swap data:
-//   [0:4]   flags (uint32)
 //   [4:6]   type (int16)  — marker type enum:
 //             0=team, 1=scenery(collision), 3=monster, 5=effect, 6=_marker_model(placed 3D), 9=netgame, 11=local_ctrl
 //   [6:8]   palette_index (int16)  — index into marker palette table
@@ -632,7 +613,8 @@ struct WorldTransform {
 
 static bool exportOBJ(const std::string& objPath, const std::string& mtlPath,
                       const std::string& typeTag, const Geometry& g,
-                      const WorldTransform* wt = nullptr) {
+                      const WorldTransform* wt = nullptr,
+                      const std::vector<bool>* hiddenMaterials = nullptr) {
     // Only export surfaces with all valid vertex indices
     // Collect valid triangles
     struct Tri {
@@ -642,6 +624,12 @@ static bool exportOBJ(const std::string& objPath, const std::string& mtlPath,
     };
     std::vector<Tri> tris;
     for (const auto& s: g.surfaces) {
+        if (hiddenMaterials &&
+            s.materialIndex >= 0 &&
+            s.materialIndex < (int)hiddenMaterials->size() &&
+            (*hiddenMaterials)[s.materialIndex]) {
+            continue;
+        }
         bool valid=true;
         for (int c=0; c<3; c++) {
             int16_t vi=s.corners[c].vertexIndex;
@@ -667,6 +655,11 @@ static bool exportOBJ(const std::string& objPath, const std::string& mtlPath,
     {
         std::string mtl;
         for (int i=0; i<(int)g.materials.size(); i++) {
+            if (hiddenMaterials &&
+                i < (int)hiddenMaterials->size() &&
+                (*hiddenMaterials)[i]) {
+                continue;
+            }
             const auto& mat = g.materials[i];
             mtl += "newmtl ";
             mtl += (mat.name.empty() ? "mat"+std::to_string(i) : mat.name);
@@ -772,6 +765,7 @@ struct PlacedInstance {
     float facingRad;  // rotation around up axis
     float halfW, halfH; // half grid dimensions, for terrain-matching coordinate transform
     std::vector<std::string> materialTexturePngs; // per-material texture paths (permutation-specific)
+    std::vector<bool> hiddenMaterials; // per-material 0xFF permutation slots
 };
 
 // Append a terrain OBJ (displacement.obj) into the combined OBJ string,
@@ -844,6 +838,8 @@ static bool exportCombinedOBJ(const std::string& objPath,
     for (size_t ii = 0; ii < instances.size(); ii++) {
         const PlacedInstance& inst = instances[ii];
         for (size_t mi = 0; mi < inst.geom->materials.size(); mi++) {
+            if (mi < inst.hiddenMaterials.size() && inst.hiddenMaterials[mi])
+                continue;
             const auto& mat = inst.geom->materials[mi];
             std::string qname = inst.typeTag + "_" + std::to_string(ii) + "_" +
                                 (mat.name.empty() ? "mat" + std::to_string(mi) : mat.name);
@@ -886,6 +882,11 @@ static bool exportCombinedOBJ(const std::string& objPath,
         struct Tri { int16_t mat; int16_t vi[3]; float u[3], v[3]; };
         std::vector<Tri> tris;
         for (const auto& s: g.surfaces) {
+            if (s.materialIndex >= 0 &&
+                s.materialIndex < (int)inst.hiddenMaterials.size() &&
+                inst.hiddenMaterials[s.materialIndex]) {
+                continue;
+            }
             bool valid = true;
             for (int c = 0; c < 3; c++) {
                 int16_t vi = s.corners[c].vertexIndex;
@@ -998,13 +999,14 @@ static void usage(const char* p) {
     fprintf(stderr,
         "Myth II 3D Model Extractor\n\n"
         "Usage:\n"
-        "  %s <tags_folder> <out_folder> [terrain.obj] [--world-space]\n\n"
+        "  %s <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite]\n\n"
         "Arguments:\n"
         "  tags_folder    folder containing Myth II tag files (e.g. 'small install')\n"
         "  out_folder     extracted map folder (e.g. out/le3e, must contain raw/mesh_tag.bin)\n"
         "  terrain.obj    terrain OBJ to inline into map_combined.obj\n"
         "                 (auto-detected from models/displacement.obj if present)\n"
         "  --world-space  per-instance OBJs use world (map) coordinates instead of local origin\n\n"
+        "  --overwrite    regenerate existing models/textures/*.png files\n\n"
         "Output:\n"
         "  <out_folder>/models/<tag>.obj      per-type geometry (local origin)\n"
         "  <out_folder>/models/<tag>.mtl\n"
@@ -1021,10 +1023,12 @@ int main(int argc, char* argv[]) {
     std::string outFolder    = argv[2];
     std::string terrainObjPath;
     bool worldSpace = false;
+    bool overwriteTextures = false;
 
     for (int i = 3; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--world-space") worldSpace = true;
+        else if (a == "--overwrite") overwriteTextures = true;
         else if (terrainObjPath.empty()) terrainObjPath = a;
         else { usage(argv[0]); return 1; }
     }
@@ -1148,13 +1152,13 @@ int main(int argc, char* argv[]) {
             continue;
         }
         std::vector<uint8_t> modeData;
-        if (!readTagData(*modeEntry, modeData) || modeData.size() < 8) {
+        if (!readTagData(*modeEntry, modeData) || modeData.size() < 64) {
             printf("%-8s  %-12s  %-7s  %-7s  %-7s  ERROR reading mode\n",
                    tagStr.c_str(), "-", "-", "-", "-");
             continue;
         }
         // model_definition header (64 bytes): [4:8] geometry_tag, [12:14] permutation_count,
-        // [24:28] permutations_offset (relative to data start at byte 64)
+        // [28:32] permutations_offset (relative to data start at byte 64)
         uint32_t geomRefTag = readBE32u(modeData.data(), 4);
         std::string geomRefStr = tagToString(geomRefTag);
 
@@ -1162,15 +1166,19 @@ int main(int argc, char* argv[]) {
         {
             int16_t permCount = readBE16s(modeData.data(), 12);
             int32_t permRelOff = readBE32s(modeData.data(), 28);
-            size_t permBase = 64 + (size_t)permRelOff;
             std::vector<std::vector<uint8_t>> perms;
-            for (int pi = 0; pi < permCount; pi++) {
-                size_t pe = permBase + (size_t)pi * 64;
-                if (pe + 34 > modeData.size()) break;
-                // permutations[32] starts at byte 2 within the 64-byte struct
-                std::vector<uint8_t> matViews(32);
-                memcpy(matViews.data(), modeData.data() + pe + 2, 32);
-                perms.push_back(std::move(matViews));
+            if (permCount > 0 && permRelOff >= 0) {
+                size_t permBase = 64 + (size_t)permRelOff;
+                if (permBase <= modeData.size()) {
+                    for (int pi = 0; pi < permCount; pi++) {
+                        size_t pe = permBase + (size_t)pi * 64;
+                        if (pe + 34 > modeData.size()) break;
+                        // permutations[32] starts at byte 2 within the 64-byte struct
+                        std::vector<uint8_t> matViews(32);
+                        memcpy(matViews.data(), modeData.data() + pe + 2, 32);
+                        perms.push_back(std::move(matViews));
+                    }
+                }
             }
             if (!perms.empty())
                 permCache[t->typeTag] = std::move(perms);
@@ -1214,7 +1222,7 @@ int main(int argc, char* argv[]) {
                         std::string pngName = collStr + "_" + std::to_string(mat.sequenceIndex)
                                             + "_" + std::to_string(vi) + ".png";
                         std::string pngPath = texDir + "/" + pngName;
-                        if (!fs::exists(pngPath))
+                        if (overwriteTextures || !fs::exists(pngPath))
                             extractDot256Texture(collData, mat.sequenceIndex, vi, pngPath);
                         if (vi == 0 && fs::exists(pngPath))
                             mat.texturePng = pngPath;
@@ -1239,7 +1247,6 @@ int main(int argc, char* argv[]) {
         std::string mtlPath = outFolder+"/models/"+tagStr+".mtl";
 
         bool ok = exportOBJ(objPath, mtlPath, tagStr, g);
-        printf("  center: (%.1f, %.1f, %.1f)\n", g.cx, g.cy, g.cz);
         printf("%-8s  %-12s  %-7d  %-7d  %-7d  %s (coll: %s)\n",
                tagStr.c_str(), geomRefStr.c_str(),
                (int)g.vertices.size(), (int)g.surfaces.size(), validTris,
@@ -1314,6 +1321,7 @@ int main(int argc, char* argv[]) {
         if (git != geomCache.end()) {
             const Geometry& g = git->second;
             std::vector<std::string> permTexPngs;
+            std::vector<bool> hiddenMaterials;
 
             // Emit per-instance OBJ+MTL with permutation-specific textures
             auto cit = collCache.find(t->typeTag);
@@ -1337,8 +1345,15 @@ int main(int argc, char* argv[]) {
 
                 for (int mi = 0; mi < (int)instGeom.materials.size(); mi++) {
                     auto& mat = instGeom.materials[mi];
+                    bool hidden = matViews && mi < (int)matViews->size() && (*matViews)[mi] == 0xFF;
+                    hiddenMaterials.push_back(hidden);
+                    if (hidden) {
+                        mat.texturePng.clear();
+                        permTexPngs.push_back("");
+                        continue;
+                    }
                     int vi = 0;
-                    if (matViews && mi < (int)matViews->size() && (*matViews)[mi] != 0xFF)
+                    if (matViews && mi < (int)matViews->size())
                         vi = (int)(*matViews)[mi];
                     int nv = dot256SequenceViewCount(collData, mat.sequenceIndex);
                     if (nv > 0) vi %= nv;
@@ -1356,7 +1371,8 @@ int main(int argc, char* argv[]) {
                 wt.facingRad = (facingDeg - 90.0f) * (float)(PI / 180.0);
                 wt.halfW     = (float)(mh.submeshW * 32) * 0.5f;
                 wt.halfH     = (float)(mh.submeshH * 32) * 0.5f;
-                exportOBJ(instObjPath, instMtlPath, tagStr, instGeom, worldSpace ? &wt : nullptr);
+                exportOBJ(instObjPath, instMtlPath, tagStr, instGeom,
+                          worldSpace ? &wt : nullptr, &hiddenMaterials);
             }
 
             PlacedInstance pi;
@@ -1369,6 +1385,7 @@ int main(int argc, char* argv[]) {
             pi.halfW      = (float)(mh.submeshW * 32) * 0.5f;
             pi.halfH      = (float)(mh.submeshH * 32) * 0.5f;
             pi.materialTexturePngs = permTexPngs;
+            pi.hiddenMaterials = hiddenMaterials;
             placedInstances.push_back(pi);
         }
     }
