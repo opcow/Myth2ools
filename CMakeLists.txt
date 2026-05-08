@@ -112,6 +112,19 @@ foreach(target IN LISTS RELEASE_TARGETS)
             "${PACKAGE_STAGING_DIR}/"
     )
 endforeach()
+if(WIN32)
+    list(APPEND PACKAGE_COPY_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/extract_assets.bat"
+            "${PACKAGE_STAGING_DIR}/"
+    )
+else()
+    list(APPEND PACKAGE_COPY_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/extract_assets.sh"
+            "${PACKAGE_STAGING_DIR}/"
+    )
+endif()
 
 add_custom_target(package_release
     DEPENDS ${RELEASE_TARGETS}

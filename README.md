@@ -178,6 +178,21 @@ static animation snapshots and let Blender show only the keyframed frames.
 
 ## Example Workflow
 
+On Windows, `extract_assets.bat` runs the common extraction/export sequence in
+one step:
+
+```bat
+extract_assets.bat myth2_tags le3e out\le3e --overwrite
+```
+
+On Linux/macOS, use the Bash version:
+
+```bash
+./extract_assets.sh myth2_tags le3e out/le3e --overwrite
+```
+
+It runs `extract_map`, `export_mesh`, `export_water_mesh`, and `export_models`.
+
 ```bash
 extract_map myth2_tags le3e --out out/le3e
 export_mesh out/le3e
