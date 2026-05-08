@@ -411,6 +411,17 @@ where `<tag>` is the latest git tag reported by `git describe --tags --abbrev=0`
 and `<platform>` is a normalized OS/architecture suffix such as `windows-x64`,
 `linux-x64`, or `macos-arm64`.
 
+### GitHub Release
+
+Pushing a `v*` tag runs the release workflow on GitHub Actions. It builds the
+release packages on Windows, Linux, and macOS, then creates or updates the
+GitHub Release for that tag with the generated zip files.
+
+```bash
+git tag -a v0.3.2 -m "Release v0.3.2"
+git push origin v0.3.2
+```
+
 ### Source Layout
 
 - `tfl/` contains Myth: The Fallen Lords-era tools and exploratory helpers.
