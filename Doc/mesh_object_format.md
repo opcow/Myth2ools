@@ -122,8 +122,9 @@ In Willow Creek (`le3e`), the opening gate marker is:
 
 `myth2_model` exports each animation frame as
 `models/<anim>_<markerIdx>_frame##_*.obj` and writes a Blender/import-friendly
-manifest at `models/animations.json`. `map_combined.obj` includes only the first
-frame of each animation as the static map snapshot.
+manifest at `models/animations.json`. `--animation-frame first|none|all` controls
+whether `map_combined.obj` includes the first frame, no animation frames, or all
+animation frames. The default is `first`.
 
 ---
 

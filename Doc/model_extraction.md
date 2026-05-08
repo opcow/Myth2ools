@@ -280,7 +280,7 @@ MTL `map_Kd` paths use `textures/<filename>` relative to the `models/` output fo
     <anim>_<N>_frame##_*.obj  model-animation frame geometry
     <anim>_<N>_frame##_*.mtl
     animations.json        animation placements, timing, frame order, OBJ/MTL paths
-    map_combined.obj       all instances transformed into world space + terrain
+    map_combined.obj       instances transformed into world space + terrain
     map_combined.mtl
     displacement.obj       terrain mesh (written by myth2_mesh)
     displacement.mtl       terrain material (map_Kd ../layers/terrain.png)
@@ -288,3 +288,8 @@ MTL `map_Kd` paths use `textures/<filename>` relative to the `models/` output fo
       <collTag>_<seq>_<view>.png   all extracted texture variants
   placement.json           direct model placements plus animation marker summaries
 ```
+
+`myth2_model --animation-frame first|none|all` controls how model animations are
+represented in `map_combined.obj`. The default `first` writes a static first-frame
+snapshot. `none` omits animation snapshots for a clean Blender animation import.
+`all` includes every frame in the combined OBJ, mainly for debugging.

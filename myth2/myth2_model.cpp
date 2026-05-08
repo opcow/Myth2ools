@@ -11,7 +11,7 @@
 // listed in the output but skipped for 3D export.
 //
 // Usage:
-//   myth2_model <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite]
+//   myth2_model <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite] [--animation-frame first|none|all]
 //
 // Example:
 //   myth2_model myth2_tags/small\ install out/le3e
@@ -847,6 +847,12 @@ static bool exportOBJ(const std::string& objPath, const std::string& mtlPath,
 
 static constexpr double PI = 3.14159265358979323846;
 
+enum class AnimationFrameMode {
+    First,
+    None,
+    All
+};
+
 struct PlacedInstance {
     const Geometry* geom;
     std::string typeTag;
@@ -1088,7 +1094,8 @@ static void usage(const char* p) {
     fprintf(stderr,
         "Myth II 3D Model Extractor\n\n"
         "Usage:\n"
-        "  %s <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite]\n\n"
+        "  %s <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite]\n"
+        "     [--animation-frame first|none|all]\n\n"
         "Arguments:\n"
         "  tags_folder    folder containing Myth II tag files (e.g. 'small install')\n"
         "  out_folder     extracted map folder (e.g. out/le3e, must contain raw/mesh_tag.bin)\n"
@@ -1096,6 +1103,8 @@ static void usage(const char* p) {
         "                 (auto-detected from models/displacement.obj if present)\n"
         "  --world-space  per-instance OBJs use world (map) coordinates instead of local origin\n\n"
         "  --overwrite    regenerate existing models/textures/*.png files\n\n"
+        "  --animation-frame first|none|all\n"
+        "                 animation frames to include in map_combined.obj (default: first)\n\n"
         "Output:\n"
         "  <out_folder>/models/<tag>.obj      per-type geometry (local origin)\n"
         "  <out_folder>/models/<tag>.mtl\n"
@@ -1115,11 +1124,27 @@ int main(int argc, char* argv[]) {
     std::string terrainObjPath;
     bool worldSpace = false;
     bool overwriteTextures = false;
+    AnimationFrameMode animationFrameMode = AnimationFrameMode::First;
 
     for (int i = 3; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--world-space") worldSpace = true;
         else if (a == "--overwrite") overwriteTextures = true;
+        else if (a == "--animation-frame") {
+            if (i + 1 >= argc) { usage(argv[0]); return 1; }
+            std::string v = argv[++i];
+            if (v == "first") animationFrameMode = AnimationFrameMode::First;
+            else if (v == "none") animationFrameMode = AnimationFrameMode::None;
+            else if (v == "all") animationFrameMode = AnimationFrameMode::All;
+            else { usage(argv[0]); return 1; }
+        }
+        else if (a.rfind("--animation-frame=", 0) == 0) {
+            std::string v = a.substr(strlen("--animation-frame="));
+            if (v == "first") animationFrameMode = AnimationFrameMode::First;
+            else if (v == "none") animationFrameMode = AnimationFrameMode::None;
+            else if (v == "all") animationFrameMode = AnimationFrameMode::All;
+            else { usage(argv[0]); return 1; }
+        }
         else if (terrainObjPath.empty()) terrainObjPath = a;
         else { usage(argv[0]); return 1; }
     }
@@ -1663,7 +1688,10 @@ int main(int argc, char* argv[]) {
                       worldSpace ? &wt : nullptr,
                       &hiddenMaterials);
 
-            if (fi == 0) {
+            bool includeInCombined =
+                animationFrameMode == AnimationFrameMode::All ||
+                (animationFrameMode == AnimationFrameMode::First && fi == 0);
+            if (includeInCombined) {
                 PlacedInstance pi;
                 pi.geom       = &git->second;
                 pi.typeTag    = animStr + "_" + frameTagStr;
