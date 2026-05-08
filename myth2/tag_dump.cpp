@@ -1,4 +1,4 @@
-// myth2_dump.cpp
+// tag_dump.cpp
 // Minimal Myth II tag-file dumper for plugin/local files.
 //
 // Supports:
@@ -6,15 +6,15 @@
 //   - mth2 local single-tag files
 //
 // Usage:
-//   myth2_dump <file>
-//   myth2_dump <file> list [type|all]
-//   myth2_dump <file> entrypoints
+//   tag_dump <file>
+//   tag_dump <file> list [type|all]
+//   tag_dump <file> entrypoints
 //
 // Examples:
-//   myth2_dump "Behind the Library v2"
-//   myth2_dump "Behind the Library v2" list mesh
-//   myth2_dump "Behind the Library v2" list all
-//   myth2_dump "Behind the Library v2" entrypoints
+//   tag_dump "Behind the Library v2"
+//   tag_dump "Behind the Library v2" list mesh
+//   tag_dump "Behind the Library v2" list all
+//   tag_dump "Behind the Library v2" entrypoints
 
 #include <cstdio>
 #include <cstdlib>

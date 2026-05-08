@@ -298,7 +298,7 @@ For `85gy`, the best-looking threshold set found so far is:
 Command:
 
 ```powershell
-.\Release\myth2_water_depth.exe .\85gy .\85gy\displacement.obj .\85gy\85gy_water.obj 160 500 840
+.\Release\water_depth.exe .\85gy .\85gy\displacement.obj .\85gy\85gy_water.obj 160 500 840
 ```
 
 ### Smoothing conclusion

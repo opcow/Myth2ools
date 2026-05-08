@@ -1,8 +1,8 @@
-// myth2_media_height.cpp
+// media_height.cpp
 // Set the Myth II media_height field across an extracted mesh.
 //
 // Usage:
-//   myth2_media_height <folder> <value>
+//   media_height <folder> <value>
 
 #include <cstdio>
 #include <cstdlib>

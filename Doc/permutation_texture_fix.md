@@ -251,13 +251,13 @@ to subtle shading differences between paired textures.
 
 | File | Change |
 |------|--------|
-| `myth2/myth2_model.cpp:1171` | `readBE32s(..., 24)` → `readBE32s(..., 28)` |
-| `myth2/myth2_model.cpp:1164` | Comment `[24:28]` → `[28:32]` |
-| `myth2/myth2_model.cpp` | `dot256SequenceViewCount` unchanged (stored field is correct) |
-| `myth2/myth2_model.cpp` | `extractDot256Texture` unchanged (still validates via stored numViews) |
-| `myth2/myth2_model.cpp` | View index resolution changed from `if (vi >= numViews) vi = 0` to `vi %= nv` |
-| `myth2/myth2_model.cpp` | Added `PlacedInstance::materialTexturePngs` vector |
-| `myth2/myth2_model.cpp` | Updated `exportCombinedOBJ` to use per-instance texture paths |
+| `myth2/export_models.cpp:1171` | `readBE32s(..., 24)` → `readBE32s(..., 28)` |
+| `myth2/export_models.cpp:1164` | Comment `[24:28]` → `[28:32]` |
+| `myth2/export_models.cpp` | `dot256SequenceViewCount` unchanged (stored field is correct) |
+| `myth2/export_models.cpp` | `extractDot256Texture` unchanged (still validates via stored numViews) |
+| `myth2/export_models.cpp` | View index resolution changed from `if (vi >= numViews) vi = 0` to `vi %= nv` |
+| `myth2/export_models.cpp` | Added `PlacedInstance::materialTexturePngs` vector |
+| `myth2/export_models.cpp` | Updated `exportCombinedOBJ` to use per-instance texture paths |
 | `Doc/mesh_object_format.md` | Full model_definition header corrected with all 64 bytes |
 | `Doc/model_extraction.md` | `[24:28]` → `[28:32]` for permutations_offset |
 

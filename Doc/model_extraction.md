@@ -76,7 +76,7 @@ corresponding to two distinct house appearance variants.
 
 For `_marker_model_animation` (type 11), the marker's palette tag resolves to an
 `anim` tag. `anim l0cg` on le3e is the opening/closing gate. It contains 9 model
-frames (`l03c` through `l03k`) at 4 ticks per frame. `myth2_model` writes each
+frames (`l03c` through `l03k`) at 4 ticks per frame. `export_models` writes each
 frame as its own OBJ and emits `models/animations.json` with frame order, timing,
 placement, and OBJ/MTL paths.
 
@@ -282,14 +282,14 @@ MTL `map_Kd` paths use `textures/<filename>` relative to the `models/` output fo
     animations.json        animation placements, timing, frame order, OBJ/MTL paths
     map_combined.obj       instances transformed into world space + terrain
     map_combined.mtl
-    displacement.obj       terrain mesh (written by myth2_mesh)
+    displacement.obj       terrain mesh (written by mesh)
     displacement.mtl       terrain material (map_Kd ../layers/terrain.png)
     textures/
       <collTag>_<seq>_<view>.png   all extracted texture variants
   placement.json           direct model placements plus animation marker summaries
 ```
 
-`myth2_model --animation-frame first|none|all` controls how model animations are
+`export_models --animation-frame first|none|all` controls how model animations are
 represented in `map_combined.obj`. The default `first` writes a static first-frame
 snapshot. `none` omits animation snapshots for a clean Blender animation import.
 `all` includes every frame in the combined OBJ, mainly for debugging.

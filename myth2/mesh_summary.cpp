@@ -1,8 +1,8 @@
-// myth2_mesh_dump.cpp
-// Dump Myth II mesh cell fields for inspection, especially water/media cells.
+// mesh_summary.cpp
+// Summarize Myth II mesh water/media patterns.
 //
 // Usage:
-//   myth2_mesh_dump <folder> [mesh_tag.bin|plugin] [all|wet]
+//   mesh_summary <folder> [mesh_tag.bin|plugin] [all|wet]
 
 #include <cstdio>
 #include <cstdlib>
@@ -12,7 +12,7 @@
 #include <vector>
 #include <algorithm>
 
-#include "myth2_mesh_flags.h"
+#include "mesh_flags.h"
 
 static uint32_t swap32(uint32_t n) {
     return ((n & 0xFF000000u) >> 24) | ((n & 0x00FF0000u) >> 8)
@@ -185,21 +185,33 @@ static bool triWet(uint16_t flags, int which) {
     return (flags & (which ? (1u << 12) : (1u << 11))) != 0;
 }
 
-static bool vertexMedia(uint16_t flags) {
-    return (flags & MYTH2_MESH_VERTEX_IS_MEDIA_FLAG) != 0;
-}
+static bool vertexMedia(uint16_t flags) { return (flags & MYTH2_MESH_VERTEX_IS_MEDIA_FLAG) != 0; }
+static bool animatedMedia(uint16_t flags) { return (flags & MYTH2_MESH_VERTEX_IS_ANIMATED_MEDIA_FLAG) != 0; }
+static bool reflection(uint16_t flags) { return (flags & MYTH2_MESH_CELL_HAS_REFLECTION_FLAG) != 0; }
 
-static bool animatedMedia(uint16_t flags) {
-    return (flags & MYTH2_MESH_VERTEX_IS_ANIMATED_MEDIA_FLAG) != 0;
-}
+struct SummaryRow {
+    uint16_t flags = 0;
+    int mediaHeight = 0;
+    int renderHeight = 0;
+    int physicalHeight = 0;
+    int count = 0;
+    int sampleX[3] = { -1, -1, -1 };
+    int sampleY[3] = { -1, -1, -1 };
+};
 
-static bool reflection(uint16_t flags) {
-    return (flags & MYTH2_MESH_CELL_HAS_REFLECTION_FLAG) != 0;
+static void addSample(SummaryRow& row, int x, int y) {
+    for (int i = 0; i < 3; i++) {
+        if (row.sampleX[i] < 0) {
+            row.sampleX[i] = x;
+            row.sampleY[i] = y;
+            return;
+        }
+    }
 }
 
 static void usage(const char* p) {
     fprintf(stderr,
-        "Myth II Mesh Dump\n\n"
+        "Myth II Mesh Summary\n\n"
         "Usage:\n"
         "  %s <folder> [mesh_tag.bin|plugin] [all|wet]\n",
         p);
@@ -251,42 +263,75 @@ int main(int argc, char* argv[]) {
     }
 
     bool wetOnly = (mode != "all");
+    std::vector<SummaryRow> rows;
+    int total = 0;
 
-    printf("Myth II Mesh Dump\n");
-    printf("=================\n");
-    printf("Folder:    %s\n", folder.c_str());
-    printf("Mesh:      %s\n", target.c_str());
-    printf("Mesh tag:  %s\n", mf.meshTag.c_str());
-    printf("Mode:      %s\n", wetOnly ? "wet" : "all");
-    printf("Cell grid: %d x %d = %d\n\n", cellW, cellH, cellW * cellH);
-
-    printf("x,y,phys,normal,flags,first_obj,media,render,t0,t1,wet0,wet1,vertex_media,animated,reflection\n");
-    int printed = 0;
     for (int y = 0; y < cellH; y++) {
         for (int x = 0; x < cellW; x++) {
             MeshCell c = readCell(mesh, cellW, x, y);
             bool wet0 = triWet(c.flags, 0);
             bool wet1 = triWet(c.flags, 1);
             if (wetOnly && !wet0 && !wet1) continue;
-            printf("%d,%d,%d,%u,%04X,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
-                   x, y,
-                   (int)c.physicalHeight,
-                   (unsigned)c.normal,
-                   (unsigned)c.flags,
-                   (int)c.firstObjectIndex,
-                   (int)c.mediaHeight,
-                   (int)c.renderHeight,
-                   triType(c.flags, 0),
-                   triType(c.flags, 1),
-                   wet0 ? 1 : 0,
-                   wet1 ? 1 : 0,
-                   vertexMedia(c.flags) ? 1 : 0,
-                   animatedMedia(c.flags) ? 1 : 0,
-                   reflection(c.flags) ? 1 : 0);
-            printed++;
+            total++;
+
+            size_t idx = rows.size();
+            for (size_t i = 0; i < rows.size(); i++) {
+                if (rows[i].flags == c.flags &&
+                    rows[i].mediaHeight == c.mediaHeight &&
+                    rows[i].renderHeight == c.renderHeight &&
+                    rows[i].physicalHeight == c.physicalHeight) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx == rows.size()) {
+                SummaryRow row;
+                row.flags = c.flags;
+                row.mediaHeight = c.mediaHeight;
+                row.renderHeight = c.renderHeight;
+                row.physicalHeight = c.physicalHeight;
+                rows.push_back(row);
+            }
+            rows[idx].count++;
+            addSample(rows[idx], x, y);
         }
     }
 
-    printf("\nRows written: %d\n", printed);
+    std::sort(rows.begin(), rows.end(), [](const SummaryRow& a, const SummaryRow& b) {
+        if (a.count != b.count) return a.count > b.count;
+        return a.flags < b.flags;
+    });
+
+    printf("Myth II Mesh Summary\n");
+    printf("====================\n");
+    printf("Folder:    %s\n", folder.c_str());
+    printf("Mesh:      %s\n", target.c_str());
+    printf("Mesh tag:  %s\n", mf.meshTag.c_str());
+    printf("Mode:      %s\n", wetOnly ? "wet" : "all");
+    printf("Rows:      %d\n", total);
+    printf("Patterns:  %u\n\n", (unsigned)rows.size());
+
+    printf("count  flags  t0 t1  wet0 wet1  vtx anim refl  media  render  phys   samples\n");
+    printf("-------------------------------------------------------------------------------\n");
+    for (const auto& row : rows) {
+        printf("%5d  %04X   %2d %2d    %d    %d     %d    %d    %d   %6d %7d %6d   ",
+               row.count,
+               (unsigned)row.flags,
+               triType(row.flags, 0),
+               triType(row.flags, 1),
+               triWet(row.flags, 0) ? 1 : 0,
+               triWet(row.flags, 1) ? 1 : 0,
+               vertexMedia(row.flags) ? 1 : 0,
+               animatedMedia(row.flags) ? 1 : 0,
+               reflection(row.flags) ? 1 : 0,
+               row.mediaHeight,
+               row.renderHeight,
+               row.physicalHeight);
+        for (int i = 0; i < 3; i++) {
+            if (row.sampleX[i] >= 0) printf("(%d,%d)%s", row.sampleX[i], row.sampleY[i], i < 2 ? " " : "");
+        }
+        printf("\n");
+    }
+
     return 0;
 }

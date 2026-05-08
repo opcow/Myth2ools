@@ -48,7 +48,7 @@ This is why round-tripping the project's `terrain/reflection.bmp` and `terrain/a
 
 ## How this maps to the project's tool outputs
 
-Each `myth2_extract` output corresponds to one Loathing authoring channel:
+Each `extract_map` output corresponds to one Loathing authoring channel:
 
 | Project output | Loathing analogue | Cell representation |
 | --- | --- | --- |
@@ -59,7 +59,7 @@ Each `myth2_extract` output corresponds to one Loathing authoring channel:
 | `terrain/elevation.bmp` (heightmap) | Imported displacement map | `physical_height` |
 | `terrain/water_generated.bmp` | (no Loathing analogue — synthesizes tier from depth) | tier nibbles for `flags` bits 0–7 |
 
-The OBJ exports (`myth2_mesh`, `myth2_water_mesh`) are a third channel that doesn't have a Loathing equivalent — they let the designer sculpt geometry in Blender that no in-editor brush could produce, especially for sloped media surfaces.
+The OBJ exports (`mesh`, `water_mesh`) are a third channel that doesn't have a Loathing equivalent — they let the designer sculpt geometry in Blender that no in-editor brush could produce, especially for sloped media surfaces.
 
 ## Designer-facing depth tier semantics
 

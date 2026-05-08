@@ -8,7 +8,7 @@ Values range from 0–15.
 
 ---
 
-## myth2_extract.cpp palette (`TERRAIN_TYPE_COLORS`)
+## extract_map.cpp palette (`TERRAIN_TYPE_COLORS`)
 
 Used by the modern extractor to write `layers/02_passability.png`.
 Colors are stored as RGB in the source.
@@ -32,6 +32,6 @@ Colors are stored as RGB in the source.
 | 14 | `rgb(0, 128, 0)` | walking impassable |
 | 15 | `rgb(0, 255, 0)` | flying impassable |
 
-Source: [myth2_extract.cpp:729-746](../myth2/myth2_extract.cpp#L729-L746)
+Source: [extract_map.cpp:729-746](../myth2/extract_map.cpp#L729-L746)
 
 ---

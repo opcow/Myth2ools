@@ -1,4 +1,4 @@
-// myth2_model.cpp
+// export_models.cpp
 // Extract 3D scenery models and placement data from a Myth II mesh tag.
 //
 // For each scenery type (object class w0=6) that has a geom tag, emits:
@@ -11,10 +11,10 @@
 // listed in the output but skipped for 3D export.
 //
 // Usage:
-//   myth2_model <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite] [--animation-frame first|none|all]
+//   export_models <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite] [--animation-frame first|none|all]
 //
 // Example:
-//   myth2_model myth2_tags/small\ install out/le3e
+//   export_models myth2_tags/small\ install out/le3e
 
 #include <cstdio>
 #include <cstdlib>
@@ -1021,7 +1021,7 @@ static bool exportCombinedOBJ(const std::string& objPath,
             float ry =  sinF * mx + cosF * my;
             float rz = mz;
             // Translate to placement position.
-            // Terrain mesh uses vx = halfW - cellX, vz = cellY - halfH (see myth2_mesh.cpp).
+            // Terrain mesh uses vx = halfW - cellX, vz = cellY - halfH (see mesh.cpp).
             // Match that convention so models align with the terrain.
             float wx = rx + (inst.halfW - inst.cellX);
             float wy = ry + (inst.cellY - inst.halfH);

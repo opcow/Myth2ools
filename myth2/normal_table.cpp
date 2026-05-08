@@ -1,4 +1,4 @@
-// myth2_normal_table.cpp
+// normal_table.cpp
 // Reconstruct the Myth II 256-entry precalculated mesh normal table.
 //
 // This is based on the engine-side normal-table builders found in Myth II.exe:
@@ -6,8 +6,8 @@
 //   FUN_00472237  - builds the 256-entry mesh normal table
 //
 // Usage:
-//   myth2_normal_table
-//   myth2_normal_table <index>
+//   normal_table
+//   normal_table <index>
 
 #include <cstdio>
 #include <cstdlib>

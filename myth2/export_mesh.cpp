@@ -1,8 +1,12 @@
-// myth2_water_mesh.cpp
-// Export a Myth II extracted water surface to Wavefront OBJ.
+// export_mesh.cpp
+// Export a Myth II extracted mesh folder to Wavefront OBJ.
 //
 // Usage:
-//   myth2_water_mesh <tag_folder> [output.obj] [heightscale]
+//   export_mesh <tag_folder> [output.obj] [heightscale]
+//
+// Example:
+//   export_mesh 85gy
+//   export_mesh 85gy displacement.obj 0.001953125
 
 #include <cstdio>
 #include <cstdlib>
@@ -208,18 +212,20 @@ static bool readMesh(const std::string& folder, MeshInfo& out) {
         c.renderHeight = readBE16s(raw.data(), off + 10);
     }
 
-    int16_t lo = out.cells[0].mediaHeight;
-    int16_t hi = out.cells[0].mediaHeight;
+    int16_t lo = out.cells[0].physicalHeight;
+    int16_t hi = out.cells[0].physicalHeight;
     for (const Myth2Cell& c : out.cells) {
-        lo = std::min(lo, c.mediaHeight);
-        hi = std::max(hi, c.mediaHeight);
+        lo = std::min(lo, c.physicalHeight);
+        hi = std::max(hi, c.physicalHeight);
     }
 
     printf("Mesh tag:      %s\n", out.meshTag.c_str());
     printf("Submeshes:     %d x %d\n", out.submeshWidth, out.submeshHeight);
     printf("Cell grid:     %d x %d\n", out.cellWidth, out.cellHeight);
     printf("Vertex grid:   %d x %d\n", out.vertexWidth, out.vertexHeight);
-    printf("Media range:   %d .. %d\n\n", lo, hi);
+    printf("Mesh offset:   %d bytes from file start\n", cellOffset);
+    printf("Mesh bytes:    %d\n", expectedBytes);
+    printf("Height range:  %d .. %d\n\n", lo, hi);
     return true;
 }
 
@@ -233,10 +239,6 @@ static int cellIndexClamped(int x, int y, int cellWidth, int cellHeight) {
     if (x >= cellWidth) x = cellWidth - 1;
     if (y >= cellHeight) y = cellHeight - 1;
     return y * cellWidth + x;
-}
-
-static bool isWetTri(uint16_t flags, int which) {
-    return (flags & (which ? (1u << 12) : (1u << 11))) != 0;
 }
 
 static void addFaceNormal(int i0, int i1, int i2,
@@ -264,11 +266,12 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
                      const std::string& folder) {
     std::string mtlPath = dirOf(objPath) + stemOf(objPath) + ".mtl";
 
-    std::string texName = "water_mask.png";
+    // Copy terrain texture into models/textures/ alongside the OBJ
+    std::string texName = "terrain.png";
     std::string texDest = dirOf(objPath) + "textures/" + texName;
     std::error_code ec;
     fs::create_directories(dirOf(objPath) + "textures", ec);
-    std::string texSrc = folder + "/layers/03_water_mask.png";
+    std::string texSrc = folder + "/layers/01_terrain.png";
     if (fs::exists(texSrc))
         fs::copy_file(texSrc, texDest, fs::copy_options::overwrite_existing, ec);
     std::string texturePath;
@@ -289,11 +292,12 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
         return false;
     }
 
-    const int vw = mesh.vertexWidth;
-    const int vh = mesh.vertexHeight;
-    const int totalVerts = vw * vh;
-    const float halfW = (float)(vw - 1) * 0.5f;
-    const float halfH = (float)(vh - 1) * 0.5f;
+    int vw = mesh.vertexWidth;
+    int vh = mesh.vertexHeight;
+    int totalVerts = vw * vh;
+    int totalFaces = mesh.cellWidth * mesh.cellHeight * 2;
+    float halfW = (float)(vw - 1) * 0.5f;
+    float halfH = (float)(vh - 1) * 0.5f;
 
     std::vector<float> vx((size_t)totalVerts), vy((size_t)totalVerts), vz((size_t)totalVerts);
     for (int y = 0; y < vh; y++) {
@@ -301,7 +305,7 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
             int vi = vertexIndex(x, y, vw);
             const Myth2Cell& c = mesh.cells[(size_t)cellIndexClamped(x, y, mesh.cellWidth, mesh.cellHeight)];
             vx[vi] = halfW - (float)x;
-            vy[vi] = (float)c.mediaHeight * hs;
+            vy[vi] = (float)c.physicalHeight * hs;
             vz[vi] = (float)y - halfH;
         }
     }
@@ -309,21 +313,18 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
     std::vector<float> nx((size_t)totalVerts, 0.0f);
     std::vector<float> ny((size_t)totalVerts, 0.0f);
     std::vector<float> nz((size_t)totalVerts, 0.0f);
-    int totalFaces = 0;
     for (int y = 0; y < mesh.cellHeight; y++) {
         for (int x = 0; x < mesh.cellWidth; x++) {
-            const Myth2Cell& c = mesh.cells[(size_t)(y * mesh.cellWidth + x)];
             int A = vertexIndex(x,     y,     vw);
             int B = vertexIndex(x + 1, y,     vw);
             int C = vertexIndex(x + 1, y + 1, vw);
             int D = vertexIndex(x,     y + 1, vw);
-            bool evenDiag = ((x ^ y) & 1) == 0;
-            if (evenDiag) {
-                if (isWetTri(c.flags, 0)) { addFaceNormal(A, C, D, vx, vy, vz, nx, ny, nz); totalFaces++; }
-                if (isWetTri(c.flags, 1)) { addFaceNormal(A, B, C, vx, vy, vz, nx, ny, nz); totalFaces++; }
+            if (((x ^ y) & 1) == 0) {
+                addFaceNormal(A, B, C, vx, vy, vz, nx, ny, nz);
+                addFaceNormal(A, C, D, vx, vy, vz, nx, ny, nz);
             } else {
-                if (isWetTri(c.flags, 0)) { addFaceNormal(A, B, D, vx, vy, vz, nx, ny, nz); totalFaces++; }
-                if (isWetTri(c.flags, 1)) { addFaceNormal(B, C, D, vx, vy, vz, nx, ny, nz); totalFaces++; }
+                addFaceNormal(A, B, D, vx, vy, vz, nx, ny, nz);
+                addFaceNormal(B, C, D, vx, vy, vz, nx, ny, nz);
             }
         }
     }
@@ -333,8 +334,8 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
         return s == std::string::npos ? p : p.substr(s + 1);
     };
 
-    fprintf(mtl, "# Myth II water material\n");
-    fprintf(mtl, "newmtl water\n");
+    fprintf(mtl, "# Myth II terrain material\n");
+    fprintf(mtl, "newmtl terrain\n");
     fprintf(mtl, "Ka 1.0 1.0 1.0\n");
     fprintf(mtl, "Kd 1.0 1.0 1.0\n");
     fprintf(mtl, "Ks 0.0 0.0 0.0\n");
@@ -343,13 +344,12 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
         fprintf(mtl, "map_Kd %s\n", texturePath.c_str());
     fclose(mtl);
 
-    fprintf(obj, "# Myth II water surface -- %s\n", mesh.meshTag.c_str());
-    fprintf(obj, "# Submeshes: %dx%d  Cells: %dx%d  Verts: %d  Wet tris: %d\n",
+    fprintf(obj, "# Myth II terrain -- %s\n", mesh.meshTag.c_str());
+    fprintf(obj, "# Submeshes: %dx%d  Cells: %dx%d  Verts: %d  Tris: %d\n",
             mesh.submeshWidth, mesh.submeshHeight,
             mesh.cellWidth, mesh.cellHeight, totalVerts, totalFaces);
     fprintf(obj, "# Height scale: %.9f\n", hs);
     fprintf(obj, "mtllib %s\n\n", basename(mtlPath).c_str());
-    fprintf(obj, "o water_surface\n\n");
 
     fprintf(obj, "# Vertices\n");
     for (int i = 0; i < totalVerts; i++) {
@@ -375,22 +375,20 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
     }
     fprintf(obj, "\n");
 
-    fprintf(obj, "usemtl water\n");
+    fprintf(obj, "usemtl terrain\n");
     fprintf(obj, "s 1\n\n");
     for (int y = 0; y < mesh.cellHeight; y++) {
         for (int x = 0; x < mesh.cellWidth; x++) {
-            const Myth2Cell& c = mesh.cells[(size_t)(y * mesh.cellWidth + x)];
             int A = vertexIndex(x,     y,     vw) + 1;
             int B = vertexIndex(x + 1, y,     vw) + 1;
             int C = vertexIndex(x + 1, y + 1, vw) + 1;
             int D = vertexIndex(x,     y + 1, vw) + 1;
-            bool evenDiag = ((x ^ y) & 1) == 0;
-            if (evenDiag) {
-                if (isWetTri(c.flags, 0)) fprintf(obj, "f %d/%d/%d %d/%d/%d %d/%d/%d\n", A, A, A, C, C, C, D, D, D);
-                if (isWetTri(c.flags, 1)) fprintf(obj, "f %d/%d/%d %d/%d/%d %d/%d/%d\n", A, A, A, B, B, B, C, C, C);
+            if (((x ^ y) & 1) == 0) {
+                fprintf(obj, "f %d/%d/%d %d/%d/%d %d/%d/%d\n", A, A, A, B, B, B, C, C, C);
+                fprintf(obj, "f %d/%d/%d %d/%d/%d %d/%d/%d\n", A, A, A, C, C, C, D, D, D);
             } else {
-                if (isWetTri(c.flags, 0)) fprintf(obj, "f %d/%d/%d %d/%d/%d %d/%d/%d\n", A, A, A, B, B, B, D, D, D);
-                if (isWetTri(c.flags, 1)) fprintf(obj, "f %d/%d/%d %d/%d/%d %d/%d/%d\n", B, B, B, C, C, C, D, D, D);
+                fprintf(obj, "f %d/%d/%d %d/%d/%d %d/%d/%d\n", A, A, A, B, B, B, D, D, D);
+                fprintf(obj, "f %d/%d/%d %d/%d/%d %d/%d/%d\n", B, B, B, C, C, C, D, D, D);
             }
         }
     }
@@ -402,22 +400,22 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
     printf("MTL written:   %s\n", mtlPath.c_str());
     printf("Texture path:  %s\n", texturePath.empty() ? "(none)" : texturePath.c_str());
     printf("Vertices:      %d\n", totalVerts);
-    printf("Wet triangles: %d\n", totalFaces);
+    printf("Triangles:     %d\n", totalFaces);
     return true;
 }
 
 static void usage(const char* p) {
     fprintf(stderr,
-        "Myth II Water Surface Exporter\n\n"
+        "Myth II Terrain Mesh Exporter\n\n"
         "Usage:\n"
         "  %s <tag_folder> [output.obj] [heightscale]\n\n"
         "Arguments:\n"
-        "  tag_folder    Extracted Myth II map folder from myth2_extract\n"
-        "  output.obj    Output OBJ path (default: <tag_folder>/water.obj)\n"
+        "  tag_folder    Extracted Myth II map folder from extract\n"
+        "  output path   Output path (default: <tag_folder>/displacement.obj)\n"
         "  heightscale   Vertical scale multiplier (default: 1/512)\n\n"
         "Example:\n"
         "  %s 85gy\n"
-        "  %s 85gy water.obj 0.001953125\n",
+        "  %s 85gy displacement.obj 0.001953125\n",
         p, p, p);
 }
 
@@ -430,18 +428,17 @@ int main(int argc, char** argv) {
     std::string folder = argv[1];
     float heightScale = argc >= 4 ? (float)atof(argv[3]) : (1.0f / 512.0f);
 
-    std::string objPath = argc >= 3 ? argv[2] : (folder + "/models/water.obj");
+    std::string outPath = argc >= 3 ? argv[2] : (folder + "/models/displacement.obj");
     std::error_code ec;
-    fs::create_directories(fs::path(objPath).parent_path(), ec);
-
-    printf("Myth II Water Surface Exporter\n");
-    printf("==============================\n");
+    fs::create_directories(fs::path(outPath).parent_path(), ec);
+    printf("Myth II Terrain Mesh Exporter\n");
+    printf("=============================\n");
     printf("Folder:        %s\n", folder.c_str());
-    printf("Output OBJ:    %s\n\n", objPath.c_str());
+    printf("Output path:   %s\n\n", outPath.c_str());
 
     MeshInfo mesh;
     if (!readMesh(folder, mesh)) return 1;
-    if (!writeOBJ(objPath, mesh, heightScale, folder)) return 1;
+    if (!writeOBJ(outPath, mesh, heightScale, folder)) return 1;
 
     printf("\nDone.\n");
     return 0;

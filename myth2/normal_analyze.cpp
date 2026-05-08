@@ -1,8 +1,8 @@
-// myth2_normal_analyze.cpp
+// normal_analyze.cpp
 // Empirically correlate Myth II mesh normal-byte indices with geometric triangle normals.
 //
 // Usage:
-//   myth2_normal_analyze <folder> [index]
+//   normal_analyze <folder> [index]
 
 #include <cstdio>
 #include <cstdlib>

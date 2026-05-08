@@ -120,7 +120,7 @@ In Willow Creek (`le3e`), the opening gate marker is:
 
 `l03c`, `l03d`, `l03e`, `l03f`, `l03g`, `l03h`, `l03i`, `l03j`, `l03k`
 
-`myth2_model` exports each animation frame as
+`model` exports each animation frame as
 `models/<anim>_<markerIdx>_frame##_*.obj` and writes a Blender/import-friendly
 manifest at `models/animations.json`. `--animation-frame first|none|all` controls
 whether `map_combined.obj` includes the first frame, no animation frames, or all

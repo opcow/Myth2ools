@@ -36,11 +36,11 @@ And, of course, you can use Blender to create or modify the 3D map surface.
 
 ## Authoring Tools
 
-### `myth2_extract`
+### `extract_map`
 
 ```bash
-myth2_extract <tags_folder> <meshtag> [output_folder] [--ora]
-myth2_extract <tags_folder> <meshtag> --out <output_folder> [--ora]
+extract_map <tags_folder> <meshtag> [output_folder] [--ora]
+extract_map <tags_folder> <meshtag> --out <output_folder> [--ora]
 ```
 
 First-pass Myth II map extractor. It scans the supplied Myth II tags folder,
@@ -85,10 +85,10 @@ The loose files in `layers/` are PNGs so overlay/reference layers can carry
 transparency in regular image editors. The assembler reimports from the
 canonical files under `terrain/`, `screens/`, and `strings/`.
 
-### `myth2_assemble`
+### `build_plugin`
 
 ```bash
-myth2_assemble <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation]
+build_plugin <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation]
 ```
 
 Rebuilds a Myth II `dng2` plugin from an extracted map folder. The first pass
@@ -96,9 +96,9 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 
 - `--edit` reapplies edited assets from the extracted folder before packing.
 - `--obj` imports Myth II terrain displacement from an OBJ into `raw/mesh_tag.bin`.
-- If `--obj` is omitted, `myth2_assemble --edit` auto-detects `<folder>/displacement.obj` when present.
+- If `--obj` is omitted, `build_plugin --edit` auto-detects `<folder>/displacement.obj` when present.
 - `--water-obj` imports Myth II water-surface heights from an OBJ into wet cells' `media_height`.
-- If `--water-obj` is omitted, `myth2_assemble --edit` auto-detects `<folder>/water.obj` when present, then falls back to the old `<folder>/<mesh_tag>_water.obj` name.
+- If `--water-obj` is omitted, `build_plugin --edit` auto-detects `<folder>/water.obj` when present, then falls back to the old `<folder>/<mesh_tag>_water.obj` name.
 - During `--edit`, `terrain/water.bmp` is safely reapplied by default as flags/types only.
 - `--water` experimentally imports `terrain/water.bmp` with media-height changes as well.
 - `--water-flags` explicitly selects the same safe flags-only `terrain/water.bmp` path.
@@ -127,30 +127,30 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 - `screens/pregame.bmp`, `screens/overhead.bmp`, and `screens/postgame.bmp` are reinjected into their `.256` tags when present.
 - `strings/name.txt` is rebuilt into the map-name `stli` when present.
 
-### `myth2_mesh`
+### `export_mesh`
 
 ```bash
-myth2_mesh <tag_folder> [output.obj] [heightscale]
+export_mesh <tag_folder> [output.obj] [heightscale]
 ```
 
 Exports an extracted Myth II mesh folder as Wavefront `OBJ`. The exporter uses
 the Myth II alternating cell diagonal pattern and a default height scale of
 `1/512`.
 
-### `myth2_water_mesh`
+### `export_water_mesh`
 
 ```bash
-myth2_water_mesh <tag_folder> [output.obj] [heightscale]
+export_water_mesh <tag_folder> [output.obj] [heightscale]
 ```
 
 Exports the current Myth II water surface as an OBJ aligned to the terrain OBJ.
 It uses `media_height` for vertex Y and writes only wet triangles, with an MTL
 that points to `terrain/water_mask.bmp`.
 
-### `myth2_model`
+### `export_models`
 
 ```bash
-myth2_model <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite] [--animation-frame first|none|all]
+export_models <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite] [--animation-frame first|none|all]
 ```
 
 Extracts 3D scenery models and placement data from an extracted Myth II mesh tag
@@ -164,11 +164,11 @@ Extracts 3D scenery models and placement data from an extracted Myth II mesh tag
 - `placement.json` — all instance positions (cell coords) and facing angles
 
 When an optional `terrain.obj` path is supplied (e.g. the `displacement.obj`
-produced by `myth2_mesh`), the terrain mesh is appended to `map_combined.obj`
+produced by `export_mesh`), the terrain mesh is appended to `map_combined.obj`
 as a separate named object (`o terrain`), giving a single file with both the
 terrain surface and all placed scenery.
 
-To preview model animations in Blender, run `tools/import_myth2_animations.py`
+To preview model animations in Blender, run `tools/import_animations.py`
 from Blender's Text Editor and choose the map's `models/animations.json`. The
 file picker includes options to import `map_combined.obj`, replace a prior
 `myth2_animations` collection, and hide static animation snapshots. Use
@@ -177,68 +177,79 @@ static animation snapshots and let Blender show only the keyframed frames.
 
 ## Analysys/Debugging Tools
 
-### `myth2_dump`
+### `core_dump`
 
 ```bash
-myth2_dump <file>
-myth2_dump <file> list [type|all]
-myth2_dump <file> entrypoints
+core_dump <file> list
+core_dump <file> <id>
 ```
 
-Lists tags in Myth II `dng2` plugin files and `mth2` local tag files.
+Dumps a Myth II `core` collection-reference tag in human-readable form.
+Useful for inspecting the collection/tint side paired with `medi` tags such as
+`wate`, `wagr`, and `wamu`.
 
-### `myth2_water_depth`
+### `media_dump`
 
 ```bash
-myth2_water_depth <tag_folder> <terrain.obj> <water.obj> [level1] [level2] [level3] [output.bmp] [heightscale] [--smooth]
+media_dump <file> list
+media_dump <file> <id>
 ```
 
-Generates a `water.bmp`-style media-type map from the depth between the terrain
-OBJ and the water-surface OBJ. Wet triangle placement comes from the water OBJ.
-The average triangle depth starts at type `0`, then steps up to types `1`, `2`,
-and `3` at the optional raw-height thresholds you provide. `--smooth` runs a
-single image-space cleanup pass to reduce isolated jagged triangle spikes.
+Dumps a Myth II `medi` tag in human-readable form from a foundation, plugin,
+or local tag file. `list` enumerates the available `medi` tags in a file.
+Useful for inspecting stock media definitions such as `wate`, `wagr`, `wamu`,
+and `wame`.
 
-### `myth2_mesh_import`
+### `media_height`
 
 ```bash
-myth2_mesh_import <tag_folder> <input.obj> [heightscale]
+media_height <folder> <value>
 ```
 
-Imports an edited Myth II OBJ back into `raw/mesh_tag.bin` by patching
-`physical_height` only. Other per-cell fields are preserved.
+Sets `media_height` to a single signed 16-bit value for every cell in an
+extracted Myth II `raw/mesh_tag.bin`. This is a direct experiment tool for
+testing what a flat water-surface height does to a map.
 
-### `myth2_mesh_diff`
+### `mesh_diff`
 
 ```bash
-myth2_mesh_diff <folder> <mesh_tag.bin|plugin>
+mesh_diff <folder> <mesh_tag.bin|plugin>
 ```
 
 Compares the extracted `raw/mesh_tag.bin` in a Myth II folder against another
 mesh tag or a rebuilt plugin and reports which per-cell fields changed.
 
-### `myth2_mesh_dump`
+### `mesh_dump`
 
 ```bash
-myth2_mesh_dump <folder> [mesh_tag.bin|plugin] [all|wet]
+mesh_dump <folder> [mesh_tag.bin|plugin] [all|wet]
 ```
 
 Dumps Myth II mesh cell fields as CSV-style text, with `wet` mode focusing on
 cells whose media bits are set.
 
-### `myth2_mesh_summary`
+### `mesh_import`
 
 ```bash
-myth2_mesh_summary <folder> [mesh_tag.bin|plugin] [all|wet]
+mesh_import <tag_folder> <input.obj> [heightscale]
+```
+
+Imports an edited Myth II OBJ back into `raw/mesh_tag.bin` by patching
+`physical_height` only. Other per-cell fields are preserved.
+
+### `mesh_summary`
+
+```bash
+mesh_summary <folder> [mesh_tag.bin|plugin] [all|wet]
 ```
 
 Groups Myth II mesh cells into repeated flag/height patterns and prints counts
 plus a few sample coordinates for each pattern.
 
-### `myth2_normal_analyze`
+### `normal_analyze`
 
 ```bash
-myth2_normal_analyze <folder> [index]
+normal_analyze <folder> [index]
 ```
 
 Empirically correlates the two stored 8-bit normal indices in each Myth II mesh
@@ -247,21 +258,10 @@ Without an `index`, it prints one summary row per used normal index. With an
 `index` in `0..255`, it prints detailed combined/high-byte/low-byte stats and a
 few sample triangles for that index.
 
-### `myth2_normal_table`
+### `normal_compare`
 
 ```bash
-myth2_normal_table [index]
-```
-
-Reconstructs the Myth II 256-entry precalculated mesh normal table from the
-engine-side startup logic reverse-engineered from `Myth II.exe`. Without an
-argument, it prints all 256 entries. With an `index` in `0..255`, it prints the
-decoded entry with fixed-point components and normalized floating-point values.
-
-### `myth2_normal_compare`
-
-```bash
-myth2_normal_compare <folder>
+normal_compare <folder>
 ```
 
 Compares the reconstructed runtime normal table against empirical per-index
@@ -269,49 +269,49 @@ triangle-normal buckets from an extracted Myth II mesh. It scores simple
 axis/sign permutations and reports the best basis alignment plus the lowest-
 error matching indices.
 
-### `myth2_media_height`
+### `normal_table`
 
 ```bash
-myth2_media_height <folder> <value>
+normal_table [index]
 ```
 
-Sets `media_height` to a single signed 16-bit value for every cell in an
-extracted Myth II `raw/mesh_tag.bin`. This is a direct experiment tool for
-testing what a flat water-surface height does to a map.
+Reconstructs the Myth II 256-entry precalculated mesh normal table from the
+engine-side startup logic reverse-engineered from `Myth II.exe`. Without an
+argument, it prints all 256 entries. With an `index` in `0..255`, it prints the
+decoded entry with fixed-point components and normalized floating-point values.
 
-### `myth2_media_dump`
-
-```bash
-myth2_media_dump <file> list
-myth2_media_dump <file> <id>
-```
-
-Dumps a Myth II `medi` tag in human-readable form from a foundation, plugin,
-or local tag file. `list` enumerates the available `medi` tags in a file.
-Useful for inspecting stock media definitions such as `wate`, `wagr`, `wamu`,
-and `wame`.
-
-### `myth2_core_dump`
+### `proj_dump`
 
 ```bash
-myth2_core_dump <file> list
-myth2_core_dump <file> <id>
-```
-
-Dumps a Myth II `core` collection-reference tag in human-readable form.
-Useful for inspecting the collection/tint side paired with `medi` tags such as
-`wate`, `wagr`, and `wamu`.
-
-### `myth2_proj_dump`
-
-```bash
-myth2_proj_dump <file> list
-myth2_proj_dump <file> <id>
+proj_dump <file> list
+proj_dump <file> <id>
 ```
 
 Dumps a Myth II `proj` tag with an emphasis on bounce/collision-relevant
 fields such as inertia, detonation/media-detonation frequencies, rebound type,
 and projectile flags.
+
+### `tag_dump`
+
+```bash
+tag_dump <file>
+tag_dump <file> list [type|all]
+tag_dump <file> entrypoints
+```
+
+Lists tags in Myth II `dng2` plugin files and `mth2` local tag files.
+
+### `water_depth`
+
+```bash
+water_depth <tag_folder> <terrain.obj> <water.obj> [level1] [level2] [level3] [output.bmp] [heightscale] [--smooth]
+```
+
+Generates a `water.bmp`-style media-type map from the depth between the terrain
+OBJ and the water-surface OBJ. Wet triangle placement comes from the water OBJ.
+The average triangle depth starts at type `0`, then steps up to types `1`, `2`,
+and `3` at the optional raw-height thresholds you provide. `--smooth` runs a
+single image-space cleanup pass to reduce isolated jagged triangle spikes.
 
 ## Notes
 
@@ -352,47 +352,47 @@ cmake --build . --config <Release | Debug> --target clean
 ### Quick compile (MSVC)
 
 ```bash
-cl /EHsc /O2 myth2\myth2_dump.cpp /Fe:myth2_dump.exe
-cl /EHsc /O2 myth2\myth2_extract.cpp /Fe:myth2_extract.exe
-cl /EHsc /O2 myth2\myth2_mesh.cpp /Fe:myth2_mesh.exe
-cl /EHsc /O2 myth2\myth2_model.cpp /Fe:myth2_model.exe
-cl /EHsc /O2 myth2\myth2_water_mesh.cpp /Fe:myth2_water_mesh.exe
-cl /EHsc /O2 myth2\myth2_water_depth.cpp /Fe:myth2_water_depth.exe
-cl /EHsc /O2 myth2\myth2_mesh_import.cpp /Fe:myth2_mesh_import.exe
-cl /EHsc /O2 myth2\myth2_mesh_diff.cpp /Fe:myth2_mesh_diff.exe
-cl /EHsc /O2 myth2\myth2_mesh_dump.cpp /Fe:myth2_mesh_dump.exe
-cl /EHsc /O2 myth2\myth2_mesh_summary.cpp /Fe:myth2_mesh_summary.exe
-cl /EHsc /O2 myth2\myth2_normal_analyze.cpp /Fe:myth2_normal_analyze.exe
-cl /EHsc /O2 myth2\myth2_normal_compare.cpp /Fe:myth2_normal_compare.exe
-cl /EHsc /O2 myth2\myth2_normal_table.cpp /Fe:myth2_normal_table.exe
-cl /EHsc /O2 myth2\myth2_media_height.cpp /Fe:myth2_media_height.exe
-cl /EHsc /O2 myth2\myth2_media_dump.cpp /Fe:myth2_media_dump.exe
-cl /EHsc /O2 myth2\myth2_core_dump.cpp /Fe:myth2_core_dump.exe
-cl /EHsc /O2 myth2\myth2_proj_dump.cpp /Fe:myth2_proj_dump.exe
-cl /EHsc /O2 myth2\myth2_assemble.cpp /Fe:myth2_assemble.exe
+cl /EHsc /O2 myth2\tag_dump.cpp /Fe:tag_dump.exe
+cl /EHsc /O2 myth2\extract_map.cpp /Fe:extract_map.exe
+cl /EHsc /O2 myth2\export_mesh.cpp /Fe:export_mesh.exe
+cl /EHsc /O2 myth2\export_models.cpp /Fe:export_models.exe
+cl /EHsc /O2 myth2\export_water_mesh.cpp /Fe:export_water_mesh.exe
+cl /EHsc /O2 myth2\water_depth.cpp /Fe:water_depth.exe
+cl /EHsc /O2 myth2\mesh_import.cpp /Fe:mesh_import.exe
+cl /EHsc /O2 myth2\mesh_diff.cpp /Fe:mesh_diff.exe
+cl /EHsc /O2 myth2\mesh_dump.cpp /Fe:mesh_dump.exe
+cl /EHsc /O2 myth2\mesh_summary.cpp /Fe:mesh_summary.exe
+cl /EHsc /O2 myth2\normal_analyze.cpp /Fe:normal_analyze.exe
+cl /EHsc /O2 myth2\normal_compare.cpp /Fe:normal_compare.exe
+cl /EHsc /O2 myth2\normal_table.cpp /Fe:normal_table.exe
+cl /EHsc /O2 myth2\media_height.cpp /Fe:media_height.exe
+cl /EHsc /O2 myth2\media_dump.cpp /Fe:media_dump.exe
+cl /EHsc /O2 myth2\core_dump.cpp /Fe:core_dump.exe
+cl /EHsc /O2 myth2\proj_dump.cpp /Fe:proj_dump.exe
+cl /EHsc /O2 myth2\build_plugin.cpp /Fe:build_plugin.exe
 ```
 
 ### Quick compile (GCC / Clang)
 
 ```bash
-g++ -std=c++17 -O2 myth2/myth2_dump.cpp -o myth2_dump
-g++ -std=c++17 -O2 myth2/myth2_extract.cpp -o myth2_extract
-g++ -std=c++17 -O2 myth2/myth2_mesh.cpp -o myth2_mesh
-g++ -std=c++17 -O2 myth2/myth2_model.cpp -o myth2_model
-g++ -std=c++17 -O2 myth2/myth2_water_mesh.cpp -o myth2_water_mesh
-g++ -std=c++17 -O2 myth2/myth2_water_depth.cpp -o myth2_water_depth
-g++ -std=c++17 -O2 myth2/myth2_mesh_import.cpp -o myth2_mesh_import
-g++ -std=c++17 -O2 myth2/myth2_mesh_diff.cpp -o myth2_mesh_diff
-g++ -std=c++17 -O2 myth2/myth2_mesh_dump.cpp -o myth2_mesh_dump
-g++ -std=c++17 -O2 myth2/myth2_mesh_summary.cpp -o myth2_mesh_summary
-g++ -std=c++17 -O2 myth2/myth2_normal_analyze.cpp -o myth2_normal_analyze
-g++ -std=c++17 -O2 myth2/myth2_normal_compare.cpp -o myth2_normal_compare
-g++ -std=c++17 -O2 myth2/myth2_normal_table.cpp -o myth2_normal_table
-g++ -std=c++17 -O2 myth2/myth2_media_height.cpp -o myth2_media_height
-g++ -std=c++17 -O2 myth2/myth2_media_dump.cpp -o myth2_media_dump
-g++ -std=c++17 -O2 myth2/myth2_core_dump.cpp -o myth2_core_dump
-g++ -std=c++17 -O2 myth2/myth2_proj_dump.cpp -o myth2_proj_dump
-g++ -std=c++17 -O2 myth2/myth2_assemble.cpp -o myth2_assemble
+g++ -std=c++17 -O2 myth2/tag_dump.cpp -o tag_dump
+g++ -std=c++17 -O2 myth2/extract_map.cpp -o extract_map
+g++ -std=c++17 -O2 myth2/export_mesh.cpp -o export_mesh
+g++ -std=c++17 -O2 myth2/export_models.cpp -o export_models
+g++ -std=c++17 -O2 myth2/export_water_mesh.cpp -o export_water_mesh
+g++ -std=c++17 -O2 myth2/water_depth.cpp -o water_depth
+g++ -std=c++17 -O2 myth2/mesh_import.cpp -o mesh_import
+g++ -std=c++17 -O2 myth2/mesh_diff.cpp -o mesh_diff
+g++ -std=c++17 -O2 myth2/mesh_dump.cpp -o mesh_dump
+g++ -std=c++17 -O2 myth2/mesh_summary.cpp -o mesh_summary
+g++ -std=c++17 -O2 myth2/normal_analyze.cpp -o normal_analyze
+g++ -std=c++17 -O2 myth2/normal_compare.cpp -o normal_compare
+g++ -std=c++17 -O2 myth2/normal_table.cpp -o normal_table
+g++ -std=c++17 -O2 myth2/media_height.cpp -o media_height
+g++ -std=c++17 -O2 myth2/media_dump.cpp -o media_dump
+g++ -std=c++17 -O2 myth2/core_dump.cpp -o core_dump
+g++ -std=c++17 -O2 myth2/proj_dump.cpp -o proj_dump
+g++ -std=c++17 -O2 myth2/build_plugin.cpp -o build_plugin
 ```
 
 ---

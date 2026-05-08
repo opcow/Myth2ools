@@ -9,7 +9,7 @@
 *.tar.gz
 *.zip
 tools/*
-!tools/import_myth2_animations.py
+!tools/import_animations.py
 build/
 ghidra*/
 out/
@@ -19,5 +19,5 @@ myth2_tags/
 Doc/session_log.md
 .settings.local.json
 .claude/
-!tools/import_myth2_animations.py
+!tools/import_animations.py
 *.dng2

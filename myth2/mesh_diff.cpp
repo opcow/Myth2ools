@@ -1,9 +1,9 @@
-// myth2_mesh_diff.cpp
+// mesh_diff.cpp
 // Compare a reference Myth II mesh tag from an extracted folder against
 // another mesh tag or a rebuilt Myth II plugin.
 //
 // Usage:
-//   myth2_mesh_diff <folder> <mesh_tag.bin|plugin>
+//   mesh_diff <folder> <mesh_tag.bin|plugin>
 
 #include <cstdio>
 #include <cstdlib>

@@ -1,9 +1,9 @@
-// myth2_core_dump.cpp
+// core_dump.cpp
 // Dump a Myth II core tag (collection reference) in human-readable form.
 //
 // Usage:
-//   myth2_core_dump <file> list
-//   myth2_core_dump <file> <id>
+//   core_dump <file> list
+//   core_dump <file> <id>
 
 #include <cstdio>
 #include <cstdlib>

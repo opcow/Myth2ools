@@ -1,4 +1,4 @@
-// myth2_extract.cpp
+// extract_map.cpp
 // Extract selected map assets from Myth II foundation/plugin tag files.
 //
 // First-pass outputs:
@@ -9,10 +9,10 @@
 //   - manifest with discovered tag references
 //
 // Usage:
-//   myth2_extract <tags_folder> <meshtag>
+//   extract_map <tags_folder> <meshtag>
 //
 // Example:
-//   myth2_extract myth2_tags 85gy
+//   extract_map myth2_tags 85gy
 
 #include <cstdio>
 #include <cstdlib>
@@ -23,7 +23,7 @@
 #include <filesystem>
 #include <algorithm>
 
-#include "myth2_mesh_flags.h"
+#include "mesh_flags.h"
 
 #ifdef _WIN32
 #ifndef NOMINMAX

@@ -1,13 +1,9 @@
-// myth2_media_dump.cpp
-// Dump a Myth II medi tag in human-readable form.
+// proj_dump.cpp
+// Dump a Myth II proj tag with emphasis on bounce/collision-relevant fields.
 //
 // Usage:
-//   myth2_media_dump <file> list
-//   myth2_media_dump <file> <id>
-//
-// Examples:
-//   myth2_media_dump "myth2_tags\\small install" wate
-//   myth2_media_dump 85gy_plugin wate
+//   proj_dump <file> list
+//   proj_dump <file> <id>
 
 #include <cstdio>
 #include <cstdlib>
@@ -166,7 +162,6 @@ static bool readTagHeaders(FILE* f, const Myth2Header& h, std::vector<Myth2TagHe
         if (c == EOF) return false;
         th.ownerIndex = (uint8_t)c;
         th.signature = readBE32(f);
-
         if (h.isLocal) th.size = (uint32_t)std::max(0L, len - 64L);
         out.push_back(th);
     }
@@ -175,82 +170,82 @@ static bool readTagHeaders(FILE* f, const Myth2Header& h, std::vector<Myth2TagHe
 
 static double shortFixed(int16_t v) { return (double)v / 256.0; }
 static double fixedFraction(int16_t v) { return (double)v / 65536.0; }
+static constexpr uint32_t PROJ_TAG = 0x70726F6Au;
 
 static void printTagOrNone(const char* label, uint32_t tag) {
     std::string s = tagToString(tag);
-    if (s == "____") printf("%-32s (none)\n", label);
-    else printf("%-32s %s\n", label, s.c_str());
+    if (s == "____") printf("%-36s (none)\n", label);
+    else printf("%-36s %s\n", label, s.c_str());
 }
 
-static void dumpMediaDefinition(const uint8_t* p, size_t size) {
+static void printFlag(uint32_t flags, uint32_t mask, const char* name) {
+    printf("  %-40s %s\n", name, (flags & mask) ? "yes" : "no");
+}
+
+static void dumpProjectileDefinition(const uint8_t* p, size_t size) {
     if (size < 256) {
-        fprintf(stderr, "Media definition too small: %zu bytes\n", size);
+        fprintf(stderr, "Projectile definition too small: %zu bytes\n", size);
         return;
     }
 
     uint32_t flags = readBE32(p + 0);
-    uint32_t collectionRef = readBE32(p + 4);
+    printf("Projectile Definition\n");
+    printf("=====================\n");
+    printf("%-36s 0x%08X\n", "flags", flags);
+    printTagOrNone("collection_or_skelmodel_tag", readBE32(p + 4));
+    printf("%-36s %d\n", "splash_or_rebound_effect_type", (int)readBE16s(p + 12));
+    printTagOrNone("detonation_projectile_group_tag", readBE32(p + 14));
+    printTagOrNone("contrail_projectile_or_sprite_tag", readBE32(p + 18));
+    printf("%-36s %d\n", "ticks_between_contrails", (int)readBE16s(p + 22));
+    printf("%-36s %d\n", "maximum_contrail_count", (int)readBE16s(p + 24));
+    printTagOrNone("object_tag", readBE32(p + 26));
+    printf("%-36s %.6f\n", "inertia_lower_bound", shortFixed(readBE16s(p + 30)));
+    printf("%-36s %.6f\n", "inertia_delta", shortFixed(readBE16s(p + 32)));
+    printf("%-36s %d\n", "random_initial_velocity", (int)readBE16s(p + 34));
+    printf("%-36s %d\n", "volume", (int)readBE16s(p + 36));
+    printf("%-36s %d\n", "tracking_priority", (int)readBE16s(p + 38));
+    printf("%-36s %.6f\n", "promotion_on_detonation_fraction", fixedFraction(readBE16s(p + 40)));
+    printf("%-36s %.6f\n", "detonation_frequency", fixedFraction(readBE16s(p + 42)));
+    printf("%-36s %.6f\n", "media_detonation_frequency", fixedFraction(readBE16s(p + 44)));
+    printf("%-36s %d\n", "detonation_velocity", (int)readBE16s(p + 46));
+    printf("%-36s %d\n", "projectile_class", (int)readBE16s(p + 48));
+    printTagOrNone("lightning_tag", readBE32(p + 50));
+    printTagOrNone("promoted_projectile_tag", readBE32(p + 76));
+    printTagOrNone("promotion_projectile_group_tag", readBE32(p + 80));
+    printTagOrNone("bounce_stain_texturestacks_tag", readBE32(p + 84));
+    printTagOrNone("artifact_tag", readBE32(p + 174));
+    printTagOrNone("target_detonation_pg_tag", readBE32(p + 178));
+    printTagOrNone("detonation_stain_txst_tag", readBE32(p + 182));
+    printf("%-36s %d\n", "delay_lower_bound", (int)readBE16s(p + 186));
+    printf("%-36s %d\n", "delay_delta", (int)readBE16s(p + 188));
+    printTagOrNone("local_projectile_group_tag", readBE32(p + 190));
+    printf("%-36s %d\n", "nearby_target_radius", (int)readBE16s(p + 194));
 
-    printf("Media Definition\n");
-    printf("================\n");
-    printf("%-32s 0x%08X\n", "flags", flags);
-    printTagOrNone("collection_reference_tag", collectionRef);
-    printf("%-32s %d\n", "reflection_tint_fraction_raw", (int)readBE16s(p + 88));
-    printf("%-32s %.6f\n", "reflection_tint_fraction", shortFixed(readBE16s(p + 88)));
-    printf("%-32s %d, %d, %d, %d\n", "reflection_tint_rgba",
-           (int)readBE16s(p + 90), (int)readBE16s(p + 92),
-           (int)readBE16s(p + 94), (int)readBE16s(p + 96));
-    printf("%-32s %d\n", "surface_effect_density_raw", (int)readBE16s(p + 98));
-    printf("%-32s %.6f\n", "surface_effect_density", fixedFraction(readBE16s(p + 98)));
-    printTagOrNone("surface_effect_local_pg_tag", readBE32(p + 100));
-    printf("%-32s %d, %d, %d\n", "wobble_magnitude_raw",
-           (int)readBE16s(p + 104), (int)readBE16s(p + 106), (int)readBE16s(p + 108));
-    printf("%-32s %d, %d, %d\n", "wobble_phase_mult_raw",
-           (int)readBE16s(p + 110), (int)readBE16s(p + 112), (int)readBE16s(p + 114));
-    printf("%-32s %d\n", "effects_per_cell", (int)readBE16s(p + 116));
-    printf("%-32s %d\n", "time_between_effects", (int)readBE16s(p + 118));
-    printf("%-32s %d\n", "reflection_transparency_raw", (int)readBE16s(p + 120));
-    printf("%-32s %.6f\n", "reflection_transparency", fixedFraction(readBE16s(p + 120)));
-    printf("%-32s %.6f\n", "min_opacity", shortFixed(readBE16s(p + 122)));
-    printf("%-32s %.6f\n", "max_opacity", shortFixed(readBE16s(p + 124)));
-    printf("%-32s %.6f\n", "max_opacity_depth", shortFixed(readBE16s(p + 126)));
-    printf("%-32s %.6f\n", "spec_min", fixedFraction(readBE16s(p + 128)));
-    printf("%-32s %.6f\n", "spec_max", fixedFraction(readBE16s(p + 130)));
-    printf("%-32s %.6f\n", "emboss_fraction", shortFixed(readBE16s(p + 132)));
-
-    printf("\nProjectile Groups\n");
-    printf("-----------------\n");
-    for (int i = 0; i < 16; i++) {
-        char label[32];
-        sprintf(label, "projectile_group_tags[%d]", i);
-        printTagOrNone(label, readBE32(p + 24 + i * 4));
-    }
-
-    printf("\nTexture Data\n");
-    printf("------------\n");
-    for (int i = 0; i < 4; i++) {
-        size_t o = 134 + i * 12;
-        printf("texdata[%d]: wobble_scale=%.6f wobble_speed=%.6f base_scale=(%.6f, %.6f) base_speed=(%.6f, %.6f)\n",
-               i,
-               shortFixed(readBE16s(p + o + 0)),
-               shortFixed(readBE16s(p + o + 2)),
-               shortFixed(readBE16s(p + o + 4)),
-               shortFixed(readBE16s(p + o + 6)),
-               shortFixed(readBE16s(p + o + 8)),
-               shortFixed(readBE16s(p + o + 10)));
-    }
+    printf("\nKey Flags\n");
+    printf("---------\n");
+    printFlag(flags, 1u << 5,  "detonates_at_rest");
+    printFlag(flags, 1u << 7,  "animates_at_rest");
+    printFlag(flags, 1u << 8,  "becomes_dormant_at_rest");
+    printFlag(flags, 1u << 9,  "angle_follows_trajectory");
+    printFlag(flags, 1u << 10, "contrail_frequency_reset_after_bouncing");
+    printFlag(flags, 1u << 16, "is_on_fire");
+    printFlag(flags, 1u << 18, "passes_through_target");
+    printFlag(flags, 1u << 20, "floats");
+    printFlag(flags, 1u << 21, "is_media_surface_effect");
+    printFlag(flags, 1u << 26, "continually_detonates");
+    printFlag(flags, 1u << 31, "detonates_immediately");
 }
 
 static void usage(const char* p) {
     fprintf(stderr,
-        "Myth II Media Dumper\n\n"
+        "Myth II Projectile Dumper\n\n"
         "Usage:\n"
         "  %s <file> list\n"
         "  %s <file> <id>\n\n"
         "Arguments:\n"
         "  file   Myth II foundation/plugin/local tag file\n"
-        "  list   List all medi tags in the file\n"
-        "  id     4-character medi tag id (for example wate, wagr, wamu)\n",
+        "  list   List all proj tags in the file\n"
+        "  id     4-character proj tag id\n",
         p, p);
 }
 
@@ -289,17 +284,16 @@ int main(int argc, char* argv[]) {
     }
 
     if (listOnly) {
-        printf("Myth II Media Dumper\n");
-        printf("====================\n");
+        printf("Myth II Projectile Dumper\n");
+        printf("=========================\n");
         printf("File:          %s\n", path);
-        printf("Media tags:\n\n");
+        printf("Projectile tags:\n\n");
         printf("%-32s  %-4s  %-10s  %-10s  %-7s\n",
                "Name", "ID", "Offset", "Length", "Ver");
         printf("%s\n", std::string(72, '-').c_str());
-
         int count = 0;
         for (const auto& t : tags) {
-            if (t.groupTag != 0x6D656469u) continue; // 'medi'
+            if (t.groupTag != PROJ_TAG) continue;
             printf("%-32.32s  %-4s  %10u  %10u  %7u\n",
                    t.name.c_str(),
                    tagToString(t.subgroupTag).c_str(),
@@ -308,7 +302,7 @@ int main(int argc, char* argv[]) {
                    (unsigned)t.version);
             count++;
         }
-        printf("\n%d medi tags listed.\n", count);
+        printf("\n%d proj tags listed.\n", count);
         fclose(f);
         return 0;
     }
@@ -321,14 +315,13 @@ int main(int argc, char* argv[]) {
 
     const Myth2TagHeader* found = nullptr;
     for (const auto& t : tags) {
-        if (t.groupTag == 0x6D656469u && t.subgroupTag == targetId) { // 'medi'
+        if (t.groupTag == PROJ_TAG && t.subgroupTag == targetId) {
             found = &t;
             break;
         }
     }
-
     if (!found) {
-        fprintf(stderr, "medi tag '%s' not found in %s\n", id.c_str(), path);
+        fprintf(stderr, "proj tag '%s' not found in %s\n", id.c_str(), path);
         fclose(f);
         return 1;
     }
@@ -338,7 +331,7 @@ int main(int argc, char* argv[]) {
         uint8_t hdr[64];
         fseek(f, dataOffset, SEEK_SET);
         if (fread(hdr, 1, 64, f) == 64) {
-            if (readBE32(hdr + 60) == 0x6D746832u) dataOffset += 64; // local-tag header at payload offset
+            if (readBE32(hdr + 60) == 0x6D746832u) dataOffset += 64;
         } else {
             fprintf(stderr, "Failed to read tag header at offset %u\n", found->offset);
             fclose(f);
@@ -351,20 +344,20 @@ int main(int argc, char* argv[]) {
     std::vector<uint8_t> data(found->size);
     fseek(f, dataOffset, SEEK_SET);
     if (fread(data.data(), 1, found->size, f) != found->size) {
-        fprintf(stderr, "Failed to read medi payload\n");
+        fprintf(stderr, "Failed to read proj payload\n");
         fclose(f);
         return 1;
     }
     fclose(f);
 
-    printf("Myth II Media Dumper\n");
-    printf("====================\n");
+    printf("Myth II Projectile Dumper\n");
+    printf("=========================\n");
     printf("File:          %s\n", path);
     printf("Tag name:      %s\n", found->name.c_str());
     printf("Tag type/id:   %s %s\n", tagToString(found->groupTag).c_str(), tagToString(found->subgroupTag).c_str());
     printf("Tag offset:    %u\n", found->offset);
     printf("Payload size:  %u\n\n", found->size);
 
-    dumpMediaDefinition(data.data(), data.size());
+    dumpProjectileDefinition(data.data(), data.size());
     return 0;
 }

@@ -47,7 +47,7 @@ This is the bit that takes a minute to internalize:
 - **Geometry** (`media_height`, per vertex) defines where the water surface visually sits and what gets reflected/animated/wave-displaced.
 - **Gameplay** (terrain type, per triangle) defines what the water *does* to units that walk into it.
 
-These are mostly redundant — a designer who paints a deep pool will set `media_height` high *and* tag the triangles `_terrain_media_giant_depth` or `_terrain_media_deep`, because that matches what the player will see. But the engine doesn't enforce the consistency. You can absolutely have a triangle whose geometry says "0.5 world units of water" but whose terrain type says `_terrain_media_deep`, and that triangle will *visually* look like an ankle splash but *gameplay-wise* will drown a giant. Loathing leaves this to the designer's judgment — there's no auto-classifier from depth to tier in the editor (`myth2_water_depth.cpp` is filling that gap).
+These are mostly redundant — a designer who paints a deep pool will set `media_height` high *and* tag the triangles `_terrain_media_giant_depth` or `_terrain_media_deep`, because that matches what the player will see. But the engine doesn't enforce the consistency. You can absolutely have a triangle whose geometry says "0.5 world units of water" but whose terrain type says `_terrain_media_deep`, and that triangle will *visually* look like an ankle splash but *gameplay-wise* will drown a giant. Loathing leaves this to the designer's judgment — there's no auto-classifier from depth to tier in the editor (`water_depth.cpp` is filling that gap).
 
 This split also explains why Bungie didn't store depth as a number: there are only really four interesting outcomes (does the dwarf drown? does the human drown? does the giant drown? does anything drown?), so quantizing into 4 tiers is both more cache-friendly and lets the designer override geometry-implied depth for gameplay reasons (e.g., a shallow-looking puddle that's narratively a bottomless well).
 
@@ -67,9 +67,9 @@ For sprite Z-sorting and projectile collision, "the height of this cell" means *
 
 Two separate tools mirror this duality:
 
-- [`myth2_water_depth.cpp`](../myth2/myth2_water_depth.cpp) — **populates the gameplay tier** from the geometry tracks. Takes a terrain OBJ + water OBJ, computes `depth = water_z - terrain_z` per cell, and classifies into 4 tiers using user-supplied `level1/level2/level3` thresholds ([line 170-178](../myth2/myth2_water_depth.cpp#L170-L178)). This is the auto-classifier Loathing didn't have. The output is a `water_generated.bmp` color-coded by tier, ready to be painted into the terrain-type nibbles.
-- [`myth2_media_height.cpp`](../myth2/myth2_media_height.cpp) — works the geometry side: read/write `media_height` directly.
-- [`myth2_assemble.cpp:496`](../myth2/myth2_assemble.cpp#L496) `estimateMediaHeight()` — when you flood-fill a wet region without an explicit height, it picks the **maximum** `physical_height` of the cell and its three diagonal neighbors. That's a sensible "fill to the brim" default — the water surface sits at the highest terrain corner of the patch, guaranteeing the cell is at least slightly submerged.
+- [`water_depth.cpp`](../myth2/water_depth.cpp) — **populates the gameplay tier** from the geometry tracks. Takes a terrain OBJ + water OBJ, computes `depth = water_z - terrain_z` per cell, and classifies into 4 tiers using user-supplied `level1/level2/level3` thresholds ([line 170-178](../myth2/water_depth.cpp#L170-L178)). This is the auto-classifier Loathing didn't have. The output is a `water_generated.bmp` color-coded by tier, ready to be painted into the terrain-type nibbles.
+- [`media_height.cpp`](../myth2/media_height.cpp) — works the geometry side: read/write `media_height` directly.
+- [`build_plugin.cpp:496`](../myth2/build_plugin.cpp#L496) `estimateMediaHeight()` — when you flood-fill a wet region without an explicit height, it picks the **maximum** `physical_height` of the cell and its three diagonal neighbors. That's a sensible "fill to the brim" default — the water surface sits at the highest terrain corner of the patch, guaranteeing the cell is at least slightly submerged.
 
 ## Tying it back to the flag bits
 
@@ -85,7 +85,7 @@ So when you assemble a wet region, a single cell typically gets bits 8, 11, 12 s
 
 ## Practical edge cases worth knowing
 
-1. **Variable-depth pools.** Because `media_height` is per-vertex and depth tier is per-triangle, you can have a pool where the surface tilts gently across the patch. As long as each triangle's tier matches its average depth, gameplay reads correctly. The `myth2_water_depth` classifier handles this since it operates per cell.
+1. **Variable-depth pools.** Because `media_height` is per-vertex and depth tier is per-triangle, you can have a pool where the surface tilts gently across the patch. As long as each triangle's tier matches its average depth, gameplay reads correctly. The `water_depth` classifier handles this since it operates per cell.
 
 2. **Negative `media_height`.** Perfectly legal — water below the world reference plane. Caves and indoor maps use this.
 

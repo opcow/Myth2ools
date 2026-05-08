@@ -1,9 +1,9 @@
-// myth2_normal_compare.cpp
+// normal_compare.cpp
 // Compare the generated Myth II runtime normal table against empirical mesh-normal buckets
 // and score simple axis/sign permutations to find the best basis alignment.
 //
 // Usage:
-//   myth2_normal_compare <folder>
+//   normal_compare <folder>
 
 #include <cstdio>
 #include <cstdlib>

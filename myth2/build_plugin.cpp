@@ -1,4 +1,4 @@
-// myth2_assemble.cpp
+// build_plugin.cpp
 // Rebuild a Myth II dng2 plugin from an extracted map folder.
 //
 // First pass:
@@ -9,7 +9,7 @@
 //   - includes screens/*_tag.bin when present
 //
 // Usage:
-//   myth2_assemble <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation]
+//   build_plugin <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation]
 
 #include <cstdio>
 #include <cstdlib>
@@ -21,7 +21,7 @@
 #include <cmath>
 #include <limits>
 
-#include "myth2_mesh_flags.h"
+#include "mesh_flags.h"
 
 static uint32_t swap32(uint32_t n) {
     return ((n & 0xFF000000u) >> 24) | ((n & 0x00FF0000u) >> 8)
@@ -1300,7 +1300,7 @@ static void usage(const char* p) {
         "Myth II Plugin Assembler\n\n"
         "Usage:\n"
         "  %s <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation]\n\n"
-        "  folder   Extracted Myth II map folder from myth2_extract\n"
+        "  folder   Extracted Myth II map folder from extract\n"
         "  output   Output plugin path (default: <folder>_plugin)\n"
         "  --edit   Re-read edited assets from the folder before packing\n"
         "  --obj    Import terrain displacement from OBJ into raw/mesh_tag.bin during --edit\n"
