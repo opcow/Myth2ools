@@ -200,12 +200,18 @@ Extracts 3D scenery models and placement data from an extracted Myth II mesh tag
 - `models/<tag>.obj` + `.mtl` — per-type geometry with UV coordinates
 - `models/map_combined.obj` + `.mtl` — all scenery instances placed at their
   correct map positions and orientations, ready to import into Blender
+- `models/animations.json` plus `models/<anim>_<N>_frame##_*.obj` — model
+  animation manifests and frame OBJs for animated map objects such as gates
 - `placement.json` — all instance positions (cell coords) and facing angles
 
 When an optional `terrain.obj` path is supplied (e.g. the `displacement.obj`
 produced by `myth2_mesh`), the terrain mesh is appended to `map_combined.obj`
 as a separate named object (`o terrain`), giving a single file with both the
 terrain surface and all placed scenery.
+
+To preview model animations in Blender, import `models/map_combined.obj`, then
+run `tools/import_myth2_animations.py` from Blender's Text Editor after setting
+`MANIFEST_PATH` to the map's `models/animations.json`.
 
 ### `myth2_water_mesh`
 

@@ -36,17 +36,22 @@ The cell grid starts immediately after the 1024-byte header (at file offset 1024
 ## Unit Type Record (32 bytes)
 
 ```
-[0:2]   w0 = object class:
-            1  = unit/marker (mupt, nelf, musr, sarb, etc.)
-            3  = monster (soul, dwar, arch, etc.)
-            5  = effect/projectile (amri, ratr, etc.)
-            6  = scenery/building (barn, farm, corn, oute, etc.)
-            9  = netgame objective (wipp, etc.)
-           11  = local controller (l0cg)
+[0:2]   w0 = marker type:
+            0  = team start / observer
+            1  = scenery (`scen` tag; mupt, mubu, mufp, musg, etc.)
+            3  = monster/unit (`unit` tag; soul, dwar, arch, etc.)
+            5  = sound source (`amso` tag)
+            6  = direct model (`geom` tag; barn, farm, corn, oute, etc.)
+            9  = projectile (`proj` tag)
+           10  = local projectile group (`lpgr` tag)
+           11  = model animation (`anim` tag; e.g. le3e `l0cg`)
 [4:8]   type_tag = 4-char Myth II tag ID
 [28:30] instance count for this type
 [30:32] unique sequential type index
 ```
+
+These marker classifications match Bungie's Loathing/Oak tool mapping:
+`-1, scen, -1, unit, -1, amso, geom, -1, -1, proj, lpgr, anim`.
 
 ---
 
@@ -80,9 +85,10 @@ Each mesh cell stores `firstObjectIndex` (at byte offset 6 within the 12-byte ce
 
 ---
 
-## Scenery Objects (w0 = 6)
+## Direct Model Objects (w0 = 6)
 
-Scenery instance `type_tag` directly corresponds to `geom`, `mode`, and optionally `scen` tag subgroup IDs in the Myth II tag files. Example for Willow Creek (le3e):
+Direct model instance `type_tag` corresponds to a `mode` tag and ultimately a `geom`
+tag in the Myth II tag files. Example for Willow Creek (le3e):
 
 | type_tag | geom tag | mode tag | Description |
 |----------|----------|----------|-------------|
@@ -96,6 +102,28 @@ Scenery instance `type_tag` directly corresponds to `geom`, `mode`, and optional
 | `03si`   | no       | yes      | Sign/marker |
 
 The `geom` tag contains the actual 3D geometry. The `mode` tag wraps it and links to the `.256` collection for textures.
+
+---
+
+## Model Animation Objects (w0 = 11)
+
+Model-animation markers reference an `anim` tag. The animation tag is a flipbook of
+model frames: each frame names a `mode`/`geom` model tag plus a permutation index.
+
+In Willow Creek (`le3e`), the opening gate marker is:
+
+| marker type | tag | tag type | Description |
+|-------------|-----|----------|-------------|
+| `11` | `l0cg` | `anim` | l03 closing gate |
+
+`anim l0cg` contains 9 frames, each with its own model state:
+
+`l03c`, `l03d`, `l03e`, `l03f`, `l03g`, `l03h`, `l03i`, `l03j`, `l03k`
+
+`myth2_model` exports each animation frame as
+`models/<anim>_<markerIdx>_frame##_*.obj` and writes a Blender/import-friendly
+manifest at `models/animations.json`. `map_combined.obj` includes only the first
+frame of each animation as the static map snapshot.
 
 ---
 
@@ -216,9 +244,9 @@ SIZEOF_STRUCT_MODEL_MESH_DATA = 8 bytes (per mesh cell entry)
 ## Extraction Pipeline for 3D Scenery
 
 1. **Parse mesh header** to get submesh dimensions and table offsets.
-2. **Read unit type table** — filter for `w0 == 6` (scenery).
-3. **Read object instance table** — filter for scenery type_idx entries, extract XY position and facing.
-4. **For each unique scenery type_tag**:
+2. **Read unit type table** — collect direct models (`w0 == 6`) and model animations (`w0 == 11`).
+3. **Read object instance table** — resolve type-relative marker palette indexes and extract XY position and facing.
+4. **For each unique direct model type_tag, plus model tags referenced by animation frames**:
    a. Find the `geom` tag (group `0x67656F6D`, subgroup = type_tag) in the Myth II tag files.
    b. Parse `geometry_definition` header to get material, vertex, and surface arrays.
    c. Extract vertices as `float3 = (x/WORLD_ONE, y/WORLD_ONE, z/WORLD_ONE)`.
@@ -226,7 +254,8 @@ SIZEOF_STRUCT_MODEL_MESH_DATA = 8 bytes (per mesh cell entry)
    e. Find the `collection_reference_tag` (the `.256` tag for textures).
    f. Extract the relevant bitmap frames from the `.256` tag for each material.
 5. **Write per-type OBJ** with geometry, per-material UV groups, and MTL referencing extracted textures.
-6. **Write a placement JSON or OBJ** listing all scenery instances with position and facing for import into Blender.
+6. **Write per-instance OBJs** for direct models and per-frame OBJs for model animations.
+7. **Write JSON manifests** listing placements and animation frame order for import into Blender.
 
 ### WORLD_ONE
 

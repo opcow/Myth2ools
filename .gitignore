@@ -8,7 +8,8 @@
 *.pdb
 *.tar.gz
 *.zip
-tools/
+tools/*
+!tools/import_myth2_animations.py
 build/
 ghidra*/
 out/
@@ -18,5 +19,5 @@ myth2_tags/
 Doc/session_log.md
 .settings.local.json
 .claude/
-*.py
+!tools/import_myth2_animations.py
 *.dng2

@@ -14,12 +14,13 @@ holds one `marker_data` record per placed object, of every type.
 [0:4]   flags (uint32)
 [4:6]   type (int16) — marker type enum:
             0  = team start
-            1  = scenery collision marker
-            3  = monster
-            5  = effect
+            1  = scenery (`scen`)
+            3  = monster/unit (`unit`)
+            5  = sound source (`amso`)
             6  = _marker_model  ← placed 3D scenery with geometry
-            9  = netgame objective
-           11  = local controller
+            9  = projectile (`proj`)
+           10  = local projectile group (`lpgr`)
+           11  = _marker_model_animation (`anim`)
 [6:8]   palette_index (int16) — type-relative index into unit type palette
 [8:10]  identifier (int16)
 [10:12] minimum_difficulty_level (int16)
@@ -38,7 +39,9 @@ holds one `marker_data` record per placed object, of every type.
 [62:64] data_identifier (int16)
 ```
 
-Only markers with `type == 6` (_marker_model) are placed 3D scenery instances.
+Markers with `type == 6` (_marker_model) are direct placed 3D model instances.
+Markers with `type == 11` (_marker_model_animation) reference `anim` tags whose
+frames point at separate model tags.
 
 ### Coordinate System
 
@@ -68,6 +71,14 @@ selecting which visual variant of the model to display.
 
 Confirmed on le3e: 5 farm house instances show `user_data[1]` values of 0 or 2,
 corresponding to two distinct house appearance variants.
+
+### Model Animation Markers
+
+For `_marker_model_animation` (type 11), the marker's palette tag resolves to an
+`anim` tag. `anim l0cg` on le3e is the opening/closing gate. It contains 9 model
+frames (`l03c` through `l03k`) at 4 ticks per frame. `myth2_model` writes each
+frame as its own OBJ and emits `models/animations.json` with frame order, timing,
+placement, and OBJ/MTL paths.
 
 ---
 
@@ -266,11 +277,14 @@ MTL `map_Kd` paths use `textures/<filename>` relative to the `models/` output fo
     <tag>.mtl
     <tag>_<N>.obj          per-instance geometry with permutation-correct textures
     <tag>_<N>.mtl
+    <anim>_<N>_frame##_*.obj  model-animation frame geometry
+    <anim>_<N>_frame##_*.mtl
+    animations.json        animation placements, timing, frame order, OBJ/MTL paths
     map_combined.obj       all instances transformed into world space + terrain
     map_combined.mtl
     displacement.obj       terrain mesh (written by myth2_mesh)
     displacement.mtl       terrain material (map_Kd ../layers/terrain.png)
     textures/
       <collTag>_<seq>_<view>.png   all extracted texture variants
-  placement.json           all _marker_model instances with position, facing, permutation
+  placement.json           direct model placements plus animation marker summaries
 ```

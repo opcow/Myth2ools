@@ -1102,6 +1102,7 @@ static void usage(const char* p) {
         "  <out_folder>/models/<tag>_<N>.obj  per-instance geometry\n"
         "  <out_folder>/models/<tag>_<N>.mtl\n"
         "  <out_folder>/models/<anim>_<N>_frame##_*.obj  model-animation frames\n"
+        "  <out_folder>/models/animations.json  model-animation frame manifest\n"
         "  <out_folder>/placement.json        all scenery instance placements\n",
         p);
 }
@@ -1520,7 +1521,17 @@ int main(int argc, char* argv[]) {
     json += "\n  ],\n";
     json += "  \"animations\": [\n";
 
+    std::string animationsJson;
+    animationsJson += "{\n";
+    animationsJson += "  \"map_width_cells\": " + std::to_string(mh.submeshW * 32) + ",\n";
+    animationsJson += "  \"map_height_cells\": " + std::to_string(mh.submeshH * 32) + ",\n";
+    animationsJson += "  \"coordinate_space\": ";
+    appendJsonString(animationsJson, worldSpace ? "world" : "local");
+    animationsJson += ",\n";
+    animationsJson += "  \"animations\": [\n";
+
     bool firstAnim = true;
+    bool firstAnimManifest = true;
     for (size_t ii = 0; ii < instances.size(); ii++) {
         const auto& inst = instances[ii];
         if (inst.markerType != 11) continue;
@@ -1560,6 +1571,18 @@ int main(int argc, char* argv[]) {
                  (int)anim.ticksPerFrame);
         json += buf;
 
+        if (!firstAnimManifest) animationsJson += ",\n";
+        firstAnimManifest = false;
+        animationsJson += "    {\"tag\": ";
+        appendJsonString(animationsJson, animStr);
+        snprintf(buf, sizeof(buf),
+                 ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
+                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu"
+                 ", \"frame_duration_ticks\": %d, \"frames\": [",
+                 cellX, cellY, cellZ, facingDeg, (int)inst.paletteIdx, ii,
+                 (int)anim.ticksPerFrame);
+        animationsJson += buf;
+
         WorldTransform wt;
         wt.cellX     = cellX;
         wt.cellY     = cellY;
@@ -1572,11 +1595,27 @@ int main(int argc, char* argv[]) {
             const AnimationFrame& frame = anim.frames[fi];
             std::string frameTagStr = tagToString(frame.modelTag);
             std::string frameTagFile = tagToFileStem(frame.modelTag);
+            std::string stem = animFile + "_" + std::to_string(ii) + "_frame"
+                             + (fi < 10 ? "0" : "") + std::to_string(fi)
+                             + "_" + frameTagFile;
+
             if (fi) json += ", ";
             json += "{\"model\": ";
             appendJsonString(json, frameTagStr);
             snprintf(buf, sizeof(buf), ", \"permutation\": %d}", (int)frame.permutationIndex);
             json += buf;
+
+            if (fi) animationsJson += ", ";
+            animationsJson += "{\"frame\": ";
+            animationsJson += std::to_string(fi);
+            animationsJson += ", \"model\": ";
+            appendJsonString(animationsJson, frameTagStr);
+            snprintf(buf, sizeof(buf), ", \"permutation\": %d, \"obj\": ", (int)frame.permutationIndex);
+            animationsJson += buf;
+            appendJsonString(animationsJson, stem + ".obj");
+            animationsJson += ", \"mtl\": ";
+            appendJsonString(animationsJson, stem + ".mtl");
+            animationsJson += "}";
 
             auto git = geomCache.find(frame.modelTag);
             if (git == geomCache.end()) continue;
@@ -1617,9 +1656,6 @@ int main(int argc, char* argv[]) {
                 permTexPngs.push_back(mat.texturePng);
             }
 
-            std::string stem = animFile + "_" + std::to_string(ii) + "_frame"
-                             + (fi < 10 ? "0" : "") + std::to_string(fi)
-                             + "_" + frameTagFile;
             exportOBJ(outFolder + "/models/" + stem + ".obj",
                       outFolder + "/models/" + stem + ".mtl",
                       animStr + "_" + frameTagStr,
@@ -1643,13 +1679,21 @@ int main(int argc, char* argv[]) {
             }
         }
         json += "]}";
+        animationsJson += "]}";
     }
 
     json += "\n  ]\n}\n";
+    animationsJson += "\n  ]\n}\n";
 
     std::string placePath=outFolder+"/placement.json";
     if (writeText(placePath, json))
         printf("Placement written: %s\n", placePath.c_str());
+
+    if (!firstAnimManifest) {
+        std::string animPath = outFolder + "/models/animations.json";
+        if (writeText(animPath, animationsJson))
+            printf("Animations written: %s\n", animPath.c_str());
+    }
 
     // ---- Write combined map OBJ ----
     if (!placedInstances.empty()) {
