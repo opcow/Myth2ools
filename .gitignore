@@ -7,7 +7,6 @@
 *.so
 *.pdb
 *.tar.gz
-*.zip
 tools/*
 !tools/import_animations.py
 build/
