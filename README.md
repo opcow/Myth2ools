@@ -344,6 +344,15 @@ cmake --build . --config <Release | Debug>
 cmake --build . --config <Release | Debug> --target clean
 ```
 
+### Package Release
+
+```bash
+cmake --build . --config Release --target package_release
+```
+
+Builds the release executables and writes `build/dist/myth2ools_<tag>.zip`,
+where `<tag>` is the latest git tag reported by `git describe --tags --abbrev=0`.
+
 ### Source Layout
 
 - `tfl/` contains Myth: The Fallen Lords-era tools and exploratory helpers.

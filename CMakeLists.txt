@@ -3,6 +3,7 @@ project(myth_tools)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(Git REQUIRED)
 
 add_executable(myth_extract tfl/myth_extract.cpp)
 add_executable(myth_assemble tfl/myth_assemble.cpp)
@@ -26,6 +27,31 @@ add_executable(core_dump myth2/core_dump.cpp)
 add_executable(proj_dump myth2/proj_dump.cpp)
 add_executable(build_plugin myth2/build_plugin.cpp)
 add_executable(export_models myth2/export_models.cpp)
+
+set(RELEASE_TARGETS
+    myth_extract
+    myth_assemble
+    myth_mesh
+    myth_mesh_import
+    tag_dump
+    extract_map
+    export_mesh
+    export_water_mesh
+    water_depth
+    mesh_import
+    mesh_diff
+    mesh_dump
+    mesh_summary
+    normal_analyze
+    normal_compare
+    normal_table
+    media_height
+    media_dump
+    core_dump
+    proj_dump
+    build_plugin
+    export_models
+)
 
 # Enable warnings
 if (MSVC)
@@ -75,3 +101,29 @@ else()
     target_compile_options(build_plugin PRIVATE -Wall -Wextra)
     target_compile_options(export_models PRIVATE -Wall -Wextra)
 endif()
+
+set(PACKAGE_STAGING_DIR "${CMAKE_BINARY_DIR}/package_release")
+set(PACKAGE_OUTPUT_DIR "${CMAKE_BINARY_DIR}/dist")
+set(PACKAGE_COPY_COMMANDS)
+foreach(target IN LISTS RELEASE_TARGETS)
+    list(APPEND PACKAGE_COPY_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:${target}>"
+            "${PACKAGE_STAGING_DIR}/"
+    )
+endforeach()
+
+add_custom_target(package_release
+    DEPENDS ${RELEASE_TARGETS}
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${PACKAGE_STAGING_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${PACKAGE_STAGING_DIR}"
+    ${PACKAGE_COPY_COMMANDS}
+    COMMAND ${CMAKE_COMMAND}
+        "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}"
+        "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+        "-DSTAGING_DIR=${PACKAGE_STAGING_DIR}"
+        "-DOUTPUT_DIR=${PACKAGE_OUTPUT_DIR}"
+        -P "${CMAKE_SOURCE_DIR}/cmake/package_release.cmake"
+    COMMENT "Packaging release executables"
+    VERBATIM
+)
