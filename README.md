@@ -34,92 +34,7 @@ And, of course, you can use Blender to create or modify the 3D map surface.
 
 ![Models on the map](images/with_models.png)  
 
-## Building
-
-### With CMake
-
-```bash
-mkdir build && cd build
-cmake ..
-cmake --build .
-```
-
-### Or choose config
-
-```bash
-cmake --build . --config <Release | Debug>
-```
-
-### Clean
-
-```bash
-cmake --build . --config <Release | Debug> --target clean
-```
-
-### Source Layout
-
-- `tfl/` contains Myth: The Fallen Lords-era tools and exploratory helpers.
-- `myth2/` contains Myth II: Soulblighter tools and shared Myth II headers.
-
-### Quick compile (MSVC)
-
-```bash
-cl /EHsc /O2 myth2\myth2_dump.cpp /Fe:myth2_dump.exe
-cl /EHsc /O2 myth2\myth2_extract.cpp /Fe:myth2_extract.exe
-cl /EHsc /O2 myth2\myth2_mesh.cpp /Fe:myth2_mesh.exe
-cl /EHsc /O2 myth2\myth2_model.cpp /Fe:myth2_model.exe
-cl /EHsc /O2 myth2\myth2_water_mesh.cpp /Fe:myth2_water_mesh.exe
-cl /EHsc /O2 myth2\myth2_water_depth.cpp /Fe:myth2_water_depth.exe
-cl /EHsc /O2 myth2\myth2_mesh_import.cpp /Fe:myth2_mesh_import.exe
-cl /EHsc /O2 myth2\myth2_mesh_diff.cpp /Fe:myth2_mesh_diff.exe
-cl /EHsc /O2 myth2\myth2_mesh_dump.cpp /Fe:myth2_mesh_dump.exe
-cl /EHsc /O2 myth2\myth2_mesh_summary.cpp /Fe:myth2_mesh_summary.exe
-cl /EHsc /O2 myth2\myth2_normal_analyze.cpp /Fe:myth2_normal_analyze.exe
-cl /EHsc /O2 myth2\myth2_normal_compare.cpp /Fe:myth2_normal_compare.exe
-cl /EHsc /O2 myth2\myth2_normal_table.cpp /Fe:myth2_normal_table.exe
-cl /EHsc /O2 myth2\myth2_media_height.cpp /Fe:myth2_media_height.exe
-cl /EHsc /O2 myth2\myth2_media_dump.cpp /Fe:myth2_media_dump.exe
-cl /EHsc /O2 myth2\myth2_core_dump.cpp /Fe:myth2_core_dump.exe
-cl /EHsc /O2 myth2\myth2_proj_dump.cpp /Fe:myth2_proj_dump.exe
-cl /EHsc /O2 myth2\myth2_assemble.cpp /Fe:myth2_assemble.exe
-```
-
-### Quick compile (GCC / Clang)
-
-```bash
-g++ -std=c++17 -O2 myth2/myth2_dump.cpp -o myth2_dump
-g++ -std=c++17 -O2 myth2/myth2_extract.cpp -o myth2_extract
-g++ -std=c++17 -O2 myth2/myth2_mesh.cpp -o myth2_mesh
-g++ -std=c++17 -O2 myth2/myth2_model.cpp -o myth2_model
-g++ -std=c++17 -O2 myth2/myth2_water_mesh.cpp -o myth2_water_mesh
-g++ -std=c++17 -O2 myth2/myth2_water_depth.cpp -o myth2_water_depth
-g++ -std=c++17 -O2 myth2/myth2_mesh_import.cpp -o myth2_mesh_import
-g++ -std=c++17 -O2 myth2/myth2_mesh_diff.cpp -o myth2_mesh_diff
-g++ -std=c++17 -O2 myth2/myth2_mesh_dump.cpp -o myth2_mesh_dump
-g++ -std=c++17 -O2 myth2/myth2_mesh_summary.cpp -o myth2_mesh_summary
-g++ -std=c++17 -O2 myth2/myth2_normal_analyze.cpp -o myth2_normal_analyze
-g++ -std=c++17 -O2 myth2/myth2_normal_compare.cpp -o myth2_normal_compare
-g++ -std=c++17 -O2 myth2/myth2_normal_table.cpp -o myth2_normal_table
-g++ -std=c++17 -O2 myth2/myth2_media_height.cpp -o myth2_media_height
-g++ -std=c++17 -O2 myth2/myth2_media_dump.cpp -o myth2_media_dump
-g++ -std=c++17 -O2 myth2/myth2_core_dump.cpp -o myth2_core_dump
-g++ -std=c++17 -O2 myth2/myth2_proj_dump.cpp -o myth2_proj_dump
-g++ -std=c++17 -O2 myth2/myth2_assemble.cpp -o myth2_assemble
-```
-
----
-
-## Tools
-
-### `myth2_dump`
-
-```bash
-myth2_dump <file>
-myth2_dump <file> list [type|all]
-myth2_dump <file> entrypoints
-```
-
-Lists tags in Myth II `dng2` plugin files and `mth2` local tag files.
+## Authoring Tools
 
 ### `myth2_extract`
 
@@ -170,6 +85,48 @@ The loose files in `layers/` are PNGs so overlay/reference layers can carry
 transparency in regular image editors. The assembler reimports from the
 canonical files under `terrain/`, `screens/`, and `strings/`.
 
+### `myth2_assemble`
+
+```bash
+myth2_assemble <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation]
+```
+
+Rebuilds a Myth II `dng2` plugin from an extracted map folder. The first pass
+packs the mesh plus any extracted terrain, name, and screen tags.
+
+- `--edit` reapplies edited assets from the extracted folder before packing.
+- `--obj` imports Myth II terrain displacement from an OBJ into `raw/mesh_tag.bin`.
+- If `--obj` is omitted, `myth2_assemble --edit` auto-detects `<folder>/displacement.obj` when present.
+- `--water-obj` imports Myth II water-surface heights from an OBJ into wet cells' `media_height`.
+- If `--water-obj` is omitted, `myth2_assemble --edit` auto-detects `<folder>/water.obj` when present, then falls back to the old `<folder>/<mesh_tag>_water.obj` name.
+- During `--edit`, `terrain/water.bmp` is safely reapplied by default as flags/types only.
+- `--water` experimentally imports `terrain/water.bmp` with media-height changes as well.
+- `--water-flags` explicitly selects the same safe flags-only `terrain/water.bmp` path.
+- `--animation` experimentally imports `terrain/animation.bmp` back into the mesh during `--edit`; it is not imported by default.
+- The assembler reads editable assets from the canonical extracted paths:
+  - `terrain/terrain.bmp`
+  - `terrain/passability.bmp`
+  - `terrain/water.bmp`
+  - `terrain/animation.bmp`
+  - `screens/overhead.bmp`
+  - `screens/pregame.bmp`
+  - `screens/postgame.bmp`
+  - `strings/name.txt`
+- `terrain/terrain.bmp` is reinjected into the terrain `.256` when present.
+- `terrain/passability.bmp` is converted back into Myth II terrain-type flags.
+  Indexed BMPs use exact pixel indexes; older RGB BMPs are matched by nearest
+  terrain-type color.
+- `terrain/water.bmp` is safely reinserted in flags-only form during `--edit`.
+  Indexed BMPs use indexes `0..3` as wet media depths/types and all other
+  indexes as dry; older RGB BMPs are still supported by color matching.
+- `terrain/reflection.bmp` is reinserted into the mesh reflection bit during `--edit`.
+- `terrain/reflection.bmp` marks reflective cells from the mesh as a 4-bit indexed mask: index `0` = off, nonzero = reflective.
+- `terrain/animation.bmp` marks cells with the animated-media bit as a 4-bit indexed mask: index `0` = off, nonzero = animated.
+- In normal engine behavior, the animated-media bit is derived from wet topology: a vertex is marked animated only when the four cells meeting there are all fully wet.
+- Because the engine recomputes that bit from topology, `terrain/animation.bmp` is best treated as a diagnostic/reference layer rather than a stable standalone authoring control.
+- `screens/pregame.bmp`, `screens/overhead.bmp`, and `screens/postgame.bmp` are reinjected into their `.256` tags when present.
+- `strings/name.txt` is rebuilt into the map-name `stli` when present.
+
 ### `myth2_mesh`
 
 ```bash
@@ -179,6 +136,16 @@ myth2_mesh <tag_folder> [output.obj] [heightscale]
 Exports an extracted Myth II mesh folder as Wavefront `OBJ`. The exporter uses
 the Myth II alternating cell diagonal pattern and a default height scale of
 `1/512`.
+
+### `myth2_water_mesh`
+
+```bash
+myth2_water_mesh <tag_folder> [output.obj] [heightscale]
+```
+
+Exports the current Myth II water surface as an OBJ aligned to the terrain OBJ.
+It uses `media_height` for vertex Y and writes only wet triangles, with an MTL
+that points to `terrain/water_mask.bmp`.
 
 ### `myth2_model`
 
@@ -208,15 +175,17 @@ file picker includes options to import `map_combined.obj`, replace a prior
 `--animation-frame none` when extracting if you want `map_combined.obj` to omit
 static animation snapshots and let Blender show only the keyframed frames.
 
-### `myth2_water_mesh`
+## Analysys/Debugging Tools
+
+### `myth2_dump`
 
 ```bash
-myth2_water_mesh <tag_folder> [output.obj] [heightscale]
+myth2_dump <file>
+myth2_dump <file> list [type|all]
+myth2_dump <file> entrypoints
 ```
 
-Exports the current Myth II water surface as an OBJ aligned to the terrain OBJ.
-It uses `media_height` for vertex Y and writes only wet triangles, with an MTL
-that points to `terrain/water_mask.bmp`.
+Lists tags in Myth II `dng2` plugin files and `mth2` local tag files.
 
 ### `myth2_water_depth`
 
@@ -344,48 +313,6 @@ Dumps a Myth II `proj` tag with an emphasis on bounce/collision-relevant
 fields such as inertia, detonation/media-detonation frequencies, rebound type,
 and projectile flags.
 
-### `myth2_assemble`
-
-```bash
-myth2_assemble <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation]
-```
-
-Rebuilds a Myth II `dng2` plugin from an extracted map folder. The first pass
-packs the mesh plus any extracted terrain, name, and screen tags.
-
-- `--edit` reapplies edited assets from the extracted folder before packing.
-- `--obj` imports Myth II terrain displacement from an OBJ into `raw/mesh_tag.bin`.
-- If `--obj` is omitted, `myth2_assemble --edit` auto-detects `<folder>/displacement.obj` when present.
-- `--water-obj` imports Myth II water-surface heights from an OBJ into wet cells' `media_height`.
-- If `--water-obj` is omitted, `myth2_assemble --edit` auto-detects `<folder>/water.obj` when present, then falls back to the old `<folder>/<mesh_tag>_water.obj` name.
-- During `--edit`, `terrain/water.bmp` is safely reapplied by default as flags/types only.
-- `--water` experimentally imports `terrain/water.bmp` with media-height changes as well.
-- `--water-flags` explicitly selects the same safe flags-only `terrain/water.bmp` path.
-- `--animation` experimentally imports `terrain/animation.bmp` back into the mesh during `--edit`; it is not imported by default.
-- The assembler reads editable assets from the canonical extracted paths:
-  - `terrain/terrain.bmp`
-  - `terrain/passability.bmp`
-  - `terrain/water.bmp`
-  - `terrain/animation.bmp`
-  - `screens/overhead.bmp`
-  - `screens/pregame.bmp`
-  - `screens/postgame.bmp`
-  - `strings/name.txt`
-- `terrain/terrain.bmp` is reinjected into the terrain `.256` when present.
-- `terrain/passability.bmp` is converted back into Myth II terrain-type flags.
-  Indexed BMPs use exact pixel indexes; older RGB BMPs are matched by nearest
-  terrain-type color.
-- `terrain/water.bmp` is safely reinserted in flags-only form during `--edit`.
-  Indexed BMPs use indexes `0..3` as wet media depths/types and all other
-  indexes as dry; older RGB BMPs are still supported by color matching.
-- `terrain/reflection.bmp` is reinserted into the mesh reflection bit during `--edit`.
-- `terrain/reflection.bmp` marks reflective cells from the mesh as a 4-bit indexed mask: index `0` = off, nonzero = reflective.
-- `terrain/animation.bmp` marks cells with the animated-media bit as a 4-bit indexed mask: index `0` = off, nonzero = animated.
-- In normal engine behavior, the animated-media bit is derived from wet topology: a vertex is marked animated only when the four cells meeting there are all fully wet.
-- Because the engine recomputes that bit from topology, `terrain/animation.bmp` is best treated as a diagnostic/reference layer rather than a stable standalone authoring control.
-- `screens/pregame.bmp`, `screens/overhead.bmp`, and `screens/postgame.bmp` are reinjected into their `.256` tags when present.
-- `strings/name.txt` is rebuilt into the map-name `stli` when present.
-
 ## Notes
 
 - Myth and Myth II data are **big-endian** (Mac PowerPC lineage). All multi-byte
@@ -394,3 +321,78 @@ packs the mesh plus any extracted terrain, name, and screen tags.
   offset table, so it works with any version of the game files.
 - Image outputs use standard BMP files as editable containers. The games store
   palette-indexed image data internally.
+
+## Building
+
+### With CMake
+
+```bash
+mkdir build && cd build
+cmake ..
+cmake --build .
+```
+
+### Or choose config
+
+```bash
+cmake --build . --config <Release | Debug>
+```
+
+### Clean
+
+```bash
+cmake --build . --config <Release | Debug> --target clean
+```
+
+### Source Layout
+
+- `tfl/` contains Myth: The Fallen Lords-era tools and exploratory helpers.
+- `myth2/` contains Myth II: Soulblighter tools and shared Myth II headers.
+
+### Quick compile (MSVC)
+
+```bash
+cl /EHsc /O2 myth2\myth2_dump.cpp /Fe:myth2_dump.exe
+cl /EHsc /O2 myth2\myth2_extract.cpp /Fe:myth2_extract.exe
+cl /EHsc /O2 myth2\myth2_mesh.cpp /Fe:myth2_mesh.exe
+cl /EHsc /O2 myth2\myth2_model.cpp /Fe:myth2_model.exe
+cl /EHsc /O2 myth2\myth2_water_mesh.cpp /Fe:myth2_water_mesh.exe
+cl /EHsc /O2 myth2\myth2_water_depth.cpp /Fe:myth2_water_depth.exe
+cl /EHsc /O2 myth2\myth2_mesh_import.cpp /Fe:myth2_mesh_import.exe
+cl /EHsc /O2 myth2\myth2_mesh_diff.cpp /Fe:myth2_mesh_diff.exe
+cl /EHsc /O2 myth2\myth2_mesh_dump.cpp /Fe:myth2_mesh_dump.exe
+cl /EHsc /O2 myth2\myth2_mesh_summary.cpp /Fe:myth2_mesh_summary.exe
+cl /EHsc /O2 myth2\myth2_normal_analyze.cpp /Fe:myth2_normal_analyze.exe
+cl /EHsc /O2 myth2\myth2_normal_compare.cpp /Fe:myth2_normal_compare.exe
+cl /EHsc /O2 myth2\myth2_normal_table.cpp /Fe:myth2_normal_table.exe
+cl /EHsc /O2 myth2\myth2_media_height.cpp /Fe:myth2_media_height.exe
+cl /EHsc /O2 myth2\myth2_media_dump.cpp /Fe:myth2_media_dump.exe
+cl /EHsc /O2 myth2\myth2_core_dump.cpp /Fe:myth2_core_dump.exe
+cl /EHsc /O2 myth2\myth2_proj_dump.cpp /Fe:myth2_proj_dump.exe
+cl /EHsc /O2 myth2\myth2_assemble.cpp /Fe:myth2_assemble.exe
+```
+
+### Quick compile (GCC / Clang)
+
+```bash
+g++ -std=c++17 -O2 myth2/myth2_dump.cpp -o myth2_dump
+g++ -std=c++17 -O2 myth2/myth2_extract.cpp -o myth2_extract
+g++ -std=c++17 -O2 myth2/myth2_mesh.cpp -o myth2_mesh
+g++ -std=c++17 -O2 myth2/myth2_model.cpp -o myth2_model
+g++ -std=c++17 -O2 myth2/myth2_water_mesh.cpp -o myth2_water_mesh
+g++ -std=c++17 -O2 myth2/myth2_water_depth.cpp -o myth2_water_depth
+g++ -std=c++17 -O2 myth2/myth2_mesh_import.cpp -o myth2_mesh_import
+g++ -std=c++17 -O2 myth2/myth2_mesh_diff.cpp -o myth2_mesh_diff
+g++ -std=c++17 -O2 myth2/myth2_mesh_dump.cpp -o myth2_mesh_dump
+g++ -std=c++17 -O2 myth2/myth2_mesh_summary.cpp -o myth2_mesh_summary
+g++ -std=c++17 -O2 myth2/myth2_normal_analyze.cpp -o myth2_normal_analyze
+g++ -std=c++17 -O2 myth2/myth2_normal_compare.cpp -o myth2_normal_compare
+g++ -std=c++17 -O2 myth2/myth2_normal_table.cpp -o myth2_normal_table
+g++ -std=c++17 -O2 myth2/myth2_media_height.cpp -o myth2_media_height
+g++ -std=c++17 -O2 myth2/myth2_media_dump.cpp -o myth2_media_dump
+g++ -std=c++17 -O2 myth2/myth2_core_dump.cpp -o myth2_core_dump
+g++ -std=c++17 -O2 myth2/myth2_proj_dump.cpp -o myth2_proj_dump
+g++ -std=c++17 -O2 myth2/myth2_assemble.cpp -o myth2_assemble
+```
+
+---
