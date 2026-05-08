@@ -411,7 +411,7 @@ static void usage(const char* p) {
         "  %s <tag_folder> [output.obj] [heightscale]\n\n"
         "Arguments:\n"
         "  tag_folder    Extracted Myth II map folder from extract\n"
-        "  output path   Output path (default: <tag_folder>/displacement.obj)\n"
+        "  output path   Output path (default: <tag_folder>/models/displacement.obj)\n"
         "  heightscale   Vertical scale multiplier (default: 1/512)\n\n"
         "Example:\n"
         "  %s 85gy\n"
