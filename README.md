@@ -191,7 +191,7 @@ the Myth II alternating cell diagonal pattern and a default height scale of
 ### `myth2_model`
 
 ```bash
-myth2_model <tags_folder> <out_folder> [terrain.obj]
+myth2_model <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite] [--animation-frame first|none|all]
 ```
 
 Extracts 3D scenery models and placement data from an extracted Myth II mesh tag
@@ -209,9 +209,12 @@ produced by `myth2_mesh`), the terrain mesh is appended to `map_combined.obj`
 as a separate named object (`o terrain`), giving a single file with both the
 terrain surface and all placed scenery.
 
-To preview model animations in Blender, import `models/map_combined.obj`, then
-run `tools/import_myth2_animations.py` from Blender's Text Editor after setting
-`MANIFEST_PATH` to the map's `models/animations.json`.
+To preview model animations in Blender, run `tools/import_myth2_animations.py`
+from Blender's Text Editor and choose the map's `models/animations.json`. The
+file picker includes options to import `map_combined.obj`, replace a prior
+`myth2_animations` collection, and hide static animation snapshots. Use
+`--animation-frame none` when extracting if you want `map_combined.obj` to omit
+static animation snapshots and let Blender show only the keyframed frames.
 
 ### `myth2_water_mesh`
 
