@@ -1325,9 +1325,7 @@ int main(int argc, char* argv[]) {
     bool importWaterFlags = false;
     bool importAnimation = false;
     std::string objPath;
-    bool objExplicit = false;
     std::string waterObjPath;
-    bool waterObjExplicit = false;
     float objHeightScale = 1.0f / 512.0f;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -1340,14 +1338,12 @@ int main(int argc, char* argv[]) {
         } else if (a == "--animation") {
             importAnimation = true;
         } else if (a == "--obj") {
-            objExplicit = true;
             if (i + 1 < argc) objPath = argv[++i];
             else {
                 fprintf(stderr, "Error: --obj requires a path\n");
                 return 1;
             }
         } else if (a == "--water-obj") {
-            waterObjExplicit = true;
             if (i + 1 < argc) waterObjPath = argv[++i];
             else {
                 fprintf(stderr, "Error: --water-obj requires a path\n");
@@ -1379,12 +1375,34 @@ int main(int argc, char* argv[]) {
         usage(argv[0]);
         return 1;
     }
-    if (edit && !importWater) importWaterFlags = true;
     while (!folder.empty() && (folder.back() == '/' || folder.back() == '\\')) folder.pop_back();
     if (output.empty()) output = folder + "_plugin";
 
     Manifest mf;
     if (!readManifest(folder + "/manifest.json", mf)) return 1;
+
+    std::string effectiveObjPath;
+    std::string effectiveWaterObjPath;
+    if (edit) {
+        effectiveObjPath = objPath;
+        if (effectiveObjPath.empty()) {
+            effectiveObjPath = firstExistingPath({
+                folder + "/models/displacement.obj",
+                folder + "/displacement.obj"
+            });
+        }
+
+        effectiveWaterObjPath = waterObjPath;
+        if (effectiveWaterObjPath.empty()) {
+            effectiveWaterObjPath = firstExistingPath({
+                folder + "/models/water.obj",
+                folder + "/water.obj",
+                folder + "/" + mf.meshTag + "_water.obj"
+            });
+        }
+
+        if (!importWater && effectiveWaterObjPath.empty()) importWaterFlags = true;
+    }
 
     printf("Myth II Plugin Assembler\n");
     printf("========================\n");
@@ -1392,27 +1410,16 @@ int main(int argc, char* argv[]) {
     printf("Output:        %s\n", output.c_str());
     printf("Mesh tag:      %s\n", mf.meshTag.c_str());
     printf("Edit mode:     %s\n\n", edit ? "yes" : "no");
-    if (edit && importWater) printf("Water import:  enabled (experimental)\n\n");
-    if (edit && importWaterFlags && !importWater) printf("Water flags:   enabled\n\n");
-    if (edit && importAnimation) printf("Animation import: enabled (experimental)\n\n");
-
     if (edit) {
-        std::string effectiveObjPath = objPath;
-        std::string effectiveWaterObjPath = waterObjPath;
-        if (effectiveObjPath.empty()) {
-            std::string autoObj = folder + "/displacement.obj";
-            if (fileExists(autoObj)) effectiveObjPath = autoObj;
-        }
-        if (effectiveWaterObjPath.empty()) {
-            std::string autoWaterObj = folder + "/water.obj";
-            if (fileExists(autoWaterObj)) effectiveWaterObjPath = autoWaterObj;
-            else {
-                std::string legacyWaterObj = folder + "/" + mf.meshTag + "_water.obj";
-                if (fileExists(legacyWaterObj)) effectiveWaterObjPath = legacyWaterObj;
-            }
-        }
         if (!effectiveObjPath.empty()) printf("OBJ:           %s (scale %.9f)\n\n", effectiveObjPath.c_str(), objHeightScale);
         if (!effectiveWaterObjPath.empty()) printf("Water OBJ:     %s (scale %.9f)\n\n", effectiveWaterObjPath.c_str(), objHeightScale);
+        if (!effectiveWaterObjPath.empty()) {
+            printf("Water BMP:     skipped because water OBJ import is active\n\n");
+        } else {
+            if (importWater) printf("Water import:  enabled (experimental)\n\n");
+            if (importWaterFlags && !importWater) printf("Water flags:   enabled\n\n");
+        }
+        if (importAnimation) printf("Animation import: enabled (experimental)\n\n");
     }
 
     std::vector<TagSpec> tags;
@@ -1456,21 +1463,10 @@ int main(int argc, char* argv[]) {
     }
 
     if (edit) {
-        std::string effectiveObjPath = objPath;
-        std::string effectiveWaterObjPath = waterObjPath;
-        if (effectiveObjPath.empty()) {
-            std::string autoObj = folder + "/displacement.obj";
-            if (fileExists(autoObj)) effectiveObjPath = autoObj;
-        }
-        if (effectiveWaterObjPath.empty()) {
-            std::string autoWaterObj = folder + "/" + mf.meshTag + "_water.obj";
-            if (fileExists(autoWaterObj)) effectiveWaterObjPath = autoWaterObj;
-        }
-
         for (auto& t : tags) {
             if (t.groupTag == 0x6D657368u) {
                 if (!effectiveObjPath.empty()) {
-                    if (!applyObjToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, effectiveObjPath, objHeightScale) && objExplicit) {
+                    if (!applyObjToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, effectiveObjPath, objHeightScale)) {
                         fprintf(stderr, "OBJ import failed: %s\n", effectiveObjPath.c_str());
                         return 1;
                     }
@@ -1485,7 +1481,7 @@ int main(int argc, char* argv[]) {
                         return 1;
                     }
                 }
-                if (importWater || importWaterFlags) {
+                if (effectiveWaterObjPath.empty() && (importWater || importWaterFlags)) {
                     std::string waterBmp = firstExistingPath({
                         folder + "/terrain/water.bmp",
                         folder + "/layers/03_water.bmp"
@@ -1501,7 +1497,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 if (!effectiveWaterObjPath.empty()) {
-                    if (!applyWaterObjToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, effectiveWaterObjPath, objHeightScale) && waterObjExplicit) {
+                    if (!applyWaterObjToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, effectiveWaterObjPath, objHeightScale)) {
                         fprintf(stderr, "Water OBJ import failed: %s\n", effectiveWaterObjPath.c_str());
                         return 1;
                     }

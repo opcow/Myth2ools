@@ -96,9 +96,10 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 
 - `--edit` reapplies edited assets from the extracted folder before packing.
 - `--obj` imports Myth II terrain displacement from an OBJ into `raw/mesh_tag.bin`.
-- If `--obj` is omitted, `build_plugin --edit` auto-detects `<folder>/displacement.obj` when present.
+- If `--obj` is omitted, `build_plugin --edit` auto-detects `<folder>/models/displacement.obj`, then `<folder>/displacement.obj`.
 - `--water-obj` imports Myth II water-surface heights from an OBJ into wet cells' `media_height`.
-- If `--water-obj` is omitted, `build_plugin --edit` auto-detects `<folder>/water.obj` when present, then falls back to the old `<folder>/<mesh_tag>_water.obj` name.
+- If `--water-obj` is omitted, `build_plugin --edit` auto-detects `<folder>/models/water.obj`, then `<folder>/water.obj`, then the old `<folder>/<mesh_tag>_water.obj` name.
+- When a water OBJ is imported, `terrain/water.bmp` is not imported.
 - During `--edit`, `terrain/water.bmp` is safely reapplied by default as flags/types only.
 - `--water` experimentally imports `terrain/water.bmp` with media-height changes as well.
 - `--water-flags` explicitly selects the same safe flags-only `terrain/water.bmp` path.
