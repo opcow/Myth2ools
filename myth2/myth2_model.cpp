@@ -492,7 +492,8 @@ static bool readUnitTypes(const std::vector<uint8_t>& d, const MeshHeader& h,
 // marker_data (64 bytes) — exact layout from markers.h / markers.cpp byte-swap data:
 //   [0:4]   flags (uint32)
 //   [4:6]   type (int16)  — marker type enum:
-//             0=team, 1=scenery(collision), 3=monster, 5=effect, 6=_marker_model(placed 3D), 9=netgame, 11=local_ctrl
+//             0=team, 1=scenery, 3=monster, 5=sound/effect, 6=_marker_model(placed 3D),
+//             9=projectile, 10=local projectile group, 11=_marker_model_animation
 //   [6:8]   palette_index (int16)  — index into marker palette table
 //   [8:10]  identifier (int16)
 //   [10:12] minimum_difficulty_level (int16)
@@ -510,9 +511,9 @@ static bool readUnitTypes(const std::vector<uint8_t>& d, const MeshHeader& h,
 //   [60:62] data_index (int16)
 //   [62:64] data_identifier (int16)
 //
-// Only markers with markerType==6 (_marker_model) are actual placed 3D scenery instances.
-// Other types (1=collision marker, 3=monster with model ref) use the same struct but are not
-// placed scenery.
+// Markers with markerType==6 (_marker_model) are direct placed 3D model instances.
+// Markers with markerType==11 (_marker_model_animation) reference an anim tag whose
+// frames point at mode/model tags.
 struct ObjectInstance {
     int16_t  markerType=0;  // instance's own type: 6 = _marker_model (placed 3D scenery)
     uint16_t paletteIdx=0;  // index into marker palette table
@@ -576,6 +577,37 @@ struct Geometry {
     std::vector<GeomVertex> vertices;
     std::vector<GeomSurface> surfaces;
 };
+
+struct AnimationFrame {
+    uint32_t modelTag = 0;
+    int16_t permutationIndex = 0;
+};
+
+struct AnimationDef {
+    uint32_t animTag = 0;
+    int16_t ticksPerFrame = 0;
+    std::vector<AnimationFrame> frames;
+};
+
+static bool parseAnimation(const std::vector<uint8_t>& d, uint32_t animTag, AnimationDef& a) {
+    if (d.size() < 1024) return false;
+    int16_t frameCount = readBE16s(d.data(), 4);
+    if (frameCount < 0 || frameCount > 31) return false;
+    if (8 + (size_t)frameCount * 16 > d.size()) return false;
+
+    a.animTag = animTag;
+    a.ticksPerFrame = readBE16s(d.data(), 6);
+    a.frames.clear();
+    a.frames.reserve(frameCount);
+    for (int i = 0; i < frameCount; i++) {
+        size_t o = 8 + (size_t)i * 16;
+        AnimationFrame f;
+        f.modelTag = readBE32u(d.data(), o + 4);
+        f.permutationIndex = readBE16s(d.data(), o + 10);
+        a.frames.push_back(f);
+    }
+    return true;
+}
 
 static bool parseGeometry(const std::vector<uint8_t>& d, Geometry& g) {
     if (d.size()<128) return false;
@@ -1069,6 +1101,7 @@ static void usage(const char* p) {
         "  <out_folder>/models/<tag>.mtl\n"
         "  <out_folder>/models/<tag>_<N>.obj  per-instance geometry\n"
         "  <out_folder>/models/<tag>_<N>.mtl\n"
+        "  <out_folder>/models/<anim>_<N>_frame##_*.obj  model-animation frames\n"
         "  <out_folder>/placement.json        all scenery instance placements\n",
         p);
 }
@@ -1144,18 +1177,22 @@ int main(int argc, char* argv[]) {
     for (const auto& t: unitTypes)
         typeRelIdx[(int16_t)t.w0].push_back(&t);
 
-    // Also build a flat helper for scenery export (all type-6 palette entries in order)
+    // Also build flat helpers for direct model and model-animation palette entries.
     std::vector<const UnitType*> sceneryTypes;
     for (const auto& t: unitTypes)
         if (t.w0==6) sceneryTypes.push_back(&t);
+    std::vector<const UnitType*> animationTypes;
+    for (const auto& t: unitTypes)
+        if (t.w0==11) animationTypes.push_back(&t);
 
-    if (sceneryTypes.empty()) {
-        printf("No scenery (w0=6) types found in this mesh.\n");
+    if (sceneryTypes.empty() && animationTypes.empty()) {
+        printf("No direct model (w0=6) or model animation (w0=11) types found in this mesh.\n");
         return 0;
     }
 
-    printf("Unit types: %u total, %u scenery\n",
-           (unsigned)unitTypes.size(), (unsigned)sceneryTypes.size());
+    printf("Unit types: %u total, %u direct models, %u model animations\n",
+           (unsigned)unitTypes.size(), (unsigned)sceneryTypes.size(),
+           (unsigned)animationTypes.size());
 
     // Scan tag files
     std::vector<TagEntry> tags;
@@ -1173,6 +1210,32 @@ int main(int argc, char* argv[]) {
 
     static const uint32_t GROUP_GEOM = 0x67656F6Du; // 'geom'
     static const uint32_t GROUP_MODE = 0x6d6f6465u; // 'mode'
+    static const uint32_t GROUP_ANIM = 0x616e696du; // 'anim'
+
+    std::map<uint32_t, AnimationDef> animCache;
+    std::set<uint32_t> modelTypeTags;
+    for (const auto* t: sceneryTypes)
+        modelTypeTags.insert(t->typeTag);
+
+    for (const auto* t: animationTypes) {
+        const TagEntry* animEntry = findTag(tags, GROUP_ANIM, t->typeTag);
+        if (!animEntry) {
+            printf("Animation %s: missing anim tag\n", tagToString(t->typeTag).c_str());
+            continue;
+        }
+        std::vector<uint8_t> animData;
+        AnimationDef anim;
+        if (!readTagData(*animEntry, animData) || !parseAnimation(animData, t->typeTag, anim)) {
+            printf("Animation %s: failed to parse anim tag\n", tagToString(t->typeTag).c_str());
+            continue;
+        }
+        printf("Animation %s: %zu frames, %d ticks/frame\n",
+               tagToString(t->typeTag).c_str(), anim.frames.size(), (int)anim.ticksPerFrame);
+        for (const auto& frame: anim.frames)
+            if (frame.modelTag)
+                modelTypeTags.insert(frame.modelTag);
+        animCache[t->typeTag] = std::move(anim);
+    }
 
     // No base offset needed — posX/posY are world_distance values (WORLD_FRACTIONAL_BITS=9).
     // Cell coordinate = posX >> 9 (integer part), sub-cell = posX & 511 (fraction).
@@ -1193,16 +1256,16 @@ int main(int argc, char* argv[]) {
            "tag","geom_ref","verts","surfs","tris","result");
     printf("%s\n", std::string(68,'-').c_str());
 
-    for (const auto* t: sceneryTypes) {
-        std::string tagStr = tagToString(t->typeTag);
-        std::string tagFile = tagToFileStem(t->typeTag);
-        if (exportedTypes.count(t->typeTag)) continue;
-        exportedTypes.insert(t->typeTag);
+    for (uint32_t typeTag: modelTypeTags) {
+        std::string tagStr = tagToString(typeTag);
+        std::string tagFile = tagToFileStem(typeTag);
+        if (exportedTypes.count(typeTag)) continue;
+        exportedTypes.insert(typeTag);
 
         // Resolve geom via the mode tag: mode.geometry_tag -> geom subgroup.
         // Direct lookup by type_tag would find wrong geom tags from other maps
         // (e.g. 'corn' -> cornerWall_geom, 'oute' -> outerWallSep_geom).
-        const TagEntry* modeEntry = findTag(tags, GROUP_MODE, t->typeTag);
+        const TagEntry* modeEntry = findTag(tags, GROUP_MODE, typeTag);
         if (!modeEntry) {
             printf("%-8s  %-12s  %-7s  %-7s  %-7s  SPRITE (no mode tag)\n",
                    tagStr.c_str(), "-", "-", "-", "-");
@@ -1239,7 +1302,7 @@ int main(int argc, char* argv[]) {
                 }
             }
             if (!perms.empty())
-                permCache[t->typeTag] = std::move(perms);
+                permCache[typeTag] = std::move(perms);
         }
 
         const TagEntry* geomEntry = findTag(tags, GROUP_GEOM, geomRefTag);
@@ -1287,7 +1350,7 @@ int main(int argc, char* argv[]) {
                             mat.texturePng = pngPath;
                     }
                 }
-                collCache[t->typeTag] = std::move(collData);
+                collCache[typeTag] = std::move(collData);
             }
         }
 
@@ -1316,7 +1379,7 @@ int main(int argc, char* argv[]) {
                collNote.c_str());
         if (ok) {
             modelsExported++;
-            geomCache[t->typeTag] = std::move(g);
+            geomCache[typeTag] = std::move(g);
         }
     }
 
@@ -1337,8 +1400,8 @@ int main(int argc, char* argv[]) {
 
     for (size_t ii=0; ii<instances.size(); ii++) {
         const auto& inst = instances[ii];
-        // Only _marker_model (type 6) markers are actual placed 3D scenery instances.
-        // Other types (1=collision marker, 3=monster ref) are not visual placements.
+        // Direct model placements. Model-animation placements are handled below
+        // after the static instance list is closed.
         if (inst.markerType != 6) continue;
 
         // Resolve type-relative palette_index -> UnitType
@@ -1453,6 +1516,134 @@ int main(int argc, char* argv[]) {
         }
     }
     printf("\n");
+
+    json += "\n  ],\n";
+    json += "  \"animations\": [\n";
+
+    bool firstAnim = true;
+    for (size_t ii = 0; ii < instances.size(); ii++) {
+        const auto& inst = instances[ii];
+        if (inst.markerType != 11) continue;
+
+        auto itTR = typeRelIdx.find(inst.markerType);
+        if (itTR == typeRelIdx.end()) continue;
+        const auto& sameTypeEntries = itTR->second;
+        if ((size_t)inst.paletteIdx >= sameTypeEntries.size()) continue;
+        const UnitType* t = sameTypeEntries[inst.paletteIdx];
+        if (t->w0 != 11) continue;
+
+        auto ait = animCache.find(t->typeTag);
+        if (ait == animCache.end()) continue;
+        const AnimationDef& anim = ait->second;
+
+        std::string animStr = tagToString(t->typeTag);
+        std::string animFile = tagToFileStem(t->typeTag);
+        float cellX = (float)inst.posX / WORLD_ONE;
+        float cellY = (float)inst.posY / WORLD_ONE;
+        float cellZ = (float)inst.posZ / WORLD_ONE;
+        float facingDeg = (float)(((double)inst.yaw / 65536.0) * 360.0);
+
+        printf("anim %-5zu  %-6d  %-8s  %-8.2f  %-8.2f  %-8.2f  %.1f  frames=%zu\n",
+               ii, (int)inst.paletteIdx, animStr.c_str(),
+               cellX, cellY, cellZ, facingDeg, anim.frames.size());
+
+        if (!firstAnim) json += ",\n";
+        firstAnim = false;
+        json += "    {\"tag\": ";
+        appendJsonString(json, animStr);
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+                 ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
+                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu"
+                 ", \"ticks_per_frame\": %d, \"frames\": [",
+                 cellX, cellY, cellZ, facingDeg, (int)inst.paletteIdx, ii,
+                 (int)anim.ticksPerFrame);
+        json += buf;
+
+        WorldTransform wt;
+        wt.cellX     = cellX;
+        wt.cellY     = cellY;
+        wt.cellZ     = cellZ;
+        wt.facingRad = (facingDeg - 90.0f) * (float)(PI / 180.0);
+        wt.halfW     = (float)(mh.submeshW * 32) * 0.5f;
+        wt.halfH     = (float)(mh.submeshH * 32) * 0.5f;
+
+        for (size_t fi = 0; fi < anim.frames.size(); fi++) {
+            const AnimationFrame& frame = anim.frames[fi];
+            std::string frameTagStr = tagToString(frame.modelTag);
+            std::string frameTagFile = tagToFileStem(frame.modelTag);
+            if (fi) json += ", ";
+            json += "{\"model\": ";
+            appendJsonString(json, frameTagStr);
+            snprintf(buf, sizeof(buf), ", \"permutation\": %d}", (int)frame.permutationIndex);
+            json += buf;
+
+            auto git = geomCache.find(frame.modelTag);
+            if (git == geomCache.end()) continue;
+
+            Geometry frameGeom = git->second;
+            std::vector<std::string> permTexPngs;
+            std::vector<bool> hiddenMaterials;
+            auto cit = collCache.find(frame.modelTag);
+            auto pit = permCache.find(frame.modelTag);
+            const std::vector<uint8_t>* matViews = nullptr;
+            if (pit != permCache.end() &&
+                frame.permutationIndex >= 0 &&
+                frame.permutationIndex < (int)pit->second.size()) {
+                matViews = &pit->second[(size_t)frame.permutationIndex];
+            }
+            for (int mi = 0; mi < (int)frameGeom.materials.size(); mi++) {
+                auto& mat = frameGeom.materials[mi];
+                bool hidden = matViews && mi < (int)matViews->size() && (*matViews)[mi] == 0xFF;
+                hiddenMaterials.push_back(hidden);
+                if (hidden) {
+                    mat.texturePng.clear();
+                    permTexPngs.push_back("");
+                    continue;
+                }
+                if (cit != collCache.end()) {
+                    int vi = 0;
+                    if (matViews && mi < (int)matViews->size())
+                        vi = (int)(*matViews)[mi];
+                    int nv = dot256SequenceViewCount(cit->second, mat.sequenceIndex);
+                    if (nv > 0) vi %= nv;
+                    else vi = 0;
+                    std::string pngName = tagToFileStem(frameGeom.collectionRefTag) + "_"
+                                        + std::to_string(mat.sequenceIndex) + "_"
+                                        + std::to_string(vi) + ".png";
+                    std::string pngPath = outFolder + "/models/textures/" + pngName;
+                    mat.texturePng = fs::exists(pngPath) ? pngPath : "";
+                }
+                permTexPngs.push_back(mat.texturePng);
+            }
+
+            std::string stem = animFile + "_" + std::to_string(ii) + "_frame"
+                             + (fi < 10 ? "0" : "") + std::to_string(fi)
+                             + "_" + frameTagFile;
+            exportOBJ(outFolder + "/models/" + stem + ".obj",
+                      outFolder + "/models/" + stem + ".mtl",
+                      animStr + "_" + frameTagStr,
+                      frameGeom,
+                      worldSpace ? &wt : nullptr,
+                      &hiddenMaterials);
+
+            if (fi == 0) {
+                PlacedInstance pi;
+                pi.geom       = &git->second;
+                pi.typeTag    = animStr + "_" + frameTagStr;
+                pi.cellX      = cellX;
+                pi.cellY      = cellY;
+                pi.cellZ      = cellZ;
+                pi.facingRad  = wt.facingRad;
+                pi.halfW      = wt.halfW;
+                pi.halfH      = wt.halfH;
+                pi.materialTexturePngs = permTexPngs;
+                pi.hiddenMaterials = hiddenMaterials;
+                placedInstances.push_back(pi);
+            }
+        }
+        json += "]}";
+    }
 
     json += "\n  ]\n}\n";
 
