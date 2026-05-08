@@ -1308,7 +1308,6 @@ static void usage(const char* p) {
         "  --water  Experimentally import terrain/water.bmp including media-height changes\n"
         "  --water-flags Import only water flags/types from terrain/water.bmp (default under --edit)\n"
         "  --animation Experimentally import terrain/animation.bmp during --edit\n"
-        "  --mask   Alias for --animation\n"
         "  --heightscale OBJ vertical scale, default 1/512\n",
         p);
 }
@@ -1338,7 +1337,7 @@ int main(int argc, char* argv[]) {
             importWater = true;
         } else if (a == "--water-flags") {
             importWaterFlags = true;
-        } else if (a == "--animation" || a == "--mask") {
+        } else if (a == "--animation") {
             importAnimation = true;
         } else if (a == "--obj") {
             objExplicit = true;

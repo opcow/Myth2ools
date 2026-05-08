@@ -2,10 +2,10 @@
 // Extracts all editable assets from a Myth: The Fallen Lords multiplayer map.
 //
 // Usage:
-//   myth_extract [-o] <tags.gor> <meshtag>
+//   myth_extract [--overwrite] <tags.gor> <meshtag>
 //
-//   -o   Overwrite existing files.  Without this flag, any file that already
-//        exists is silently skipped so you can re-run extraction safely.
+//   --overwrite   Overwrite existing files.  Without this flag, any file that
+//                 already exists is silently skipped so you can re-run extraction safely.
 //
 // Produces a folder named <meshtag>/ containing:
 //
@@ -73,7 +73,7 @@
 #endif
 
 // ---------------------------------------------------------------------------
-// Global overwrite flag — set by -o command-line switch
+// Global overwrite flag — set by --overwrite command-line switch
 // ---------------------------------------------------------------------------
 static bool g_overwrite = false;
 
@@ -956,8 +956,8 @@ static bool writeManifest(const char* outPath, const char* meshTag,
 static void usage(const char* p){
     fprintf(stderr,
         "Myth TFL Map Asset Extractor\n\n"
-        "Usage:  %s [-o] <tags.gor> <meshtag>\n\n"
-        "  -o         Overwrite existing output files (default: skip them)\n"
+        "Usage:  %s [--overwrite] <tags.gor> <meshtag>\n\n"
+        "  --overwrite  Overwrite existing output files (default: skip them)\n"
         "  tags.gor   path to tags.gor (artsound.gor must be in the same directory)\n"
         "  meshtag    4-character mesh tag name (e.g. sega, 00tm, land)\n\n"
         "Creates <meshtag>/ with terrain/, screens/, items/, raw/, strings/ subfolders.\n"
@@ -969,11 +969,19 @@ static void usage(const char* p){
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[])
 {
-    // Parse optional -o flag
     int argBase=1;
-    if(argc>1 && strcmp(argv[1],"-o")==0){ g_overwrite=true; argBase=2; }
+    while (argBase < argc && argv[argBase][0] == '-') {
+        if (strcmp(argv[argBase], "--overwrite") == 0) {
+            g_overwrite = true;
+            argBase++;
+        } else {
+            fprintf(stderr, "Error: unknown option: %s\n", argv[argBase]);
+            usage(argv[0]);
+            return 1;
+        }
+    }
 
-    if(argc-argBase<2){usage(argv[0]);return 1;}
+    if(argc-argBase!=2){usage(argv[0]);return 1;}
     const char* tagsPath=argv[argBase];
     const char* meshTag =argv[argBase+1];
     if(strlen(meshTag)!=4){fprintf(stderr,"Error: tag must be exactly 4 characters\n");return 1;}

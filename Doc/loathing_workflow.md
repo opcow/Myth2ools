@@ -44,7 +44,7 @@ For data that's better authored in Photoshop than with brush strokes, Loathing s
 
 A "Set All Media Heights" command in the mesh menu also exists for bulk flattening.
 
-This is why round-tripping the project's `terrain/reflection.bmp` and `terrain/animation.bmp` is plausible: the bitmap-import workflow has Loathing precedent. The Loathing manual doesn't describe a direct bitmap input for the **animated** media flag (bit 10) — that's the gap the project's experimental `--mask` option is filling.
+This is why round-tripping the project's `terrain/reflection.bmp` and `terrain/animation.bmp` is plausible: the bitmap-import workflow has Loathing precedent. The Loathing manual doesn't describe a direct bitmap input for the **animated** media flag (bit 10) — that's the gap the project's experimental `--animation` option is filling.
 
 ## How this maps to the project's tool outputs
 

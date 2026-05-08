@@ -913,7 +913,7 @@ int main(int argc, char* argv[]){
     for(int i=3;i<argc;i++){
         std::string a = argv[i];
         if(a == "--ora") emitOra = true;
-        else if(a == "--out" || a == "-o") {
+        else if(a == "--out") {
             if(i+1>=argc){
                 fprintf(stderr,"Missing output folder after %s\n",a.c_str());
                 return 1;

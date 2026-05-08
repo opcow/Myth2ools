@@ -370,7 +370,6 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 - `--water` experimentally imports `terrain/water.bmp` with media-height changes as well.
 - `--water-flags` explicitly selects the same safe flags-only `terrain/water.bmp` path.
 - `--animation` experimentally imports `terrain/animation.bmp` back into the mesh during `--edit`; it is not imported by default.
-- `--mask` is accepted as a legacy alias for `--animation`.
 - The assembler reads editable assets from the canonical extracted paths:
   - `terrain/terrain.bmp`
   - `terrain/passability.bmp`
@@ -398,12 +397,12 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 ### `myth_extract`
 
 ```bash
-myth_extract [-o] <tags.gor> <meshtag>
+myth_extract [--overwrite] <tags.gor> <meshtag>
 ```
 
 | Argument | Description |
 |----------|-------------|
-| `-o` | Overwrite existing extracted files instead of skipping them |
+| `--overwrite` | Overwrite existing extracted files instead of skipping them |
 | `tags.gor` | Path to `tags.gor` for the map set you want to extract |
 | `meshtag` | 4-character mesh tag name (for example `sega`, `balo`, `00tm`) |
 
