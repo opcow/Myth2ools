@@ -65,7 +65,7 @@ finds the requested `mesh` tag and its referenced assets, and writes to
 `terrain/passability.bmp`, `terrain/water.bmp`, `terrain/water_mask.bmp`,
 `terrain/reflection.bmp`, and `terrain/animation.bmp` are written as 4-bit
 indexed BMPs. The passability and water pixel indexes are the terrain/media type
-values the assembler reads back exactly. For `water.bmp`, indexes `0..3` mean
+values `build_plugin` reads back exactly. For `water.bmp`, indexes `0..3` mean
 wet media depths/types; dry pixels use index `6`. `water_mask.bmp` is a simple
 light-blue wet-area mask used as the water OBJ texture. `animation.bmp` is a
 diagnostic mask: index `0` is off and any nonzero index is on when imported with
@@ -82,7 +82,7 @@ containing the terrain-side layer stack:
 - animation
 
 The loose files in `layers/` are PNGs so overlay/reference layers can carry
-transparency in regular image editors. The assembler reimports from the
+transparency in regular image editors. `build_plugin` reimports from the
 canonical files under `terrain/`, `screens/`, and `strings/`.
 
 ### `build_plugin`
@@ -104,7 +104,7 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 - `--water` experimentally imports `terrain/water.bmp` with media-height changes as well.
 - `--water-flags` explicitly selects the same safe flags-only `terrain/water.bmp` path.
 - `--animation` experimentally imports `terrain/animation.bmp` back into the mesh during `--edit`; it is not imported by default.
-- The assembler reads editable assets from the canonical extracted paths:
+- `build_plugin` reads editable assets from the canonical extracted paths:
   - `terrain/terrain.bmp`
   - `terrain/passability.bmp`
   - `terrain/water.bmp`
@@ -146,7 +146,7 @@ export_water_mesh <tag_folder> [output.obj] [heightscale]
 
 Exports the current Myth II water surface as an OBJ aligned to the terrain OBJ.
 It uses `media_height` for vertex Y and writes only wet triangles, with an MTL
-that points to `terrain/water_mask.bmp`.
+that points to the generated `water_mask.png` texture.
 
 ### `export_models`
 
@@ -176,7 +176,22 @@ file picker includes options to import `map_combined.obj`, replace a prior
 `--animation-frame none` when extracting if you want `map_combined.obj` to omit
 static animation snapshots and let Blender show only the keyframed frames.
 
-## Analysys/Debugging Tools
+## Example Workflow
+
+```bash
+extract_map myth2_tags le3e --out out/le3e
+export_mesh out/le3e
+export_water_mesh out/le3e
+export_models myth2_tags out/le3e
+build_plugin out/le3e out/le3e_plugin --edit
+```
+
+`export_mesh` and `export_water_mesh` write their default OBJs into `models/`.
+Their MTL files reference PNG textures copied from `layers/`. During `--edit`,
+`build_plugin` auto-detects those OBJ files and uses them for terrain and
+water-surface geometry.
+
+## Analysis/Debugging Tools
 
 ### `core_dump`
 
@@ -318,37 +333,77 @@ single image-space cleanup pass to reduce isolated jagged triangle spikes.
 
 - Myth and Myth II data are **big-endian** (Mac PowerPC lineage). All multi-byte
   integers in tag/archive data are byte-swapped before use.
-- The program scans the `.gor` file to locate the tag rather than using a hard-coded  
-  offset table, so it works with any version of the game files.
+- `extract_map` scans the supplied Myth II tags folder to locate the requested
+  `mesh` tag and its referenced assets rather than relying on hard-coded offsets.
 - Image outputs use standard BMP files as editable containers. The games store
   palette-indexed image data internally.
 
 ## Building
 
+The CMake build is intended to work on Windows and Linux. macOS should also be
+straightforward, but has not been exercised as much as the Windows/Linux path.
+
 ### With CMake
 
+From the repo root:
+
 ```bash
-mkdir build && cd build
-cmake ..
-cmake --build .
+cmake -S . -B build
+cmake --build build
 ```
 
-### Or choose config
+### Release Build
+
+For single-config generators such as Makefiles or Ninja on Linux/macOS:
 
 ```bash
-cmake --build . --config <Release | Debug>
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+For multi-config generators such as Visual Studio on Windows:
+
+```bash
+cmake -S . -B build
+cmake --build build --config Release
+```
+
+### Build One Tool
+
+```bash
+cmake --build build --target extract_map
+cmake --build build --target export_mesh
+cmake --build build --target export_water_mesh
+cmake --build build --target export_models
+cmake --build build --target build_plugin
+```
+
+With Visual Studio-style generators, include the config:
+
+```bash
+cmake --build build --config Release --target extract_map
 ```
 
 ### Clean
 
 ```bash
-cmake --build . --config <Release | Debug> --target clean
+cmake --build build --target clean
 ```
 
 ### Package Release
 
+Configure a Release build first. On Linux/macOS:
+
 ```bash
-cmake --build . --config Release --target package_release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target package_release
+```
+
+On Windows with Visual Studio-style generators:
+
+```bash
+cmake -S . -B build
+cmake --build build --config Release --target package_release
 ```
 
 Builds the release executables and writes `build/dist/myth2ools_<tag>_<platform>.zip`,
