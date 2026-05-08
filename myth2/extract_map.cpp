@@ -24,17 +24,15 @@
 #include <algorithm>
 
 #include "mesh_flags.h"
+#include "png_writer.h"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <direct.h>
-#include <windows.h>
-#include <objidl.h>
-#include <wincodec.h>
-#pragma comment(lib, "ole32.lib")
-#pragma comment(lib, "windowscodecs.lib")
+#else
+#include <sys/stat.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -182,87 +180,9 @@ static bool readBMPToRGBA(const std::string& path, int& outW, int& outH,
     return false;
 }
 
-#ifdef _WIN32
 static bool encodePNG32ToMemory(const std::vector<uint8_t>& rgba, int w, int h, std::vector<uint8_t>& png){
-    if((int)rgba.size() != w * h * 4 || w <= 0 || h <= 0) return false;
-
-    IWICImagingFactory* factory = nullptr;
-    IWICBitmapEncoder* encoder = nullptr;
-    IWICBitmapFrameEncode* frame = nullptr;
-    IPropertyBag2* props = nullptr;
-    IStream* stream = nullptr;
-    HGLOBAL hMem = nullptr;
-    bool ok = false;
-    bool coInit = false;
-
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    if(SUCCEEDED(hr)) coInit = true;
-    else if(hr != RPC_E_CHANGED_MODE) return false;
-
-    auto cleanup = [&](){
-        if(props) props->Release();
-        if(frame) frame->Release();
-        if(encoder) encoder->Release();
-        if(stream) stream->Release();
-        if(factory) factory->Release();
-        if(coInit) CoUninitialize();
-    };
-
-    hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
-    if(FAILED(hr)){ cleanup(); return false; }
-    hr = CreateStreamOnHGlobal(nullptr, TRUE, &stream);
-    if(FAILED(hr)){ cleanup(); return false; }
-    hr = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
-    if(FAILED(hr)){ cleanup(); return false; }
-    hr = encoder->Initialize(stream, WICBitmapEncoderNoCache);
-    if(FAILED(hr)){ cleanup(); return false; }
-    hr = encoder->CreateNewFrame(&frame, &props);
-    if(FAILED(hr)){ cleanup(); return false; }
-    hr = frame->Initialize(props);
-    if(FAILED(hr)){ cleanup(); return false; }
-    hr = frame->SetSize((UINT)w, (UINT)h);
-    if(FAILED(hr)){ cleanup(); return false; }
-
-    WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
-    hr = frame->SetPixelFormat(&format);
-    if(FAILED(hr) || format != GUID_WICPixelFormat32bppBGRA){ cleanup(); return false; }
-
-    std::vector<uint8_t> bgra((size_t)w * h * 4);
-    for(int i=0;i<w*h;i++){
-        bgra[(size_t)i*4+0] = rgba[(size_t)i*4+2];
-        bgra[(size_t)i*4+1] = rgba[(size_t)i*4+1];
-        bgra[(size_t)i*4+2] = rgba[(size_t)i*4+0];
-        bgra[(size_t)i*4+3] = rgba[(size_t)i*4+3];
-    }
-
-    hr = frame->WritePixels((UINT)h, (UINT)(w * 4), (UINT)bgra.size(), bgra.data());
-    if(FAILED(hr)){ cleanup(); return false; }
-    hr = frame->Commit();
-    if(FAILED(hr)){ cleanup(); return false; }
-    hr = encoder->Commit();
-    if(FAILED(hr)){ cleanup(); return false; }
-
-    hr = GetHGlobalFromStream(stream, &hMem);
-    if(FAILED(hr) || !hMem){ cleanup(); return false; }
-    SIZE_T sz = GlobalSize(hMem);
-    const void* mem = GlobalLock(hMem);
-    if(!mem || sz == 0){
-        if(mem) GlobalUnlock(hMem);
-        cleanup();
-        return false;
-    }
-    png.assign((const uint8_t*)mem, (const uint8_t*)mem + sz);
-    GlobalUnlock(hMem);
-    ok = true;
-    cleanup();
-    return ok;
+    return myth2_png::encodeRGBA(png, rgba, w, h);
 }
-#else
-static bool encodePNG32ToMemory(const std::vector<uint8_t>& rgba, int w, int h, std::vector<uint8_t>& png){
-    (void)rgba; (void)w; (void)h; (void)png;
-    return false;
-}
-#endif
 
 struct OraEntry {
     std::string name;

@@ -123,6 +123,9 @@ add_custom_target(package_release
         "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
         "-DSTAGING_DIR=${PACKAGE_STAGING_DIR}"
         "-DOUTPUT_DIR=${PACKAGE_OUTPUT_DIR}"
+        "-DPACKAGE_SYSTEM_NAME=${CMAKE_SYSTEM_NAME}"
+        "-DPACKAGE_SYSTEM_PROCESSOR=${CMAKE_SYSTEM_PROCESSOR}"
+        "-DPACKAGE_HOST_SYSTEM_PROCESSOR=${CMAKE_HOST_SYSTEM_PROCESSOR}"
         -P "${CMAKE_SOURCE_DIR}/cmake/package_release.cmake"
     COMMENT "Packaging release executables"
     VERBATIM

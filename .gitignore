@@ -11,6 +11,7 @@
 tools/*
 !tools/import_animations.py
 build/
+build-linux/
 ghidra*/
 out/
 reference_source/

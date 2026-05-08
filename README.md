@@ -351,8 +351,10 @@ cmake --build . --config <Release | Debug> --target clean
 cmake --build . --config Release --target package_release
 ```
 
-Builds the release executables and writes `build/dist/myth2ools_<tag>.zip`,
-where `<tag>` is the latest git tag reported by `git describe --tags --abbrev=0`.
+Builds the release executables and writes `build/dist/myth2ools_<tag>_<platform>.zip`,
+where `<tag>` is the latest git tag reported by `git describe --tags --abbrev=0`
+and `<platform>` is a normalized OS/architecture suffix such as `windows-x64`,
+`linux-x64`, or `macos-arm64`.
 
 ### Source Layout
 
