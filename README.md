@@ -32,7 +32,13 @@ As with the original tools, a map maker can work with 2D images to draw in the t
 
 And, of course, you can use Blender to create or modify the 3D map surface.
 
-![Models on the map](images/with_models.png)  
+![Models on the map](images/with_models.png)
+
+And place units, monsters, and sounds. (Models and other assets are export only right now.)
+
+![Other assets on the map](images/assets.png)
+
+
 
 ## Authoring Tools
 
