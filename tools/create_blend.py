@@ -20,6 +20,7 @@ ROOT_COLLECTION = "myth2"
 SOUND_HELPER_TEXT = r'''
 import bpy
 import aud
+from mathutils import Vector
 
 _myth2_sound_device = None
 _myth2_sound_handle = None
@@ -43,6 +44,35 @@ def _sound_path(obj):
         return str(__import__("pathlib").Path(map_folder) / paths[0])
 
     raise RuntimeError("Selected speaker has no sound path")
+
+
+def _is_terrain_object(obj):
+    return obj and obj.type == "MESH" and obj.name.lower().startswith("terrain")
+
+
+def _terrain_object():
+    for obj in bpy.context.scene.objects:
+        if _is_terrain_object(obj):
+            return obj
+    raise RuntimeError("Could not find terrain mesh object")
+
+
+def _raycast_terrain(terrain, x, y):
+    origin_world = Vector((x, y, 10000.0))
+    direction_world = Vector((0.0, 0.0, -1.0))
+    inv = terrain.matrix_world.inverted()
+    origin_local = inv @ origin_world
+    direction_local = (inv.to_3x3() @ direction_world).normalized()
+    hit, location, _normal, _face_index = terrain.ray_cast(origin_local, direction_local, distance=20000.0)
+    if not hit:
+        return None
+    return terrain.matrix_world @ location
+
+
+def _world_bounds_min_z(obj):
+    if obj.type == "MESH" and obj.bound_box:
+        return min((obj.matrix_world @ Vector(corner)).z for corner in obj.bound_box)
+    return obj.location.z
 
 
 class MYTH2_OT_play_selected_sound(bpy.types.Operator):
@@ -81,6 +111,60 @@ class MYTH2_OT_stop_selected_sound(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class MYTH2_OT_drop_selected_to_terrain(bpy.types.Operator):
+    bl_idname = "myth2.drop_selected_to_terrain"
+    bl_label = "Myth II: Drop Selected To Terrain"
+    bl_description = "Move selected objects vertically until they rest on the terrain mesh"
+    bl_options = {"REGISTER", "UNDO"}
+
+    mode: bpy.props.EnumProperty(
+        name="Drop",
+        items=(
+            ("ORIGIN", "Origin", "Place the object's origin on terrain"),
+            ("BOTTOM", "Bottom", "Place the object's lowest bounding-box point on terrain"),
+        ),
+        default="ORIGIN",
+    )
+    offset: bpy.props.FloatProperty(
+        name="Offset",
+        description="Vertical offset above terrain after dropping",
+        default=0.0,
+        soft_min=-10.0,
+        soft_max=10.0,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return any(obj.type in {"MESH", "EMPTY", "SPEAKER"} for obj in context.selected_objects)
+
+    def execute(self, context):
+        terrain = _terrain_object()
+        dropped = 0
+        missed = 0
+        for obj in context.selected_objects:
+            if obj == terrain or _is_terrain_object(obj):
+                continue
+            if obj.type not in {"MESH", "EMPTY", "SPEAKER"}:
+                continue
+            hit = _raycast_terrain(terrain, obj.location.x, obj.location.y)
+            if hit is None:
+                missed += 1
+                continue
+            if self.mode == "ORIGIN":
+                obj.location.z += (hit.z + self.offset) - obj.location.z
+            else:
+                obj.location.z += (hit.z + self.offset) - _world_bounds_min_z(obj)
+            dropped += 1
+        if dropped == 0:
+            self.report({"WARNING"}, "No selected objects intersected the terrain ray")
+            return {"CANCELLED"}
+        if missed:
+            self.report({"INFO"}, f"Dropped {dropped} object(s); {missed} missed terrain")
+        else:
+            self.report({"INFO"}, f"Dropped {dropped} object(s)")
+        return {"FINISHED"}
+
+
 class MYTH2_PT_sound_preview(bpy.types.Panel):
     bl_label = "Myth II Sound"
     bl_idname = "MYTH2_PT_sound_preview"
@@ -103,10 +187,33 @@ class MYTH2_PT_sound_preview(bpy.types.Panel):
         layout.operator("myth2.stop_sound_preview", icon="PAUSE")
 
 
+class MYTH2_PT_terrain_tools(bpy.types.Panel):
+    bl_label = "Myth II Terrain"
+    bl_idname = "MYTH2_PT_terrain_tools"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Myth II"
+
+    @classmethod
+    def poll(cls, context):
+        return context.selected_objects
+
+    def draw(self, context):
+        layout = self.layout
+        op = layout.operator("myth2.drop_selected_to_terrain", text="Drop Origin To Terrain", icon="EMPTY_AXIS")
+        op.mode = "ORIGIN"
+        op.offset = 0.0
+        op = layout.operator("myth2.drop_selected_to_terrain", text="Drop Bounds To Terrain", icon="TRIA_DOWN")
+        op.mode = "BOTTOM"
+        op.offset = 0.0
+
+
 _CLASSES = (
     MYTH2_OT_play_selected_sound,
     MYTH2_OT_stop_selected_sound,
+    MYTH2_OT_drop_selected_to_terrain,
     MYTH2_PT_sound_preview,
+    MYTH2_PT_terrain_tools,
 )
 
 
@@ -423,9 +530,9 @@ def main():
     if units_obj.exists():
         group_imported_objects_by_tag(units_obj, "units")
 
-    if sounds_obj.exists():
+    sound_speakers = add_sound_speakers(sounds_json, map_folder)
+    if not sound_speakers and sounds_obj.exists():
         group_imported_objects_by_tag(sounds_obj, "sounds")
-    add_sound_speakers(sounds_json, map_folder)
 
     if scenery_obj.exists():
         enable_alpha_for_sprite_materials(group_imported_objects_by_tag(scenery_obj, "scenery"))

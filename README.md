@@ -112,6 +112,7 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 - `--animation` experimentally imports `terrain/animation.bmp` back into the mesh during `--edit`; it is not imported by default.
 - `build_plugin` reads editable assets from the canonical extracted paths:
   - `terrain/terrain.bmp`
+  - `terrain/shadow.bmp`
   - `terrain/passability.bmp`
   - `terrain/water.bmp`
   - `terrain/animation.bmp`
@@ -119,7 +120,8 @@ packs the mesh plus any extracted terrain, name, and screen tags.
   - `screens/pregame.bmp`
   - `screens/postgame.bmp`
   - `strings/name.txt`
-- `terrain/terrain.bmp` is reinjected into the terrain `.256` when present.
+- `terrain/terrain.bmp` and `terrain/shadow.bmp` are reinjected into the terrain
+  `.256` when present.
 - `terrain/passability.bmp` is converted back into Myth II terrain-type flags.
   Indexed BMPs use exact pixel indexes; older RGB BMPs are matched by nearest
   terrain-type color.
@@ -174,8 +176,8 @@ tag (`raw/mesh_tag.bin`). It writes:
   and coordinates for sprite-based scenery markers when present
 - `assets/sprites/units.obj` plus `assets/sprites/units.json` — textured billboards and
   coordinates for sprite-based monster/unit markers when present
-- `assets/sounds/sounds.obj` plus `assets/sounds/sounds.json` — simple placeholders,
-  coordinates, and WAV references for placed sound markers when present
+- `assets/sounds/sounds.json` plus `assets/sounds/sounds.obj` — WAV references,
+  coordinates, and fallback placeholder geometry for placed sound markers when present
 - `assets/sounds/wav/*.wav` — decoded 16-bit PCM WAV files for placed `soun`
   tag permutations
 - `assets/models/projectiles.obj` plus `assets/models/projectiles.json` — simple placeholders
@@ -194,6 +196,20 @@ file picker includes options to import `map_combined.obj`, replace a prior
 `--animation-frame none` when extracting if you want `map_combined.obj` to omit
 static animation snapshots and let Blender show only the keyframed frames.
 
+### `export_map_actions`
+
+```bash
+export_map_actions <out_folder>
+```
+
+Decodes the mesh tag's map action/script buffer from `raw/mesh_tag.bin`. This is
+read-only inspection output for understanding map events, triggers, timing, and
+references between actions and placed markers. It writes:
+
+- `assets/actions/actions.json` — structured action ids, names, type codes,
+  flags, timing, indentation, and typed parameters
+- `assets/actions/actions.txt` — compact human-readable action listing
+
 ## Example Workflow
 
 On Windows, `extract_assets.bat` runs the common extraction/export sequence in
@@ -209,7 +225,8 @@ On Linux/macOS, use the Bash version:
 ./extract_assets.sh myth2_tags le3e out/le3e --overwrite
 ```
 
-It runs `extract_map`, `export_mesh`, `export_water_mesh`, and `export_map_objects`.
+It runs `extract_map`, `export_mesh`, `export_water_mesh`, `export_map_objects`,
+and `export_map_actions`.
 
 To create a Blender scene from an extracted/exported map folder, set
 `BLENDER_PATH` or put Blender's executable path in `blender_path.txt`, then run:
@@ -229,14 +246,21 @@ OBJ already contains the terrain object, it will not import
 `assets/terrain/displacement.obj` a second time. `assets/terrain/water.obj` and
 `assets/models/animations.json` are imported when present.
 `assets/sprites/units.obj` is also imported when present.
-`assets/sounds/sounds.obj` is imported into a tag-grouped `sounds` collection
-when present. When `assets/sounds/sounds.json` references extracted WAV files, Blender
-speaker objects are also added at the sound marker locations. These speakers
-are muted by default so timeline playback does not trigger every map sound at
-once. Blender may disable embedded scripts when the `.blend` opens; allow script
-execution or run the embedded `myth2_sound_tools.py` text block manually. Then
-select a speaker and use the `Myth II` tab in the 3D View sidebar, or press F3
-and choose `Myth II: Play Selected Sound`.
+When `assets/sounds/sounds.json` references extracted WAV files, Blender speaker
+objects are added at the sound marker locations and `assets/sounds/sounds.obj`
+is left as fallback/reference geometry rather than imported by default. If no
+speakers can be created, the placeholder OBJ is imported into a tag-grouped
+`sounds` collection. Speakers are muted by default so timeline playback does
+not trigger every map sound at once. Blender may disable embedded scripts when
+the `.blend` opens; allow script execution or run the embedded
+`myth2_sound_tools.py` text block manually. Then select a speaker and use the
+`Myth II` tab in the 3D View sidebar, or press F3 and choose
+`Myth II: Play Selected Sound`.
+The same sidebar also includes terrain helpers. Select moved sprites, models,
+or speakers and use `Drop Origin To Terrain` to place the Myth marker/origin on
+the displacement surface. `Drop Bounds To Terrain` is available as a secondary
+bounding-box helper, but exported sprites and models are normally authored with
+their origin at ground level.
 `assets/sprites/scenery.obj` is imported into a tag-grouped `scenery` collection when
 present, with sprite material transparency enabled.
 `assets/models/projectiles.obj` is imported into a tag-grouped `projectiles`
@@ -443,6 +467,7 @@ cmake --build build --target extract_map
 cmake --build build --target export_mesh
 cmake --build build --target export_water_mesh
 cmake --build build --target export_map_objects
+cmake --build build --target export_map_actions
 cmake --build build --target build_plugin
 ```
 

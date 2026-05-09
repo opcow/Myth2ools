@@ -218,22 +218,24 @@ static bool readDot256FromData(const std::vector<uint8_t>& data,
     return true;
 }
 
-static bool injectTerrainColor(std::vector<uint8_t>& terrain,
+static bool injectTerrainTiles(std::vector<uint8_t>& terrain,
                                const std::vector<uint8_t>& bmp, int bW, int bH,
                                const std::vector<uint8_t>& bmpRaw,
-                               int meshW, int meshH) {
+                               int meshW, int meshH, int sectionParity,
+                               bool updatePalette) {
     const size_t HDR = 320, SECSZ = 128, TEXHDR = 52;
     if (terrain.size() < HDR + sizeof(Myth256Palette)) return false;
     int32_t palOff = readBE32s(terrain.data(), 68);
     int32_t sections = readBE32s(terrain.data(), 96);
     int32_t secOff = readBE32s(terrain.data(), 100);
+    if (sectionParity < 0 || sectionParity > 1) return false;
     if (sections != meshW * meshH * 2) return false;
 
     size_t palBase = HDR + (size_t)palOff;
     size_t colorBase = palBase + 32;
     if (colorBase + 256 * 8 > terrain.size()) return false;
 
-    if (bmpRaw.size() >= 54) {
+    if (updatePalette && bmpRaw.size() >= 54) {
         uint32_t dibSz = get32le(bmpRaw.data() + 14);
         uint32_t palStart = 14 + dibSz;
         uint32_t pixOff = get32le(bmpRaw.data() + 10);
@@ -261,7 +263,7 @@ static bool injectTerrainColor(std::vector<uint8_t>& terrain,
 
     for (int r = 0; r < meshH; r++) {
         for (int c = 0; c < meshW; c++) {
-            int idx = 2 * (r * meshW + (meshW - 1 - c));
+            int idx = 2 * (r * meshW + (meshW - 1 - c)) + sectionParity;
             size_t pixStart = HDR + relOfs[(size_t)idx] + TEXHDR;
             if (pixStart + 256 * 256 > terrain.size()) return false;
             for (int line = 0; line < 256; line++) {
@@ -272,6 +274,20 @@ static bool injectTerrainColor(std::vector<uint8_t>& terrain,
         }
     }
     return true;
+}
+
+static bool injectTerrainColor(std::vector<uint8_t>& terrain,
+                               const std::vector<uint8_t>& bmp, int bW, int bH,
+                               const std::vector<uint8_t>& bmpRaw,
+                               int meshW, int meshH) {
+    return injectTerrainTiles(terrain, bmp, bW, bH, bmpRaw, meshW, meshH, 0, true);
+}
+
+static bool injectTerrainShadow(std::vector<uint8_t>& terrain,
+                                const std::vector<uint8_t>& bmp, int bW, int bH,
+                                const std::vector<uint8_t>& bmpRaw,
+                                int meshW, int meshH) {
+    return injectTerrainTiles(terrain, bmp, bW, bH, bmpRaw, meshW, meshH, 1, false);
 }
 
 static bool injectSingleImage256(std::vector<uint8_t>& data, const std::vector<uint8_t>& bmpRaw,
@@ -1543,6 +1559,18 @@ int main(int argc, char* argv[]) {
                 if (!bmp.empty() && bW == mf.submeshWidth * 256 && bH == mf.submeshHeight * 256) {
                     if (injectTerrainColor(t.data, bmp, bW, bH, bmpRaw, mf.submeshWidth, mf.submeshHeight)) {
                         printf("Applied %s\n", bmpPath.c_str());
+                    }
+                }
+                int sW = 0, sH = 0;
+                std::string shadowPath = firstExistingPath({
+                    folder + "/terrain/shadow.bmp",
+                    folder + "/layers/02_shadow.bmp"
+                });
+                auto shadowRaw = readFile(shadowPath);
+                auto shadow = readBMP8(shadowPath, sW, sH);
+                if (!shadow.empty() && sW == mf.submeshWidth * 256 && sH == mf.submeshHeight * 256) {
+                    if (injectTerrainShadow(t.data, shadow, sW, sH, shadowRaw, mf.submeshWidth, mf.submeshHeight)) {
+                        printf("Applied %s\n", shadowPath.c_str());
                     }
                 }
             } else if (t.groupTag == 0x2E323536u) {

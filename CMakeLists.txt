@@ -26,6 +26,7 @@ add_executable(media_dump myth2/media_dump.cpp)
 add_executable(core_dump myth2/core_dump.cpp)
 add_executable(proj_dump myth2/proj_dump.cpp)
 add_executable(build_plugin myth2/build_plugin.cpp)
+add_executable(export_map_actions myth2/export_map_actions.cpp)
 add_executable(export_map_objects myth2/export_map_objects.cpp)
 
 set(RELEASE_TARGETS
@@ -50,6 +51,7 @@ set(RELEASE_TARGETS
     core_dump
     proj_dump
     build_plugin
+    export_map_actions
     export_map_objects
 )
 
@@ -76,6 +78,7 @@ if (MSVC)
     target_compile_options(core_dump PRIVATE /W3)
     target_compile_options(proj_dump PRIVATE /W3)
     target_compile_options(build_plugin PRIVATE /W3)
+    target_compile_options(export_map_actions PRIVATE /W3)
     target_compile_options(export_map_objects PRIVATE /W3)
 else()
     target_compile_options(myth_extract PRIVATE -Wall -Wextra)
@@ -99,6 +102,7 @@ else()
     target_compile_options(core_dump PRIVATE -Wall -Wextra)
     target_compile_options(proj_dump PRIVATE -Wall -Wextra)
     target_compile_options(build_plugin PRIVATE -Wall -Wextra)
+    target_compile_options(export_map_actions PRIVATE -Wall -Wextra)
     target_compile_options(export_map_objects PRIVATE -Wall -Wextra)
 endif()
 
