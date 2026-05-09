@@ -2,7 +2,8 @@
 Blender importer for Myth II model-animation frame OBJs.
 
 Open this script in Blender's Text Editor and run it. A file picker opens for
-`assets/models/animations.json`; the importer can optionally bring in `map_combined.obj`,
+`assets/models/animations.json`; the importer can optionally bring in
+`assets/terrain/map_combined.obj`,
 then it imports the animation frame OBJs and keyframes visibility.
 """
 
@@ -78,15 +79,14 @@ def place_object(obj, anim, manifest):
     facing_deg = float(anim["facing_deg"])
     facing_rad = math.radians(facing_deg - 90.0)
 
-    # Match export_models.cpp's map_combined.obj placement transform. Bake the
-    # placement into the mesh and reset the object transform, so animated frame
-    # OBJs have the same world-space vertex layout as map_combined.obj.
+    # Match export_map_objects.cpp's map_combined.obj placement transform in
+    # Blender space. Keep Blender's OBJ import axis-conversion matrix; dropping
+    # it rotates the local frame mesh onto its side.
     placement = (
-        Matrix.Translation((half_w - cell_x, cell_z, cell_y - half_h))
-        @ Matrix.Rotation(-facing_rad, 4, "Y")
+        Matrix.Translation((half_w - cell_x, half_h - cell_y, cell_z))
+        @ Matrix.Rotation(-facing_rad, 4, "Z")
     )
-    obj.data.transform(placement)
-    obj.matrix_world = Matrix.Identity(4)
+    obj.matrix_world = placement @ obj.matrix_world
 
 
 def hide_static_snapshot(anim):
@@ -101,7 +101,7 @@ def hide_static_snapshot(anim):
 
 
 def import_map_if_requested(models_dir, collection):
-    map_obj = models_dir / "map_combined.obj"
+    map_obj = models_dir.parent / "terrain" / "map_combined.obj"
     if not map_obj.exists():
         return 0
     imported = import_obj(map_obj)
@@ -179,7 +179,7 @@ class IMPORT_OT_myth2_animations(bpy.types.Operator, ImportHelper):
 
     import_map: BoolProperty(
         name="Import map_combined.obj",
-        description="Import map_combined.obj from the same models folder before importing animations",
+        description="Import assets/terrain/map_combined.obj before importing animations",
         default=False,
     )
     replace_existing: BoolProperty(

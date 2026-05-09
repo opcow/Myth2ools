@@ -1,5 +1,5 @@
-// export_models.cpp
-// Extract 3D scenery models and placement data from a Myth II mesh tag.
+// export_map_objects.cpp
+// Export placed map objects and supporting assets from a Myth II mesh tag.
 //
 // For each scenery type (object class w0=6) that has a geom tag, emits:
 //   assets/models/<tag>.obj   — geometry with UV coordinates
@@ -11,10 +11,10 @@
 // listed in the output but skipped for 3D export.
 //
 // Usage:
-//   export_models <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite] [--animation-frame first|none|all]
+//   export_map_objects <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite] [--animation-frame first|none|all]
 //
 // Example:
-//   export_models myth2_tags/small\ install out/le3e
+//   export_map_objects myth2_tags/small\ install out/le3e
 
 #include <cstdio>
 #include <cstdlib>
@@ -966,7 +966,8 @@ static void appendTerrainOBJ(const std::string& terrainObjPath,
 static bool exportCombinedOBJ(const std::string& objPath,
                                const std::string& mtlPath,
                                const std::vector<PlacedInstance>& instances,
-                               const std::string& terrainObjPath = "") {
+                               const std::string& terrainObjPath = "",
+                               const std::string& texturePrefix = "textures/") {
     // MTL: one entry per instance+material combination (typeTag_instIdx_matname).
     // Using per-instance names avoids any cross-instance material sharing in Blender.
     std::string mtl;
@@ -986,7 +987,7 @@ static bool exportCombinedOBJ(const std::string& objPath,
             else if (!mat.texturePng.empty())
                 tex = mat.texturePng;
             if (!tex.empty()) {
-                mtl += "map_Kd textures/";
+                mtl += "map_Kd " + texturePrefix;
                 mtl += fs::path(tex).filename().string();
                 mtl += "\n";
             }
@@ -2165,7 +2166,7 @@ static bool exportProjectilePlaceholders(const std::string& outFolder,
 
 static void usage(const char* p) {
     fprintf(stderr,
-        "Myth II 3D Model Extractor\n\n"
+        "Myth II Map Object Exporter\n\n"
         "Usage:\n"
         "  %s <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite]\n"
         "     [--animation-frame first|none|all]\n\n"
@@ -2173,7 +2174,7 @@ static void usage(const char* p) {
         "  tags_folder    folder containing Myth II tag files (e.g. 'small install')\n"
         "  out_folder     extracted map folder (e.g. out/le3e, must contain raw/mesh_tag.bin)\n"
         "  terrain.obj    terrain OBJ to inline into map_combined.obj\n"
-        "                 (auto-detected from assets/models/displacement.obj if present)\n"
+        "                 (auto-detected from assets/terrain/displacement.obj if present)\n"
         "  --world-space  per-instance OBJs use world (map) coordinates instead of local origin\n\n"
         "  --overwrite    regenerate existing asset texture/audio files\n\n"
         "  --animation-frame first|none|all\n"
@@ -2227,9 +2228,9 @@ int main(int argc, char* argv[]) {
     while (!outFolder.empty() && (outFolder.back()=='/'||outFolder.back()=='\\'))
         outFolder.pop_back();
 
-    // Auto-detect terrain OBJ from assets/models/ if not specified on command line
+    // Auto-detect terrain OBJ from assets/terrain/ if not specified on command line
     if (terrainObjPath.empty()) {
-        std::string candidate = outFolder + "/assets/models/displacement.obj";
+        std::string candidate = outFolder + "/assets/terrain/displacement.obj";
         if (fs::exists(candidate))
             terrainObjPath = candidate;
     }
@@ -2247,7 +2248,7 @@ int main(int argc, char* argv[]) {
         fprintf(stderr,"Failed to parse mesh header\n"); return 1;
     }
 
-    printf("Myth II 3D Model Extractor\n==========================\n");
+    printf("Myth II Map Object Exporter\n===========================\n");
     printf("Tags:    %s\n", tagsFolder.c_str());
     printf("Output:  %s\n", outFolder.c_str());
     printf("Submesh: %dx%d (%dx%d cells)\n\n",
@@ -2356,6 +2357,7 @@ int main(int argc, char* argv[]) {
 
     // Create output directories
     makeDirs(outFolder + "/assets/models");
+    makeDirs(outFolder + "/assets/terrain");
     makeDirs(outFolder + "/assets/sprites");
     makeDirs(outFolder + "/assets/sounds");
 
@@ -2832,9 +2834,9 @@ int main(int argc, char* argv[]) {
 
     // ---- Write combined map OBJ ----
     if (!placedInstances.empty()) {
-        std::string combinedObj = outFolder+"/assets/models/map_combined.obj";
-        std::string combinedMtl = outFolder+"/assets/models/map_combined.mtl";
-        if (exportCombinedOBJ(combinedObj, combinedMtl, placedInstances, terrainObjPath))
+        std::string combinedObj = outFolder+"/assets/terrain/map_combined.obj";
+        std::string combinedMtl = outFolder+"/assets/terrain/map_combined.mtl";
+        if (exportCombinedOBJ(combinedObj, combinedMtl, placedInstances, terrainObjPath, "../models/textures/"))
             printf("Combined map:    %s (%zu instances%s)\n",
                    combinedObj.c_str(), placedInstances.size(),
                    terrainObjPath.empty() ? "" : " + terrain");

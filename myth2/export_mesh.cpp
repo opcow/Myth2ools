@@ -266,7 +266,7 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
                      const std::string& folder) {
     std::string mtlPath = dirOf(objPath) + stemOf(objPath) + ".mtl";
 
-    // Copy terrain texture into assets/models/textures/ alongside the OBJ
+    // Copy terrain texture into assets/terrain/textures/ alongside the OBJ
     std::string texName = "terrain.png";
     std::string texDest = dirOf(objPath) + "textures/" + texName;
     std::error_code ec;
@@ -411,7 +411,7 @@ static void usage(const char* p) {
         "  %s <tag_folder> [output.obj] [heightscale]\n\n"
         "Arguments:\n"
         "  tag_folder    Extracted Myth II map folder from extract\n"
-        "  output path   Output path (default: <tag_folder>/assets/models/displacement.obj)\n"
+        "  output path   Output path (default: <tag_folder>/assets/terrain/displacement.obj)\n"
         "  heightscale   Vertical scale multiplier (default: 1/512)\n\n"
         "Example:\n"
         "  %s 85gy\n"
@@ -428,7 +428,7 @@ int main(int argc, char** argv) {
     std::string folder = argv[1];
     float heightScale = argc >= 4 ? (float)atof(argv[3]) : (1.0f / 512.0f);
 
-    std::string outPath = argc >= 3 ? argv[2] : (folder + "/assets/models/displacement.obj");
+    std::string outPath = argc >= 3 ? argv[2] : (folder + "/assets/terrain/displacement.obj");
     std::error_code ec;
     fs::create_directories(fs::path(outPath).parent_path(), ec);
     printf("Myth II Terrain Mesh Exporter\n");

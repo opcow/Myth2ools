@@ -16,7 +16,7 @@ Root Cause
 Two independent bugs caused permutation models to always emit textures from
 view index 0 instead of the correct variant:
 
-Bug 1 -- Wrong offset for permutations_offset (export_models.cpp:1171)
+Bug 1 -- Wrong offset for permutations_offset (export_map_objects.cpp)
   The code read byte [24:28] (a zeroed runtime pointer `vertex_flags`)
   instead of byte [28:32] (the persistent `model_permutations_offset`).
   Since byte 24 was always 0, permBase resolved to 64+0=64 (reading vertex
@@ -47,7 +47,7 @@ Bug 2 -- View index clamped instead of modulo
   Another attempt scanned the bitmap_instance_indexes array past the stored
   count, but this read into adjacent data and produced wrong textures.
 
-View Resolution Algorithm (export_models.cpp, modulo within sequence)
+View Resolution Algorithm (export_map_objects.cpp, modulo within sequence)
 -------------------------------------------------------------------
   // Step 1: Get frame count from stored sequence header field
   int nv = dot256SequenceViewCount(collData, mat.sequenceIndex);
@@ -62,8 +62,8 @@ View Resolution Algorithm (export_models.cpp, modulo within sequence)
 
 Files Modified
 --------------
-  export_models.cpp:1171 -- readBE32s offset 24 -> 28
-  export_models.cpp -- view resolution changed from clamp to modulo
+  export_map_objects.cpp -- readBE32s offset 24 -> 28
+  export_map_objects.cpp -- view resolution changed from clamp to modulo
   Doc/mesh_object_format.md -- model_definition header shows all 64 bytes
   Doc/model_extraction.md -- [24:28] -> [28:32] for permutations_offset
 

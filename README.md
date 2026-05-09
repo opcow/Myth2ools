@@ -102,9 +102,9 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 
 - `--edit` reapplies edited assets from the extracted folder before packing.
 - `--obj` imports Myth II terrain displacement from an OBJ into `raw/mesh_tag.bin`.
-- If `--obj` is omitted, `build_plugin --edit` auto-detects `<folder>/assets/models/displacement.obj`.
+- If `--obj` is omitted, `build_plugin --edit` auto-detects `<folder>/assets/terrain/displacement.obj`.
 - `--water-obj` imports Myth II water-surface heights from an OBJ into wet cells' `media_height`.
-- If `--water-obj` is omitted, `build_plugin --edit` auto-detects `<folder>/assets/models/water.obj`.
+- If `--water-obj` is omitted, `build_plugin --edit` auto-detects `<folder>/assets/terrain/water.obj`.
 - When a water OBJ is imported, `terrain/water.bmp` is not imported.
 - During `--edit`, `terrain/water.bmp` is safely reapplied by default as flags/types only.
 - `--water` experimentally imports `terrain/water.bmp` with media-height changes as well.
@@ -154,18 +154,20 @@ Exports the current Myth II water surface as an OBJ aligned to the terrain OBJ.
 It uses `media_height` for vertex Y and writes only wet triangles, with an MTL
 that points to the generated `water_mask.png` texture.
 
-### `export_models`
+### `export_map_objects`
 
 ```bash
-export_models <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite] [--animation-frame first|none|all]
+export_map_objects <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite] [--animation-frame first|none|all]
 ```
 
-Extracts 3D scenery models and placement data from an extracted Myth II mesh tag
-(`raw/mesh_tag.bin`). For each scenery type that has a `geom` tag, it writes:
+Exports placed map objects and supporting assets from an extracted Myth II mesh
+tag (`raw/mesh_tag.bin`). It writes:
 
 - `assets/models/<tag>.obj` + `.mtl` — per-type geometry with UV coordinates
-- `assets/models/map_combined.obj` + `.mtl` — all scenery instances placed at their
+- `assets/terrain/map_combined.obj` + `.mtl` — all scenery instances placed at their
   correct map positions and orientations, ready to import into Blender
+- `assets/terrain/displacement.obj` + `.mtl` — terrain displacement mesh
+- `assets/terrain/water.obj` + `.mtl` — water surface mesh
 - `assets/models/animations.json` plus `assets/models/<anim>_<N>_frame##_*.obj` — model
   animation manifests and frame OBJs for animated map objects such as gates
 - `assets/sprites/scenery.obj` plus `assets/sprites/scenery.json` — textured crossed billboards
@@ -207,7 +209,7 @@ On Linux/macOS, use the Bash version:
 ./extract_assets.sh myth2_tags le3e out/le3e --overwrite
 ```
 
-It runs `extract_map`, `export_mesh`, `export_water_mesh`, and `export_models`.
+It runs `extract_map`, `export_mesh`, `export_water_mesh`, and `export_map_objects`.
 
 To create a Blender scene from an extracted/exported map folder, set
 `BLENDER_PATH` or put Blender's executable path in `blender_path.txt`, then run:
@@ -222,9 +224,9 @@ or:
 ./create_blend.sh out/le3e
 ```
 
-The Blender importer uses `assets/models/map_combined.obj` when present. If that
+The Blender importer uses `assets/terrain/map_combined.obj` when present. If that
 OBJ already contains the terrain object, it will not import
-`assets/models/displacement.obj` a second time. `assets/models/water.obj` and
+`assets/terrain/displacement.obj` a second time. `assets/terrain/water.obj` and
 `assets/models/animations.json` are imported when present.
 `assets/sprites/units.obj` is also imported when present.
 `assets/sounds/sounds.obj` is imported into a tag-grouped `sounds` collection
@@ -244,11 +246,11 @@ collection when present.
 extract_map myth2_tags le3e --out out/le3e
 export_mesh out/le3e
 export_water_mesh out/le3e
-export_models myth2_tags out/le3e
+export_map_objects myth2_tags out/le3e
 build_plugin out/le3e out/le3e_plugin --edit
 ```
 
-`export_mesh` and `export_water_mesh` write their default OBJs into `assets/models/`.
+`export_mesh` and `export_water_mesh` write their default OBJs into `assets/terrain/`.
 Their MTL files reference PNG textures copied from `layers/`. During `--edit`,
 `build_plugin` auto-detects those OBJ files and uses them for terrain and
 water-surface geometry.
@@ -440,7 +442,7 @@ cmake --build build --config Release
 cmake --build build --target extract_map
 cmake --build build --target export_mesh
 cmake --build build --target export_water_mesh
-cmake --build build --target export_models
+cmake --build build --target export_map_objects
 cmake --build build --target build_plugin
 ```
 
@@ -499,7 +501,7 @@ git push origin v0.3.2
 cl /EHsc /O2 myth2\tag_dump.cpp /Fe:tag_dump.exe
 cl /EHsc /O2 myth2\extract_map.cpp /Fe:extract_map.exe
 cl /EHsc /O2 myth2\export_mesh.cpp /Fe:export_mesh.exe
-cl /EHsc /O2 myth2\export_models.cpp /Fe:export_models.exe
+cl /EHsc /O2 myth2\export_map_objects.cpp /Fe:export_map_objects.exe
 cl /EHsc /O2 myth2\export_water_mesh.cpp /Fe:export_water_mesh.exe
 cl /EHsc /O2 myth2\water_depth.cpp /Fe:water_depth.exe
 cl /EHsc /O2 myth2\mesh_import.cpp /Fe:mesh_import.exe
@@ -522,7 +524,7 @@ cl /EHsc /O2 myth2\build_plugin.cpp /Fe:build_plugin.exe
 g++ -std=c++17 -O2 myth2/tag_dump.cpp -o tag_dump
 g++ -std=c++17 -O2 myth2/extract_map.cpp -o extract_map
 g++ -std=c++17 -O2 myth2/export_mesh.cpp -o export_mesh
-g++ -std=c++17 -O2 myth2/export_models.cpp -o export_models
+g++ -std=c++17 -O2 myth2/export_map_objects.cpp -o export_map_objects
 g++ -std=c++17 -O2 myth2/export_water_mesh.cpp -o export_water_mesh
 g++ -std=c++17 -O2 myth2/water_depth.cpp -o water_depth
 g++ -std=c++17 -O2 myth2/mesh_import.cpp -o mesh_import

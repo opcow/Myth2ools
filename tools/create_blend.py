@@ -8,6 +8,7 @@ Run through Blender:
 import argparse
 import importlib.util
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -216,17 +217,19 @@ def add_sound_speakers(sounds_json, map_folder):
 
         tag = safe_collection_name(entry.get("tag", "sound"))
         collection = child_collection(tag, root)
-        location = (
-            float(entry.get("obj_x", entry.get("x", 0.0))),
-            float(entry.get("obj_y", entry.get("z", 0.0))),
-            float(entry.get("obj_z", entry.get("y", 0.0))),
-        )
+        obj_x = float(entry.get("obj_x", entry.get("x", 0.0)))
+        obj_y = float(entry.get("obj_y", entry.get("z", 0.0)))
+        obj_z = float(entry.get("obj_z", entry.get("y", 0.0)))
+        location = (obj_x, -obj_z, obj_y)
         bpy.ops.object.speaker_add(location=location)
         speaker = bpy.context.object
+        speaker.rotation_euler = (math.pi, 0.0, 0.0)
         speaker.name = f"{tag}_{entry.get('marker_idx', index)}_speaker"
         speaker.data.name = speaker.name
         speaker.data.sound = bpy.data.sounds.load(str(wav_path), check_existing=True)
         speaker.data.muted = True
+        speaker.data.cone_angle_inner = math.tau
+        speaker.data.cone_angle_outer = math.tau
         speaker["myth2_audio_permutations"] = [item.get("path", "") for item in audio]
         speaker["myth2_map_folder"] = str(map_folder)
         move_to_collection(speaker, collection)
@@ -241,7 +244,35 @@ def enable_alpha_for_sprite_materials(objects):
             if not mat or not mat.name.endswith("_sprite"):
                 continue
             mat.blend_method = "CLIP"
-            mat.use_nodes = True
+            ensure_material_nodes(mat)
+            if hasattr(mat, "show_transparent_back"):
+                mat.show_transparent_back = True
+
+
+def ensure_material_nodes(mat):
+    if mat.node_tree:
+        return mat.node_tree
+    if hasattr(mat, "use_nodes"):
+        mat.use_nodes = True
+    return mat.node_tree
+
+
+def set_material_alpha(objects, alpha, blend_method="BLEND"):
+    for obj in objects:
+        for slot in getattr(obj, "material_slots", []):
+            mat = slot.material
+            if not mat:
+                continue
+            mat.diffuse_color = (mat.diffuse_color[0], mat.diffuse_color[1], mat.diffuse_color[2], alpha)
+            mat.blend_method = blend_method
+            node_tree = ensure_material_nodes(mat)
+            bsdf = node_tree.nodes.get("Principled BSDF") if node_tree else None
+            if bsdf:
+                if "Alpha" in bsdf.inputs:
+                    bsdf.inputs["Alpha"].default_value = alpha
+                if "Base Color" in bsdf.inputs:
+                    base = bsdf.inputs["Base Color"].default_value
+                    bsdf.inputs["Base Color"].default_value = (base[0], base[1], base[2], alpha)
             if hasattr(mat, "show_transparent_back"):
                 mat.show_transparent_back = True
 
@@ -343,7 +374,7 @@ def parse_args(argv):
     parser.add_argument("map_folder", help="Extracted map folder")
     parser.add_argument("output_blend", nargs="?", help="Output .blend path")
     parser.add_argument("--no-animations", action="store_true", help="Do not import animations.json frame OBJs")
-    parser.add_argument("--no-water", action="store_true", help="Do not import assets/models/water.obj")
+    parser.add_argument("--no-water", action="store_true", help="Do not import assets/terrain/water.obj")
     parser.add_argument("--no-camera", action="store_true", help="Do not add a default camera/light")
     return parser.parse_args(argv)
 
@@ -353,6 +384,7 @@ def main():
     map_folder = Path(args.map_folder).resolve()
     assets_dir = map_folder / "assets"
     models_dir = assets_dir / "models"
+    terrain_dir = assets_dir / "terrain"
     sprites_dir = assets_dir / "sprites"
     sounds_dir = assets_dir / "sounds"
     output_blend = Path(args.output_blend).resolve() if args.output_blend else map_folder / f"{map_folder.name}.blend"
@@ -360,9 +392,9 @@ def main():
     if not models_dir.exists():
         raise SystemExit(f"Missing assets/models folder: {models_dir}")
 
-    combined_obj = models_dir / "map_combined.obj"
-    displacement_obj = models_dir / "displacement.obj"
-    water_obj = models_dir / "water.obj"
+    combined_obj = terrain_dir / "map_combined.obj"
+    displacement_obj = terrain_dir / "displacement.obj"
+    water_obj = terrain_dir / "water.obj"
     units_obj = sprites_dir / "units.obj"
     sounds_obj = sounds_dir / "sounds.obj"
     sounds_json = sounds_dir / "sounds.json"
@@ -386,7 +418,7 @@ def main():
         import_into_collection(displacement_obj, "terrain")
 
     if not args.no_water and water_obj.exists():
-        import_into_collection(water_obj, "water")
+        set_material_alpha(import_into_collection(water_obj, "water"), 0.25)
 
     if units_obj.exists():
         group_imported_objects_by_tag(units_obj, "units")

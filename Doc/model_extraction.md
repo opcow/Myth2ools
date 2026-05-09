@@ -76,7 +76,7 @@ corresponding to two distinct house appearance variants.
 
 For `_marker_model_animation` (type 11), the marker's palette tag resolves to an
 `anim` tag. `anim l0cg` on le3e is the opening/closing gate. It contains 9 model
-frames (`l03c` through `l03k`) at 4 ticks per frame. `export_models` writes each
+frames (`l03c` through `l03k`) at 4 ticks per frame. `export_map_objects` writes each
 frame as its own OBJ and emits `assets/models/animations.json` with frame order, timing,
 placement, and OBJ/MTL paths.
 
@@ -264,8 +264,10 @@ may display this as "view 17 of 8" because Oak's UI is 1-based while the stored 
 0-based (`16 % 8 == 0`). This appears to match the engine behavior: resolve the raw selector
 modulo the material sequence's own `number_of_views`, with no cross-sequence spanning.
 
-MTL `map_Kd` paths use `textures/<filename>` relative to the `assets/models/`
-output folder.
+Per-model MTL `map_Kd` paths use `textures/<filename>` relative to
+`assets/models/`. `assets/terrain/map_combined.mtl` references those same model
+textures as `../models/textures/<filename>` because the combined map lives in
+the terrain folder.
 
 ---
 
@@ -282,16 +284,22 @@ output folder.
       <anim>_<N>_frame##_*.obj  model-animation frame geometry
       <anim>_<N>_frame##_*.mtl
       animations.json        animation placements, timing, frame order, OBJ/MTL paths
+      textures/
+        <collTag>_<seq>_<view>.png   all extracted texture variants
+    terrain/
       map_combined.obj       instances transformed into world space + terrain
       map_combined.mtl
       displacement.obj       terrain mesh (written by mesh)
-      displacement.mtl       terrain material (map_Kd ../layers/terrain.png)
+      displacement.mtl
+      water.obj              water surface mesh (written by export_water_mesh)
+      water.mtl
       textures/
-        <collTag>_<seq>_<view>.png   all extracted texture variants
+        terrain.png
+        water_mask.png
   placement.json           direct model placements plus animation marker summaries
 ```
 
-`export_models --animation-frame first|none|all` controls how model animations are
+`export_map_objects --animation-frame first|none|all` controls how model animations are
 represented in `map_combined.obj`. The default `first` writes a static first-frame
 snapshot. `none` omits animation snapshots for a clean Blender animation import.
 `all` includes every frame in the combined OBJ, mainly for debugging.

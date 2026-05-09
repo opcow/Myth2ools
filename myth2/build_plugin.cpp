@@ -1387,14 +1387,14 @@ int main(int argc, char* argv[]) {
         effectiveObjPath = objPath;
         if (effectiveObjPath.empty()) {
             effectiveObjPath = firstExistingPath({
-                folder + "/assets/models/displacement.obj"
+                folder + "/assets/terrain/displacement.obj"
             });
         }
 
         effectiveWaterObjPath = waterObjPath;
         if (effectiveWaterObjPath.empty()) {
             effectiveWaterObjPath = firstExistingPath({
-                folder + "/assets/models/water.obj"
+                folder + "/assets/terrain/water.obj"
             });
         }
 

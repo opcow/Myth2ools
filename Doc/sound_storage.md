@@ -1,6 +1,6 @@
 # Myth II Sound Storage
 
-Status: practical extractor notes from `export_models.cpp`, cross-checked with
+Status: practical extractor notes from `export_map_objects.cpp`, cross-checked with
 the Vengeance-era `soun.h`/`soun.cpp` reference source and tested on `le3e`
 ambient/random sound markers.
 
@@ -30,7 +30,7 @@ rawi  random wind
 The actual audio payloads are in `soun` tags, commonly in `international small
 install`.
 
-`export_models` currently uses the placed sound marker's tag as the `soun`
+`export_map_objects` currently uses the placed sound marker's tag as the `soun`
 subgroup to extract audio permutations. It writes placeholder geometry plus a
 JSON manifest:
 

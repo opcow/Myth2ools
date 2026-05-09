@@ -6,7 +6,7 @@ usage() {
 Usage:
   extract_assets.sh <tags_folder> <meshtag> [output_folder] [--ora] [--overwrite] [--animation-frame first|none|all]
 
-Runs extract_map, export_mesh, export_water_mesh, and export_models.
+Runs extract_map, export_mesh, export_water_mesh, and export_map_objects.
 EOF
 }
 
@@ -63,7 +63,7 @@ try_bin_dir() {
     if [[ -n $bin_dir ]]; then
         return
     fi
-    if [[ -x "$dir/extract_map" && -x "$dir/export_mesh" && -x "$dir/export_water_mesh" && -x "$dir/export_models" ]]; then
+    if [[ -x "$dir/extract_map" && -x "$dir/export_mesh" && -x "$dir/export_water_mesh" && -x "$dir/export_map_objects" ]]; then
         bin_dir=$dir
     fi
 }
@@ -96,7 +96,7 @@ Checked:
   "$current_dir/build-linux"
   "$script_dir/../build-linux"
 
-Expected to find extract_map, export_mesh, export_water_mesh, and export_models in the same folder.
+Expected to find extract_map, export_mesh, export_water_mesh, and export_map_objects in the same folder.
 EOF
     exit 1
 fi
@@ -110,7 +110,7 @@ echo "Exporting terrain mesh..."
 echo "Exporting water mesh..."
 "$bin_dir/export_water_mesh" "$out_folder"
 
-echo "Exporting scenery models..."
-"$bin_dir/export_models" "$tags_folder" "$out_folder" "$out_folder/assets/models/displacement.obj" "${model_args[@]}"
+echo "Exporting map objects..."
+"$bin_dir/export_map_objects" "$tags_folder" "$out_folder" "$out_folder/assets/terrain/displacement.obj" "${model_args[@]}"
 
 echo "Done. Output written to \"$out_folder\"."

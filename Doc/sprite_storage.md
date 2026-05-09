@@ -1,6 +1,6 @@
 # Myth II Sprite and .256 Bitmap Storage
 
-Status: practical extractor notes from `export_models.cpp`, checked against
+Status: practical extractor notes from `export_map_objects.cpp`, checked against
 unit and scenery sprites on `le3e`.
 
 All integer fields described here are big-endian.
@@ -227,7 +227,7 @@ separate sprite scenery markers.
 
 ## Current Export Products
 
-`export_models` writes:
+`export_map_objects` writes:
 
 ```
 assets/sprites/units.obj

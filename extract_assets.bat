@@ -71,8 +71,8 @@ echo Exporting water mesh...
 "%BIN_DIR%export_water_mesh.exe" "%OUT_FOLDER%"
 if errorlevel 1 exit /b 1
 
-echo Exporting scenery models...
-"%BIN_DIR%export_models.exe" "%TAGS_FOLDER%" "%OUT_FOLDER%" "%OUT_FOLDER%\assets\models\displacement.obj" %MODEL_ARGS%
+echo Exporting map objects...
+"%BIN_DIR%export_map_objects.exe" "%TAGS_FOLDER%" "%OUT_FOLDER%" "%OUT_FOLDER%\assets\terrain\displacement.obj" %MODEL_ARGS%
 if errorlevel 1 exit /b 1
 
 echo Done. Output written to "%OUT_FOLDER%".
@@ -82,12 +82,12 @@ exit /b 0
 echo Usage:
 echo   extract_assets.bat ^<tags_folder^> ^<meshtag^> [output_folder] [--ora] [--overwrite] [--animation-frame first^|none^|all]
 echo.
-echo Runs extract_map, export_mesh, export_water_mesh, and export_models.
+echo Runs extract_map, export_mesh, export_water_mesh, and export_map_objects.
 exit /b 1
 
 :try_bin_dir
 if not "%BIN_DIR%"=="" exit /b 0
-if exist "%~1extract_map.exe" if exist "%~1export_mesh.exe" if exist "%~1export_water_mesh.exe" if exist "%~1export_models.exe" set "BIN_DIR=%~1"
+if exist "%~1extract_map.exe" if exist "%~1export_mesh.exe" if exist "%~1export_water_mesh.exe" if exist "%~1export_map_objects.exe" set "BIN_DIR=%~1"
 exit /b 0
 
 :missing_tools
@@ -102,5 +102,5 @@ echo   "%CURRENT_DIR%build\Debug\"
 echo   "%SCRIPT_DIR%..\build\Release\"
 echo   "%SCRIPT_DIR%..\build\Debug\"
 echo.
-echo Expected to find extract_map.exe, export_mesh.exe, export_water_mesh.exe, and export_models.exe in the same folder.
+echo Expected to find extract_map.exe, export_mesh.exe, export_water_mesh.exe, and export_map_objects.exe in the same folder.
 exit /b 1
