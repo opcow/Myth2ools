@@ -172,7 +172,9 @@ static int dot256SequenceViewCount(const std::vector<uint8_t>& d, int seqIndex) 
 static bool extractDot256Texture(const std::vector<uint8_t>& d,
                                   int seqIndex,
                                   int viewIndex,
-                                  const std::string& outPng) {
+                                  const std::string& outPng,
+                                  int* outW = nullptr,
+                                  int* outH = nullptr) {
     if (d.size() < 320) return false;
 
     int32_t bulkOff        = readBE32s(d.data(), 248);
@@ -222,20 +224,98 @@ static bool extractDot256Texture(const std::vector<uint8_t>& d,
     size_t bitmapRefEntry = (size_t)(bulkOff + bitmapRefsOff) + (size_t)bi * 128;
     if (bitmapRefEntry + 128 > d.size()) return false;
     int32_t imgDataOff = readBE32s(d.data(), bitmapRefEntry + 64);
+    int32_t imgDataLen = readBE32s(d.data(), bitmapRefEntry + 68);
     int w = (int)readBE16s(d.data(), bitmapRefEntry + 76);
     int h = (int)readBE16s(d.data(), bitmapRefEntry + 78);
     if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return false;
 
-    // Pixel data follows the 52-byte bitmap_data header
-    size_t pixAbs = (size_t)(bulkOff + imgDataOff) + 52;
-    if (pixAbs + (size_t)w * h > d.size()) return false;
-    const uint8_t* pix = d.data() + pixAbs;
+    size_t imgAbs = (size_t)(bulkOff + imgDataOff);
+    if (imgDataLen <= 52 || imgAbs + (size_t)imgDataLen > d.size()) return false;
 
     // Decode indexed pixels to RGBA using Myth palette (rgb_color: word r, g, b, flags each).
+    // Myth bitmap_data carries a per-row pointer table beginning at byte 48: the first
+    // row pointer is in the 52-byte header and the remaining h-1 pointers follow it.
+    // A row can either be raw pixels (length == width) or sprite-style transparent
+    // spans: span_count, pixel_count, span start/end pairs, then pixel_count indexes.
+    std::vector<uint8_t> indexes((size_t)w * h, 0);
+    bool decodedRows = false;
+    if (h > 0 && imgDataLen >= 52 + (h - 1) * 4) {
+        std::vector<uint32_t> rowPtr((size_t)h + 1);
+        for (int y = 0; y < h; y++)
+            rowPtr[(size_t)y] = readBE32u(d.data(), imgAbs + 48 + (size_t)y * 4);
+
+        uint32_t firstRowOffset = 52u + (uint32_t)(h - 1) * 4u;
+        uint32_t virtualBase = rowPtr[0] - firstRowOffset;
+        rowPtr[(size_t)h] = virtualBase + (uint32_t)imgDataLen;
+
+        decodedRows = true;
+        for (int y = 0; y < h && decodedRows; y++) {
+            if (rowPtr[(size_t)y] < virtualBase || rowPtr[(size_t)y + 1] < rowPtr[(size_t)y]) {
+                decodedRows = false;
+                break;
+            }
+            size_t rowStart = (size_t)(rowPtr[(size_t)y] - virtualBase);
+            size_t rowEnd = (size_t)(rowPtr[(size_t)y + 1] - virtualBase);
+            if (rowEnd > (size_t)imgDataLen || rowStart > rowEnd) {
+                decodedRows = false;
+                break;
+            }
+            const uint8_t* row = d.data() + imgAbs + rowStart;
+            size_t rowLen = rowEnd - rowStart;
+
+            if (rowLen == (size_t)w) {
+                memcpy(indexes.data() + (size_t)y * w, row, (size_t)w);
+                continue;
+            }
+
+            if (rowLen < 4) {
+                continue;
+            }
+
+            int spanCount = (int)readBE16s(row, 0);
+            int pixelCount = (int)readBE16s(row, 2);
+            size_t spanTableLen = 4 + (size_t)spanCount * 4;
+            if (spanCount < 0 || pixelCount < 0 || spanTableLen + (size_t)pixelCount > rowLen) {
+                decodedRows = false;
+                break;
+            }
+
+            int summedPixels = 0;
+            for (int si = 0; si < spanCount; si++) {
+                int x0 = (int)readBE16s(row, 4 + (size_t)si * 4);
+                int x1 = (int)readBE16s(row, 6 + (size_t)si * 4);
+                if (x0 < 0 || x1 < x0 || x1 > w) {
+                    decodedRows = false;
+                    break;
+                }
+                summedPixels += x1 - x0;
+            }
+            if (!decodedRows || summedPixels != pixelCount) {
+                decodedRows = false;
+                break;
+            }
+
+            const uint8_t* pix = row + spanTableLen;
+            int pi = 0;
+            for (int si = 0; si < spanCount; si++) {
+                int x0 = (int)readBE16s(row, 4 + (size_t)si * 4);
+                int x1 = (int)readBE16s(row, 6 + (size_t)si * 4);
+                for (int x = x0; x < x1; x++)
+                    indexes[(size_t)y * w + x] = pix[pi++];
+            }
+        }
+    }
+
+    if (!decodedRows) {
+        size_t pixAbs = imgAbs + 52;
+        if (pixAbs + (size_t)w * h > d.size()) return false;
+        memcpy(indexes.data(), d.data() + pixAbs, (size_t)w * h);
+    }
+
     // Index 0 is always the transparent void color in Myth II.
     std::vector<uint8_t> rgba((size_t)w * h * 4);
     for (int i = 0; i < w * h; i++) {
-        uint8_t idx = pix[i];
+        uint8_t idx = indexes[(size_t)i];
         const uint8_t* c = palData + (size_t)idx * 8;
         uint8_t alpha = (idx == 0) ? 0 : 255;
         rgba[(size_t)i*4+0] = alpha ? c[0] : 0; // r — zero transparent pixels to avoid color bleed
@@ -244,6 +324,8 @@ static bool extractDot256Texture(const std::vector<uint8_t>& d,
         rgba[(size_t)i*4+3] = alpha;
     }
 
+    if (outW) *outW = w;
+    if (outH) *outH = h;
     return writePNG(outPng, rgba, w, h);
 }
 
@@ -257,6 +339,8 @@ struct TagEntry {
     uint32_t groupTag=0, subgroupTag=0;
     uint32_t offset=0, size=0;
 };
+
+static bool readTagData(const TagEntry& e, std::vector<uint8_t>& out);
 
 struct FileHeader {
     uint16_t entryPointCount=0;
@@ -338,6 +422,13 @@ static const TagEntry* findTextureCollection(const std::vector<TagEntry>& tags,
 
     const TagEntry* coreEntry = findTag(tags, GROUP_CORE, collectionRefTag);
     if (coreEntry) {
+        std::vector<uint8_t> coreData;
+        if (readTagData(*coreEntry, coreData) && coreData.size() >= 4) {
+            uint32_t collectionTag = readBE32u(coreData.data(), 0);
+            const TagEntry* direct = findTag(tags, GROUP_256, collectionTag);
+            if (direct) return direct;
+        }
+
         std::string wanted = normalizedTextureName(coreEntry->name);
         if (!wanted.empty()) {
             for (const auto& e: tags) {
@@ -1017,6 +1108,578 @@ static void appendJsonString(std::string& s, const std::string& val) {
     s += '"';
 }
 
+static bool exportUnitPlaceholders(const std::string& outFolder,
+                                   const MeshHeader& mh,
+                                   const std::vector<ObjectInstance>& instances,
+                                   const std::map<int16_t, std::vector<const UnitType*>>& typeRelIdx) {
+    auto itTR = typeRelIdx.find(3);
+    if (itTR == typeRelIdx.end() || itTR->second.empty())
+        return false;
+
+    const float halfW = (float)(mh.submeshW * 32) * 0.5f;
+    const float halfH = (float)(mh.submeshH * 32) * 0.5f;
+
+    std::string objPath = outFolder + "/models/units.obj";
+    std::string mtlPath = outFolder + "/models/units.mtl";
+    std::string jsonPath = outFolder + "/models/units.json";
+
+    std::string mtl;
+    mtl += "newmtl unit_placeholder\n";
+    mtl += "Ka 0.1 0.1 0.1\n";
+    mtl += "Kd 0.9 0.1 0.1\n";
+    mtl += "Ks 0.0 0.0 0.0\n";
+    mtl += "illum 1\n\n";
+    writeText(mtlPath, mtl);
+
+    std::string obj;
+    obj += "# Myth II unit/monster placeholders\n";
+    obj += "mtllib units.mtl\n\n";
+
+    std::string json;
+    json += "{\n  \"units\": [\n";
+
+    int vBase = 1;
+    int unitCount = 0;
+    for (size_t ii = 0; ii < instances.size(); ii++) {
+        const auto& inst = instances[ii];
+        if (inst.markerType != 3) continue;
+
+        const auto& sameTypeEntries = itTR->second;
+        if ((size_t)inst.paletteIdx >= sameTypeEntries.size()) continue;
+        const UnitType* t = sameTypeEntries[inst.paletteIdx];
+        if (t->w0 != 3) continue;
+
+        std::string tagStr = tagToString(t->typeTag);
+        float cellX = (float)inst.posX / WORLD_ONE;
+        float cellY = (float)inst.posY / WORLD_ONE;
+        float cellZ = (float)inst.posZ / WORLD_ONE;
+        float facingDeg = (float)(((double)inst.yaw / 65536.0) * 360.0);
+        float facingRad = (facingDeg - 90.0f) * (float)(PI / 180.0);
+        float cosF = std::cos(facingRad);
+        float sinF = std::sin(facingRad);
+
+        float wx = halfW - cellX;
+        float wy = cellY - halfH;
+        float wz = cellZ;
+
+        char name[128];
+        snprintf(name, sizeof(name), "%s_%zu", tagToFileStem(t->typeTag).c_str(), ii);
+        obj += "o "; obj += name; obj += "\n";
+        obj += "g "; obj += name; obj += "\n";
+        obj += "usemtl unit_placeholder\n";
+
+        // Simple standing marker: a small diamond footprint plus a facing spike.
+        const float r = 0.35f;
+        const float h = 1.8f;
+        auto emitVertex = [&](float lx, float ly, float lz) {
+            float rx = cosF * lx - sinF * ly;
+            float ry = sinF * lx + cosF * ly;
+            char buf[128];
+            snprintf(buf, sizeof(buf), "v %.6f %.6f %.6f\n", wx + rx, wz + lz, wy + ry);
+            obj += buf;
+        };
+
+        emitVertex(0.0f, 0.0f, h);      // top
+        emitVertex(-r, 0.0f, 0.0f);     // left
+        emitVertex(0.0f, r, 0.0f);      // front
+        emitVertex(r, 0.0f, 0.0f);      // right
+        emitVertex(0.0f, -r, 0.0f);     // back
+        emitVertex(0.0f, r * 1.9f, h * 0.55f); // facing spike
+
+        char fbuf[256];
+        snprintf(fbuf, sizeof(fbuf),
+                 "f %d %d %d\nf %d %d %d\nf %d %d %d\nf %d %d %d\nf %d %d %d\n\n",
+                 vBase, vBase+1, vBase+2,
+                 vBase, vBase+2, vBase+3,
+                 vBase, vBase+3, vBase+4,
+                 vBase, vBase+4, vBase+1,
+                 vBase, vBase+2, vBase+5);
+        obj += fbuf;
+        vBase += 6;
+
+        if (unitCount) json += ",\n";
+        json += "    {\"tag\": ";
+        appendJsonString(json, tagStr);
+        char jbuf[256];
+        snprintf(jbuf, sizeof(jbuf),
+                 ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
+                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu}",
+                 cellX, cellY, cellZ, facingDeg, (int)inst.paletteIdx, ii);
+        json += jbuf;
+        unitCount++;
+    }
+
+    json += "\n  ]\n}\n";
+
+    if (unitCount == 0)
+        return false;
+
+    bool okObj = writeText(objPath, obj);
+    bool okJson = writeText(jsonPath, json);
+    if (okObj)
+        printf("Unit placeholders: %s (%d units)\n", objPath.c_str(), unitCount);
+    if (okJson)
+        printf("Unit placement:    %s\n", jsonPath.c_str());
+    return okObj && okJson;
+}
+
+static bool exportSoundPlaceholders(const std::string& outFolder,
+                                    const MeshHeader& mh,
+                                    const std::vector<ObjectInstance>& instances,
+                                    const std::map<int16_t, std::vector<const UnitType*>>& typeRelIdx) {
+    auto itTR = typeRelIdx.find(5);
+    if (itTR == typeRelIdx.end() || itTR->second.empty())
+        return false;
+
+    const float halfW = (float)(mh.submeshW * 32) * 0.5f;
+    const float halfH = (float)(mh.submeshH * 32) * 0.5f;
+
+    std::string objPath = outFolder + "/models/sounds.obj";
+    std::string mtlPath = outFolder + "/models/sounds.mtl";
+    std::string jsonPath = outFolder + "/models/sounds.json";
+
+    std::string mtl;
+    mtl += "newmtl sound_placeholder\n";
+    mtl += "Ka 0.1 0.1 0.1\n";
+    mtl += "Kd 0.1 0.45 1.0\n";
+    mtl += "Ks 0.0 0.0 0.0\n";
+    mtl += "illum 1\n\n";
+    writeText(mtlPath, mtl);
+
+    std::string obj;
+    obj += "# Myth II sound placeholders\n";
+    obj += "mtllib sounds.mtl\n\n";
+
+    std::string json;
+    json += "{\n  \"sounds\": [\n";
+
+    int vBase = 1;
+    int soundCount = 0;
+    for (size_t ii = 0; ii < instances.size(); ii++) {
+        const auto& inst = instances[ii];
+        if (inst.markerType != 5) continue;
+
+        const auto& sameTypeEntries = itTR->second;
+        if ((size_t)inst.paletteIdx >= sameTypeEntries.size()) continue;
+        const UnitType* t = sameTypeEntries[inst.paletteIdx];
+        if (t->w0 != 5) continue;
+
+        std::string tagStr = tagToString(t->typeTag);
+        float cellX = (float)inst.posX / WORLD_ONE;
+        float cellY = (float)inst.posY / WORLD_ONE;
+        float cellZ = (float)inst.posZ / WORLD_ONE;
+        float facingDeg = (float)(((double)inst.yaw / 65536.0) * 360.0);
+
+        float wx = halfW - cellX;
+        float wy = cellY - halfH;
+        float wz = cellZ;
+
+        char name[128];
+        snprintf(name, sizeof(name), "%s_%zu", tagToFileStem(t->typeTag).c_str(), ii);
+        obj += "o "; obj += name; obj += "\n";
+        obj += "g "; obj += name; obj += "\n";
+        obj += "usemtl sound_placeholder\n";
+
+        // Simple speaker/ripple marker: upright pole plus two ground diamonds.
+        const float r1 = 0.35f;
+        const float r2 = 0.65f;
+        const float h = 1.2f;
+        auto emitVertex = [&](float lx, float ly, float lz) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "v %.6f %.6f %.6f\n", wx + lx, wz + lz, wy + ly);
+            obj += buf;
+        };
+
+        emitVertex(0.0f, 0.0f, 0.0f);
+        emitVertex(0.0f, 0.0f, h);
+        emitVertex(-r1, 0.0f, 0.0f);
+        emitVertex(0.0f, r1, 0.0f);
+        emitVertex(r1, 0.0f, 0.0f);
+        emitVertex(0.0f, -r1, 0.0f);
+        emitVertex(-r2, 0.0f, 0.0f);
+        emitVertex(0.0f, r2, 0.0f);
+        emitVertex(r2, 0.0f, 0.0f);
+        emitVertex(0.0f, -r2, 0.0f);
+
+        char lbuf[256];
+        snprintf(lbuf, sizeof(lbuf),
+                 "l %d %d\nl %d %d %d %d %d\nl %d %d %d %d %d\n\n",
+                 vBase, vBase + 1,
+                 vBase + 2, vBase + 3, vBase + 4, vBase + 5, vBase + 2,
+                 vBase + 6, vBase + 7, vBase + 8, vBase + 9, vBase + 6);
+        obj += lbuf;
+        vBase += 10;
+
+        if (soundCount) json += ",\n";
+        json += "    {\"tag\": ";
+        appendJsonString(json, tagStr);
+        char jbuf[256];
+        snprintf(jbuf, sizeof(jbuf),
+                 ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
+                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu}",
+                 cellX, cellY, cellZ, facingDeg, (int)inst.paletteIdx, ii);
+        json += jbuf;
+        soundCount++;
+    }
+
+    json += "\n  ]\n}\n";
+
+    if (soundCount == 0)
+        return false;
+
+    bool okObj = writeText(objPath, obj);
+    bool okJson = writeText(jsonPath, json);
+    if (okObj)
+        printf("Sound placeholders: %s (%d sounds)\n", objPath.c_str(), soundCount);
+    if (okJson)
+        printf("Sound placement:    %s\n", jsonPath.c_str());
+    return okObj && okJson;
+}
+
+struct ScenerySpriteDef {
+    bool textured = false;
+    std::string tagStr;
+    std::string texturePng;
+    int sequenceIndex = 0;
+    int width = 32;
+    int height = 32;
+};
+
+static ScenerySpriteDef resolveScenerySprite(const std::string& outFolder,
+                                             const std::vector<TagEntry>& tags,
+                                             uint32_t typeTag,
+                                             bool overwriteTextures) {
+    static const uint32_t GROUP_SCEN = 0x7363656Eu; // 'scen'
+
+    ScenerySpriteDef def;
+    def.tagStr = tagToString(typeTag);
+
+    const TagEntry* scenEntry = findTag(tags, GROUP_SCEN, typeTag);
+    if (!scenEntry) return def;
+
+    std::vector<uint8_t> scenData;
+    if (!readTagData(*scenEntry, scenData) || scenData.size() < 0x2A) return def;
+
+    uint32_t collectionRef = readBE32u(scenData.data(), 4);
+    int16_t sequenceIndex = readBE16s(scenData.data(), 0x28);
+    if (sequenceIndex < 0) return def;
+
+    const TagEntry* collEntry = findTextureCollection(tags, collectionRef);
+    if (!collEntry) {
+        // Some scenery definitions carry a direct object/collection reference here.
+        collectionRef = readBE32u(scenData.data(), 8);
+        collEntry = findTextureCollection(tags, collectionRef);
+    }
+    if (!collEntry) return def;
+
+    std::vector<uint8_t> collData;
+    if (!readTagData(*collEntry, collData)) return def;
+
+    std::string texDir = outFolder + "/models/textures";
+    makeDirs(texDir);
+    std::string pngName = tagToFileStem(typeTag) + "_sprite.png";
+    std::string pngPath = texDir + "/" + pngName;
+
+    int w = 0, h = 0;
+    if (overwriteTextures || !fs::exists(pngPath)) {
+        if (!extractDot256Texture(collData, sequenceIndex, 0, pngPath, &w, &h))
+            return def;
+    } else {
+        // Re-extract to learn the dimensions when the PNG already exists would be wasteful.
+        // Use a conservative default scale for existing textures.
+        w = 32;
+        h = 48;
+    }
+
+    def.textured = fs::exists(pngPath);
+    def.texturePng = pngPath;
+    def.sequenceIndex = sequenceIndex;
+    def.width = w > 0 ? w : 32;
+    def.height = h > 0 ? h : 48;
+    return def;
+}
+
+static bool exportSceneryPlaceholders(const std::string& outFolder,
+                                      const MeshHeader& mh,
+                                      const std::vector<ObjectInstance>& instances,
+                                      const std::map<int16_t, std::vector<const UnitType*>>& typeRelIdx,
+                                      const std::vector<TagEntry>& tags,
+                                      bool overwriteTextures) {
+    auto itTR = typeRelIdx.find(1);
+    if (itTR == typeRelIdx.end() || itTR->second.empty())
+        return false;
+
+    const float halfW = (float)(mh.submeshW * 32) * 0.5f;
+    const float halfH = (float)(mh.submeshH * 32) * 0.5f;
+
+    std::string objPath = outFolder + "/models/scenery.obj";
+    std::string mtlPath = outFolder + "/models/scenery.mtl";
+    std::string jsonPath = outFolder + "/models/scenery.json";
+
+    std::string obj;
+    obj += "# Myth II sprite scenery billboards\n";
+    obj += "mtllib scenery.mtl\n\n";
+
+    std::string json;
+    json += "{\n  \"scenery\": [\n";
+
+    std::map<uint32_t, ScenerySpriteDef> spriteDefs;
+    std::set<std::string> materialNames;
+    for (const auto* t: itTR->second) {
+        if (t->w0 != 1) continue;
+        ScenerySpriteDef def = resolveScenerySprite(outFolder, tags, t->typeTag, overwriteTextures);
+        if (def.tagStr.empty()) def.tagStr = tagToString(t->typeTag);
+        spriteDefs[t->typeTag] = std::move(def);
+    }
+
+    std::string mtl;
+    mtl += "newmtl scenery_placeholder\n";
+    mtl += "Ka 0.1 0.1 0.1\n";
+    mtl += "Kd 0.25 0.75 0.25\n";
+    mtl += "Ks 0.0 0.0 0.0\n";
+    mtl += "illum 1\n\n";
+
+    for (const auto& kv: spriteDefs) {
+        const ScenerySpriteDef& def = kv.second;
+        if (!def.textured) continue;
+        std::string matName = tagToFileStem(kv.first) + "_sprite";
+        if (!materialNames.insert(matName).second) continue;
+        mtl += "newmtl " + matName + "\n";
+        mtl += "Ka 1.0 1.0 1.0\n";
+        mtl += "Kd 1.0 1.0 1.0\n";
+        mtl += "Ks 0.0 0.0 0.0\n";
+        mtl += "d 1.0\n";
+        mtl += "illum 1\n";
+        mtl += "map_Kd textures/" + fs::path(def.texturePng).filename().string() + "\n";
+        mtl += "\n";
+    }
+    writeText(mtlPath, mtl);
+
+    int vBase = 1;
+    int vtBase = 1;
+    int sceneryCount = 0;
+    for (size_t ii = 0; ii < instances.size(); ii++) {
+        const auto& inst = instances[ii];
+        if (inst.markerType != 1) continue;
+
+        const auto& sameTypeEntries = itTR->second;
+        if ((size_t)inst.paletteIdx >= sameTypeEntries.size()) continue;
+        const UnitType* t = sameTypeEntries[inst.paletteIdx];
+        if (t->w0 != 1) continue;
+
+        std::string tagStr = tagToString(t->typeTag);
+        float cellX = (float)inst.posX / WORLD_ONE;
+        float cellY = (float)inst.posY / WORLD_ONE;
+        float cellZ = (float)inst.posZ / WORLD_ONE;
+        float facingDeg = (float)(((double)inst.yaw / 65536.0) * 360.0);
+        float facingRad = (facingDeg - 90.0f) * (float)(PI / 180.0);
+        float cosF = std::cos(facingRad);
+        float sinF = std::sin(facingRad);
+
+        float wx = halfW - cellX;
+        float wy = cellY - halfH;
+        float wz = cellZ;
+
+        char name[128];
+        snprintf(name, sizeof(name), "%s_%zu", tagToFileStem(t->typeTag).c_str(), ii);
+        obj += "o "; obj += name; obj += "\n";
+        obj += "g "; obj += name; obj += "\n";
+        auto dit = spriteDefs.find(t->typeTag);
+        const ScenerySpriteDef* def = dit == spriteDefs.end() ? nullptr : &dit->second;
+        bool textured = def && def->textured;
+        obj += "usemtl ";
+        obj += textured ? tagToFileStem(t->typeTag) + "_sprite" : "scenery_placeholder";
+        obj += "\n";
+
+        float cardW = 0.44f;
+        float cardH = 0.8f;
+        if (textured) {
+            cardW = std::max(0.20f, (float)def->width / 64.0f);
+            cardH = std::max(0.20f, (float)def->height / 64.0f);
+        }
+        const float r = cardW * 0.5f;
+        const float h = cardH;
+        auto emitVertex = [&](float lx, float ly, float lz) {
+            float rx = cosF * lx - sinF * ly;
+            float ry = sinF * lx + cosF * ly;
+            char buf[128];
+            snprintf(buf, sizeof(buf), "v %.6f %.6f %.6f\n", wx + rx, wz + lz, wy + ry);
+            obj += buf;
+        };
+
+        emitVertex(-r, 0.0f, 0.0f);
+        emitVertex(r, 0.0f, 0.0f);
+        emitVertex(r, 0.0f, h);
+        emitVertex(-r, 0.0f, h);
+        emitVertex(0.0f, -r, 0.0f);
+        emitVertex(0.0f, r, 0.0f);
+        emitVertex(0.0f, r, h);
+        emitVertex(0.0f, -r, h);
+
+        if (textured) {
+            obj += "vt 0.000000 0.000000\nvt 1.000000 0.000000\n";
+            obj += "vt 1.000000 1.000000\nvt 0.000000 1.000000\n";
+            obj += "vt 0.000000 0.000000\nvt 1.000000 0.000000\n";
+            obj += "vt 1.000000 1.000000\nvt 0.000000 1.000000\n";
+            char fbuf[192];
+            snprintf(fbuf, sizeof(fbuf),
+                     "f %d/%d %d/%d %d/%d %d/%d\n"
+                     "f %d/%d %d/%d %d/%d %d/%d\n\n",
+                     vBase, vtBase, vBase+1, vtBase+1, vBase+2, vtBase+2, vBase+3, vtBase+3,
+                     vBase+4, vtBase+4, vBase+5, vtBase+5, vBase+6, vtBase+6, vBase+7, vtBase+7);
+            obj += fbuf;
+            vtBase += 8;
+        } else {
+            char fbuf[128];
+            snprintf(fbuf, sizeof(fbuf), "f %d %d %d %d\nf %d %d %d %d\n\n",
+                     vBase, vBase+1, vBase+2, vBase+3,
+                     vBase+4, vBase+5, vBase+6, vBase+7);
+            obj += fbuf;
+        }
+        vBase += 8;
+
+        if (sceneryCount) json += ",\n";
+        json += "    {\"tag\": ";
+        appendJsonString(json, tagStr);
+        char jbuf[256];
+        snprintf(jbuf, sizeof(jbuf),
+                 ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
+                 ", \"facing_deg\": %.4f, \"sequence\": %d"
+                 ", \"textured\": %s, \"pal_idx\": %d, \"marker_idx\": %zu}",
+                 cellX, cellY, cellZ, facingDeg,
+                 textured ? def->sequenceIndex : -1,
+                 textured ? "true" : "false",
+                 (int)inst.paletteIdx, ii);
+        json += jbuf;
+        sceneryCount++;
+    }
+
+    json += "\n  ]\n}\n";
+
+    if (sceneryCount == 0)
+        return false;
+
+    bool okObj = writeText(objPath, obj);
+    bool okJson = writeText(jsonPath, json);
+    if (okObj)
+        printf("Sprite scenery billboards:  %s (%d markers)\n", objPath.c_str(), sceneryCount);
+    if (okJson)
+        printf("Sprite scenery placement:    %s\n", jsonPath.c_str());
+    return okObj && okJson;
+}
+
+static bool exportProjectilePlaceholders(const std::string& outFolder,
+                                         const MeshHeader& mh,
+                                         const std::vector<ObjectInstance>& instances,
+                                         const std::map<int16_t, std::vector<const UnitType*>>& typeRelIdx) {
+    auto itTR = typeRelIdx.find(9);
+    if (itTR == typeRelIdx.end() || itTR->second.empty())
+        return false;
+
+    const float halfW = (float)(mh.submeshW * 32) * 0.5f;
+    const float halfH = (float)(mh.submeshH * 32) * 0.5f;
+
+    std::string objPath = outFolder + "/models/projectiles.obj";
+    std::string mtlPath = outFolder + "/models/projectiles.mtl";
+    std::string jsonPath = outFolder + "/models/projectiles.json";
+
+    std::string mtl;
+    mtl += "newmtl projectile_placeholder\n";
+    mtl += "Ka 0.1 0.1 0.1\n";
+    mtl += "Kd 1.0 0.75 0.1\n";
+    mtl += "Ks 0.0 0.0 0.0\n";
+    mtl += "illum 1\n\n";
+    writeText(mtlPath, mtl);
+
+    std::string obj;
+    obj += "# Myth II projectile placeholders\n";
+    obj += "mtllib projectiles.mtl\n\n";
+
+    std::string json;
+    json += "{\n  \"projectiles\": [\n";
+
+    int vBase = 1;
+    int projectileCount = 0;
+    for (size_t ii = 0; ii < instances.size(); ii++) {
+        const auto& inst = instances[ii];
+        if (inst.markerType != 9) continue;
+
+        const auto& sameTypeEntries = itTR->second;
+        if ((size_t)inst.paletteIdx >= sameTypeEntries.size()) continue;
+        const UnitType* t = sameTypeEntries[inst.paletteIdx];
+        if (t->w0 != 9) continue;
+
+        std::string tagStr = tagToString(t->typeTag);
+        float cellX = (float)inst.posX / WORLD_ONE;
+        float cellY = (float)inst.posY / WORLD_ONE;
+        float cellZ = (float)inst.posZ / WORLD_ONE;
+        float facingDeg = (float)(((double)inst.yaw / 65536.0) * 360.0);
+        float facingRad = (facingDeg - 90.0f) * (float)(PI / 180.0);
+        float cosF = std::cos(facingRad);
+        float sinF = std::sin(facingRad);
+
+        float wx = halfW - cellX;
+        float wy = cellY - halfH;
+        float wz = cellZ;
+
+        char name[128];
+        snprintf(name, sizeof(name), "%s_%zu", tagToFileStem(t->typeTag).c_str(), ii);
+        obj += "o "; obj += name; obj += "\n";
+        obj += "g "; obj += name; obj += "\n";
+        obj += "usemtl projectile_placeholder\n";
+
+        // Small arrow marker in the facing direction.
+        auto emitVertex = [&](float lx, float ly, float lz) {
+            float rx = cosF * lx - sinF * ly;
+            float ry = sinF * lx + cosF * ly;
+            char buf[128];
+            snprintf(buf, sizeof(buf), "v %.6f %.6f %.6f\n", wx + rx, wz + lz, wy + ry);
+            obj += buf;
+        };
+
+        emitVertex(0.0f, -0.35f, 0.0f);
+        emitVertex(0.0f, 0.45f, 0.0f);
+        emitVertex(-0.18f, 0.20f, 0.0f);
+        emitVertex(0.18f, 0.20f, 0.0f);
+        emitVertex(0.0f, 0.0f, 0.45f);
+
+        char lbuf[128];
+        snprintf(lbuf, sizeof(lbuf),
+                 "l %d %d\nl %d %d\nl %d %d\nl %d %d\nl %d %d\n\n",
+                 vBase, vBase+1,
+                 vBase+1, vBase+2,
+                 vBase+1, vBase+3,
+                 vBase, vBase+4,
+                 vBase+1, vBase+4);
+        obj += lbuf;
+        vBase += 5;
+
+        if (projectileCount) json += ",\n";
+        json += "    {\"tag\": ";
+        appendJsonString(json, tagStr);
+        char jbuf[256];
+        snprintf(jbuf, sizeof(jbuf),
+                 ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
+                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu}",
+                 cellX, cellY, cellZ, facingDeg, (int)inst.paletteIdx, ii);
+        json += jbuf;
+        projectileCount++;
+    }
+
+    json += "\n  ]\n}\n";
+
+    if (projectileCount == 0)
+        return false;
+
+    bool okObj = writeText(objPath, obj);
+    bool okJson = writeText(jsonPath, json);
+    if (okObj)
+        printf("Projectile placeholders: %s (%d projectiles)\n", objPath.c_str(), projectileCount);
+    if (okJson)
+        printf("Projectile placement:    %s\n", jsonPath.c_str());
+    return okObj && okJson;
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -1141,15 +1804,29 @@ int main(int argc, char* argv[]) {
     std::vector<const UnitType*> animationTypes;
     for (const auto& t: unitTypes)
         if (t.w0==11) animationTypes.push_back(&t);
+    std::vector<const UnitType*> unitMarkerTypes;
+    for (const auto& t: unitTypes)
+        if (t.w0==3) unitMarkerTypes.push_back(&t);
+    std::vector<const UnitType*> soundMarkerTypes;
+    for (const auto& t: unitTypes)
+        if (t.w0==5) soundMarkerTypes.push_back(&t);
+    std::vector<const UnitType*> spriteSceneryTypes;
+    for (const auto& t: unitTypes)
+        if (t.w0==1) spriteSceneryTypes.push_back(&t);
+    std::vector<const UnitType*> projectileTypes;
+    for (const auto& t: unitTypes)
+        if (t.w0==9) projectileTypes.push_back(&t);
 
-    if (sceneryTypes.empty() && animationTypes.empty()) {
-        printf("No direct model (w0=6) or model animation (w0=11) types found in this mesh.\n");
+    if (sceneryTypes.empty() && animationTypes.empty() && unitMarkerTypes.empty() && soundMarkerTypes.empty() && spriteSceneryTypes.empty() && projectileTypes.empty()) {
+        printf("No direct model (w0=6), model animation (w0=11), sprite scenery (w0=1), unit (w0=3), sound (w0=5), or projectile (w0=9) types found in this mesh.\n");
         return 0;
     }
 
-    printf("Unit types: %u total, %u direct models, %u model animations\n",
+    printf("Unit types: %u total, %u direct models, %u model animations, %u sprite scenery, %u units, %u sounds, %u projectiles\n",
            (unsigned)unitTypes.size(), (unsigned)sceneryTypes.size(),
-           (unsigned)animationTypes.size());
+           (unsigned)animationTypes.size(), (unsigned)spriteSceneryTypes.size(),
+           (unsigned)unitMarkerTypes.size(),
+           (unsigned)soundMarkerTypes.size(), (unsigned)projectileTypes.size());
 
     // Scan tag files
     std::vector<TagEntry> tags;
@@ -1666,6 +2343,11 @@ int main(int argc, char* argv[]) {
         if (writeText(animPath, animationsJson))
             printf("Animations written: %s\n", animPath.c_str());
     }
+
+    exportUnitPlaceholders(outFolder, mh, instances, typeRelIdx);
+    exportSoundPlaceholders(outFolder, mh, instances, typeRelIdx);
+    exportSceneryPlaceholders(outFolder, mh, instances, typeRelIdx, tags, overwriteTextures);
+    exportProjectilePlaceholders(outFolder, mh, instances, typeRelIdx);
 
     // ---- Write combined map OBJ ----
     if (!placedInstances.empty()) {

@@ -162,6 +162,14 @@ Extracts 3D scenery models and placement data from an extracted Myth II mesh tag
   correct map positions and orientations, ready to import into Blender
 - `models/animations.json` plus `models/<anim>_<N>_frame##_*.obj` — model
   animation manifests and frame OBJs for animated map objects such as gates
+- `models/scenery.obj` plus `models/scenery.json` — textured crossed billboards
+  and coordinates for sprite-based scenery markers when present
+- `models/units.obj` plus `models/units.json` — simple placeholders and
+  coordinates for sprite-based monster/unit markers when present
+- `models/sounds.obj` plus `models/sounds.json` — simple placeholders and
+  coordinates for placed sound markers when present
+- `models/projectiles.obj` plus `models/projectiles.json` — simple placeholders
+  and coordinates for placed projectile markers when present
 - `placement.json` — all instance positions (cell coords) and facing angles
 
 When an optional `terrain.obj` path is supplied (e.g. the `displacement.obj`
@@ -209,7 +217,12 @@ or:
 The Blender importer uses `models/map_combined.obj` when present. If that OBJ
 already contains the terrain object, it will not import `models/displacement.obj`
 a second time. `models/water.obj` and `models/animations.json` are imported when
-present.
+present. `models/units.obj` is also imported when present.
+`models/sounds.obj` is imported into a tag-grouped `sounds` collection when
+present. `models/scenery.obj` is imported into a tag-grouped `scenery`
+collection when present, with sprite material transparency enabled.
+`models/projectiles.obj` is imported into a tag-grouped `projectiles`
+collection when present.
 
 ```bash
 extract_map myth2_tags le3e --out out/le3e
