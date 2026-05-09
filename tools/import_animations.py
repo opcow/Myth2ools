@@ -2,7 +2,7 @@
 Blender importer for Myth II model-animation frame OBJs.
 
 Open this script in Blender's Text Editor and run it. A file picker opens for
-`models/animations.json`; the importer can optionally bring in `map_combined.obj`,
+`assets/models/animations.json`; the importer can optionally bring in `map_combined.obj`,
 then it imports the animation frame OBJs and keyframes visibility.
 """
 

@@ -111,6 +111,6 @@ echo "Exporting water mesh..."
 "$bin_dir/export_water_mesh" "$out_folder"
 
 echo "Exporting scenery models..."
-"$bin_dir/export_models" "$tags_folder" "$out_folder" "$out_folder/models/displacement.obj" "${model_args[@]}"
+"$bin_dir/export_models" "$tags_folder" "$out_folder" "$out_folder/assets/models/displacement.obj" "${model_args[@]}"
 
 echo "Done. Output written to \"$out_folder\"."

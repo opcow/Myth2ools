@@ -2,8 +2,8 @@
 // Extract 3D scenery models and placement data from a Myth II mesh tag.
 //
 // For each scenery type (object class w0=6) that has a geom tag, emits:
-//   models/<tag>.obj   — geometry with UV coordinates
-//   models/<tag>.mtl   — material references
+//   assets/models/<tag>.obj   — geometry with UV coordinates
+//   assets/models/<tag>.mtl   — material references
 // Plus:
 //   placement.json     — all scenery instance positions and facings
 //
@@ -164,6 +164,24 @@ static int dot256SequenceViewCount(const std::vector<uint8_t>& d, int seqIndex) 
     if (seqDataAbs + 12 > d.size()) return 0;
     int16_t nv = readBE16s(d.data(), seqDataAbs + 8);
     return nv > 0 ? nv : 1;
+}
+
+static int dot256SequenceCount(const std::vector<uint8_t>& d) {
+    if (d.size() < 320) return 0;
+    int32_t seqCount = readBE32s(d.data(), 128);
+    return seqCount > 0 && seqCount < 4096 ? seqCount : 0;
+}
+
+static std::string dot256SequenceName(const std::vector<uint8_t>& d, int seqIndex) {
+    if (d.size() < 320) return "";
+    int32_t bulkOff  = readBE32s(d.data(), 248);
+    int32_t seqCount = readBE32s(d.data(), 128);
+    int32_t seqOff   = readBE32s(d.data(), 132);
+    if (seqIndex < 0 || seqIndex >= seqCount) return "";
+    size_t seqRefEntry = (size_t)(bulkOff + seqOff) + (size_t)seqIndex * 128;
+    if (seqRefEntry + 32 > d.size()) return "";
+    return std::string((const char*)d.data() + seqRefEntry,
+                       strnlen((const char*)d.data() + seqRefEntry, 32));
 }
 
 // Extract one view from a sequence in a .256 collection tag.
@@ -1108,10 +1126,365 @@ static void appendJsonString(std::string& s, const std::string& val) {
     s += '"';
 }
 
+static std::string lowerString(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return (char)std::tolower(c);
+    });
+    return s;
+}
+
+static std::string safeStem(std::string s) {
+    for (char& c : s) {
+        unsigned char ch = (unsigned char)c;
+        if (ch < 32 || ch > 126 ||
+            c == '<' || c == '>' || c == ':' || c == '"' ||
+            c == '/' || c == '\\' || c == '|' || c == '?' || c == '*') {
+            c = '_';
+        }
+    }
+    while (!s.empty() && (s.back() == ' ' || s.back() == '.'))
+        s.back() = '_';
+    return s.empty() ? "sound" : s;
+}
+
+static void putLE16(std::vector<uint8_t>& out, uint16_t v) {
+    out.push_back((uint8_t)(v & 0xFF));
+    out.push_back((uint8_t)((v >> 8) & 0xFF));
+}
+
+static void putLE32(std::vector<uint8_t>& out, uint32_t v) {
+    out.push_back((uint8_t)(v & 0xFF));
+    out.push_back((uint8_t)((v >> 8) & 0xFF));
+    out.push_back((uint8_t)((v >> 16) & 0xFF));
+    out.push_back((uint8_t)((v >> 24) & 0xFF));
+}
+
+static bool writeBinary(const std::string& path, const std::vector<uint8_t>& data) {
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) { fprintf(stderr, "Cannot write: %s\n", path.c_str()); return false; }
+    bool ok = data.empty() || fwrite(data.data(), 1, data.size(), f) == data.size();
+    fclose(f);
+    return ok;
+}
+
+static bool writeWavPCM16(const std::string& path,
+                          const std::vector<int16_t>& samples,
+                          uint16_t channels,
+                          uint32_t sampleRate) {
+    if (channels == 0 || sampleRate == 0) return false;
+    uint32_t dataSize = (uint32_t)(samples.size() * sizeof(int16_t));
+    uint32_t byteRate = sampleRate * channels * 2;
+    uint16_t blockAlign = (uint16_t)(channels * 2);
+
+    std::vector<uint8_t> out;
+    out.reserve(44 + dataSize);
+    out.insert(out.end(), {'R','I','F','F'});
+    putLE32(out, 36 + dataSize);
+    out.insert(out.end(), {'W','A','V','E','f','m','t',' '});
+    putLE32(out, 16);
+    putLE16(out, 1);
+    putLE16(out, channels);
+    putLE32(out, sampleRate);
+    putLE32(out, byteRate);
+    putLE16(out, blockAlign);
+    putLE16(out, 16);
+    out.insert(out.end(), {'d','a','t','a'});
+    putLE32(out, dataSize);
+    for (int16_t s : samples)
+        putLE16(out, (uint16_t)s);
+    return writeBinary(path, out);
+}
+
+static int clamp16(int v) {
+    if (v < -32768) return -32768;
+    if (v > 32767) return 32767;
+    return v;
+}
+
+static void decompressAppleIMAPacket(int16_t state,
+                                     const uint8_t* encoded,
+                                     int16_t* dst) {
+    static const int indexTab[16] = {
+        -1,-1,-1,-1, 2, 4, 6, 8,
+        -1,-1,-1,-1, 2, 4, 6, 8
+    };
+    static const int stepTab[89] = {
+        7, 8, 9, 10, 11, 12, 13, 14,
+        16, 17, 19, 21, 23, 25, 28,
+        31, 34, 37, 41, 45, 50, 55,
+        60, 66, 73, 80, 88, 97, 107,
+        118, 130, 143, 157, 173, 190, 209,
+        230, 253, 279, 307, 337, 371, 408,
+        449, 494, 544, 598, 658, 724, 796,
+        876, 963, 1060, 1166, 1282, 1411, 1552,
+        1707, 1878, 2066, 2272, 2499, 2749, 3024,
+        3327, 3660, 4026, 4428, 4871, 5358, 5894,
+        6484, 7132, 7845, 8630, 9493, 10442, 11487,
+        12635, 13899, 15289, 16818, 18500, 20350,
+        22385, 24623, 27086, 29794, 32767
+    };
+
+    int index = state & 0x7F;
+    if (index < 0) index = 0;
+    if (index > 88) index = 88;
+    int pred = (int)state & ~0x7F;
+    int step = stepTab[index];
+
+    for (int sample = 0; sample < 64; sample++) {
+        int byte = encoded[sample >> 1];
+        int code = (sample & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
+        int diff = step >> 3;
+        if (code & 4) diff += step;
+        if (code & 2) diff += step >> 1;
+        if (code & 1) diff += step >> 2;
+        if (code & 8) diff = -diff;
+
+        pred = clamp16(pred + diff);
+        dst[sample] = (int16_t)pred;
+        index += indexTab[code];
+        if (index < 0) index = 0;
+        if (index > 88) index = 88;
+        step = stepTab[index];
+    }
+}
+
+struct SoundPermutationExport {
+    std::string name;
+    std::string relativePath;
+};
+
+static bool exportSoundTagWavs(const std::vector<TagEntry>& tags,
+                               uint32_t soundTag,
+                               const std::string& outFolder,
+                               bool overwrite,
+                               std::vector<SoundPermutationExport>& outPerms) {
+    static const uint32_t GROUP_SOUN = 0x736F756Eu; // 'soun'
+    outPerms.clear();
+
+    const TagEntry* e = findTag(tags, GROUP_SOUN, soundTag);
+    if (!e) return false;
+
+    std::vector<uint8_t> d;
+    if (!readTagData(*e, d) || d.size() < 64) return false;
+
+    int32_t soundOffset = readBE32s(d.data(), 20);
+    int32_t numPerms = readBE32s(d.data(), 36);
+    int32_t permOffset = readBE32s(d.data(), 40);
+    int32_t permSize = readBE32s(d.data(), 44);
+    if (numPerms <= 0 || numPerms > 5) return false;
+    if (permSize != numPerms * 32) return false;
+    if (permOffset < 0 || soundOffset < 0) return false;
+    if ((size_t)permOffset + (size_t)numPerms * 32 > d.size()) return false;
+    if ((size_t)soundOffset + (size_t)numPerms * 32 > d.size()) return false;
+
+    makeDirs(outFolder + "/assets/sounds/wav");
+    std::string tagStem = tagToFileStem(soundTag);
+
+    size_t sampleOffset = (size_t)soundOffset + (size_t)numPerms * 32;
+    for (int i = 0; i < numPerms; i++) {
+        size_t permAbs = (size_t)permOffset + (size_t)i * 32;
+        size_t hdrAbs = (size_t)soundOffset + (size_t)i * 32;
+        std::string permName((const char*)d.data() + permAbs + 6,
+                             strnlen((const char*)d.data() + permAbs + 6, 26));
+
+        uint32_t sampleFlags = readBE32u(d.data(), hdrAbs + 0);
+        uint16_t bits = readBE16u(d.data(), hdrAbs + 4);
+        uint16_t physicalMinusOne = readBE16u(d.data(), hdrAbs + 6);
+        uint16_t channels = readBE16u(d.data(), hdrAbs + 8);
+        uint32_t sampleRate = readBE32u(d.data(), hdrAbs + 12) >> 16;
+        uint32_t sampleCount = readBE32u(d.data(), hdrAbs + 16);
+
+        size_t storedSize = 0;
+        if (sampleFlags & 1)
+            storedSize = (size_t)sampleCount * 34;
+        else
+            storedSize = (size_t)sampleCount << physicalMinusOne;
+        if (sampleOffset + storedSize > d.size()) return false;
+
+        std::string wavName = tagStem + "_" + std::to_string(i);
+        std::string pretty = safeStem(permName);
+        if (!pretty.empty())
+            wavName += "_" + pretty;
+        wavName += ".wav";
+        std::string relPath = "assets/sounds/wav/" + wavName;
+        std::string wavPath = outFolder + "/" + relPath;
+
+        if (overwrite || !fs::exists(wavPath)) {
+            bool ok = false;
+            if ((sampleFlags & 1) && bits == 16 && channels >= 1 && channels <= 2) {
+                std::vector<int16_t> pcm;
+                if (channels == 1) {
+                    pcm.resize((size_t)sampleCount * 64);
+                    for (uint32_t p = 0; p < sampleCount; p++) {
+                        size_t packet = sampleOffset + (size_t)p * 34;
+                        int16_t state = readBE16s(d.data(), packet);
+                        decompressAppleIMAPacket(state, d.data() + packet + 2, pcm.data() + (size_t)p * 64);
+                    }
+                } else {
+                    uint32_t framePackets = sampleCount / 2;
+                    pcm.resize((size_t)framePackets * 64 * 2);
+                    int16_t left[64], right[64];
+                    for (uint32_t p = 0; p < framePackets; p++) {
+                        size_t lPacket = sampleOffset + (size_t)(p * 2) * 34;
+                        size_t rPacket = lPacket + 34;
+                        decompressAppleIMAPacket(readBE16s(d.data(), lPacket), d.data() + lPacket + 2, left);
+                        decompressAppleIMAPacket(readBE16s(d.data(), rPacket), d.data() + rPacket + 2, right);
+                        for (int s = 0; s < 64; s++) {
+                            pcm[((size_t)p * 64 + s) * 2 + 0] = left[s];
+                            pcm[((size_t)p * 64 + s) * 2 + 1] = right[s];
+                        }
+                    }
+                }
+                ok = writeWavPCM16(wavPath, pcm, channels, sampleRate);
+            } else if (!(sampleFlags & 1) && bits == 16 && channels >= 1 && channels <= 2) {
+                std::vector<int16_t> pcm(sampleCount);
+                for (uint32_t s = 0; s < sampleCount; s++)
+                    pcm[s] = readBE16s(d.data(), sampleOffset + (size_t)s * 2);
+                ok = writeWavPCM16(wavPath, pcm, channels, sampleRate);
+            }
+            if (!ok) {
+                sampleOffset += storedSize;
+                continue;
+            }
+        }
+
+        outPerms.push_back({permName, relPath});
+        sampleOffset += storedSize;
+    }
+
+    return !outPerms.empty();
+}
+
+struct UnitSpriteDef {
+    bool textured = false;
+    std::string tagStr;
+    std::string collectionTag;
+    std::string sequenceName;
+    std::vector<std::string> texturePngs;
+    int sequenceIndex = 0;
+    int viewCount = 1;
+    int width = 32;
+    int height = 48;
+};
+
+static int scoreUnitSequenceName(const std::string& name) {
+    std::string n = lowerString(name);
+    int score = 0;
+    if (n.find("stand_all") != std::string::npos || n.find("stand all") != std::string::npos) score = 120;
+    else if (n.rfind("stand1", 0) == 0 || n.rfind("stand 1", 0) == 0) score = 110;
+    else if (n.rfind("stand", 0) == 0) score = 100;
+    else if (n.find("idle") != std::string::npos) score = 95;
+    else if (n.find("sit") != std::string::npos) score = 90;
+    else if (n.find("glide") != std::string::npos) score = 85;
+    else if (n.find("stand") != std::string::npos) score = 80;
+    else if (n.find("hold") != std::string::npos) score = 70;
+    else if (n.find("flight") != std::string::npos) score = 60;
+    else score = 10;
+
+    for (const char* bad : {"death", "dead", "body", "head", "leg", "arm",
+                            "bits", "piece", "flinch", "attack", "throw",
+                            "run", "walk", "transition", "trans"}) {
+        if (n.find(bad) != std::string::npos) score -= 35;
+    }
+    return score;
+}
+
+static UnitSpriteDef resolveUnitSprite(const std::string& outFolder,
+                                       const std::vector<TagEntry>& tags,
+                                       uint32_t unitTag,
+                                       bool overwriteTextures) {
+    static const uint32_t GROUP_UNIT = 0x756E6974u; // 'unit'
+    static const uint32_t GROUP_MONS = 0x6D6F6E73u; // 'mons'
+
+    UnitSpriteDef def;
+    def.tagStr = tagToString(unitTag);
+
+    uint32_t monsterTag = unitTag;
+    const TagEntry* unitEntry = findTag(tags, GROUP_UNIT, unitTag);
+    if (unitEntry) {
+        std::vector<uint8_t> unitData;
+        if (readTagData(*unitEntry, unitData) && unitData.size() >= 4)
+            monsterTag = readBE32u(unitData.data(), 0);
+    }
+
+    const TagEntry* monsEntry = findTag(tags, GROUP_MONS, monsterTag);
+    if (!monsEntry) return def;
+
+    std::vector<uint8_t> monsData;
+    if (!readTagData(*monsEntry, monsData) || monsData.size() < 8) return def;
+
+    uint32_t collectionRef = readBE32u(monsData.data(), 4);
+    const TagEntry* collEntry = findTextureCollection(tags, collectionRef);
+    if (!collEntry) return def;
+
+    std::vector<uint8_t> collData;
+    if (!readTagData(*collEntry, collData)) return def;
+
+    int seqCount = dot256SequenceCount(collData);
+    if (seqCount <= 0) return def;
+
+    int bestSeq = 0;
+    int bestScore = -100000;
+    for (int si = 0; si < seqCount; si++) {
+        int views = dot256SequenceViewCount(collData, si);
+        if (views <= 0) continue;
+        std::string name = dot256SequenceName(collData, si);
+        int score = scoreUnitSequenceName(name);
+        if (score > bestScore) {
+            bestScore = score;
+            bestSeq = si;
+        }
+    }
+
+    int viewCount = dot256SequenceViewCount(collData, bestSeq);
+    if (viewCount <= 0) return def;
+
+    std::string texDir = outFolder + "/assets/sprites/textures";
+    makeDirs(texDir);
+    std::string unitStem = tagToFileStem(unitTag);
+    std::string collStem = tagToFileStem(collEntry->subgroupTag);
+
+    def.collectionTag = tagToString(collEntry->subgroupTag);
+    def.sequenceName = dot256SequenceName(collData, bestSeq);
+    def.sequenceIndex = bestSeq;
+    def.viewCount = viewCount;
+    def.texturePngs.resize((size_t)viewCount);
+
+    bool anyViewsOk = false;
+    for (int vi = 0; vi < viewCount; vi++) {
+        std::string pngName = unitStem + "_unit_" + collStem + "_"
+                            + std::to_string(bestSeq) + "_" + std::to_string(vi) + ".png";
+        std::string pngPath = texDir + "/" + pngName;
+        int w = 0, h = 0;
+        if (overwriteTextures || !fs::exists(pngPath)) {
+            if (!extractDot256Texture(collData, bestSeq, vi, pngPath, &w, &h)) {
+                continue;
+            }
+        } else if (vi == 0) {
+            // Keep a sane default scale when reusing an existing PNG.
+            w = 32;
+            h = 48;
+        }
+        if (!fs::exists(pngPath))
+            continue;
+        if (!anyViewsOk) {
+            def.width = w > 0 ? w : 32;
+            def.height = h > 0 ? h : 48;
+        }
+        def.texturePngs[(size_t)vi] = pngPath;
+        anyViewsOk = true;
+    }
+
+    def.textured = anyViewsOk;
+    return def;
+}
+
 static bool exportUnitPlaceholders(const std::string& outFolder,
                                    const MeshHeader& mh,
                                    const std::vector<ObjectInstance>& instances,
-                                   const std::map<int16_t, std::vector<const UnitType*>>& typeRelIdx) {
+                                   const std::map<int16_t, std::vector<const UnitType*>>& typeRelIdx,
+                                   const std::vector<TagEntry>& tags,
+                                   bool overwriteTextures) {
     auto itTR = typeRelIdx.find(3);
     if (itTR == typeRelIdx.end() || itTR->second.empty())
         return false;
@@ -1119,9 +1492,22 @@ static bool exportUnitPlaceholders(const std::string& outFolder,
     const float halfW = (float)(mh.submeshW * 32) * 0.5f;
     const float halfH = (float)(mh.submeshH * 32) * 0.5f;
 
-    std::string objPath = outFolder + "/models/units.obj";
-    std::string mtlPath = outFolder + "/models/units.mtl";
-    std::string jsonPath = outFolder + "/models/units.json";
+    std::string objPath = outFolder + "/assets/sprites/units.obj";
+    std::string mtlPath = outFolder + "/assets/sprites/units.mtl";
+    std::string jsonPath = outFolder + "/assets/sprites/units.json";
+
+    std::string obj;
+    obj += "# Myth II unit/monster sprites\n";
+    obj += "mtllib units.mtl\n\n";
+
+    std::string json;
+    json += "{\n  \"units\": [\n";
+
+    std::map<uint32_t, UnitSpriteDef> spriteDefs;
+    for (const auto* t: itTR->second) {
+        if (t->w0 != 3) continue;
+        spriteDefs[t->typeTag] = resolveUnitSprite(outFolder, tags, t->typeTag, overwriteTextures);
+    }
 
     std::string mtl;
     mtl += "newmtl unit_placeholder\n";
@@ -1129,17 +1515,28 @@ static bool exportUnitPlaceholders(const std::string& outFolder,
     mtl += "Kd 0.9 0.1 0.1\n";
     mtl += "Ks 0.0 0.0 0.0\n";
     mtl += "illum 1\n\n";
+    for (const auto& kv: spriteDefs) {
+        const UnitSpriteDef& def = kv.second;
+        if (!def.textured) continue;
+        for (int vi = 0; vi < def.viewCount; vi++) {
+            if (def.texturePngs[(size_t)vi].empty()) continue;
+            std::string matName = tagToFileStem(kv.first) + "_unit_" + std::to_string(vi) + "_sprite";
+            mtl += "newmtl " + matName + "\n";
+            mtl += "Ka 1.0 1.0 1.0\n";
+            mtl += "Kd 1.0 1.0 1.0\n";
+            mtl += "Ks 0.0 0.0 0.0\n";
+            mtl += "d 1.0\n";
+            mtl += "illum 1\n";
+            mtl += "map_Kd textures/" + fs::path(def.texturePngs[(size_t)vi]).filename().string() + "\n";
+            mtl += "\n";
+        }
+    }
     writeText(mtlPath, mtl);
 
-    std::string obj;
-    obj += "# Myth II unit/monster placeholders\n";
-    obj += "mtllib units.mtl\n\n";
-
-    std::string json;
-    json += "{\n  \"units\": [\n";
-
     int vBase = 1;
+    int vtBase = 1;
     int unitCount = 0;
+    int texturedCount = 0;
     for (size_t ii = 0; ii < instances.size(); ii++) {
         const auto& inst = instances[ii];
         if (inst.markerType != 3) continue;
@@ -1154,9 +1551,6 @@ static bool exportUnitPlaceholders(const std::string& outFolder,
         float cellY = (float)inst.posY / WORLD_ONE;
         float cellZ = (float)inst.posZ / WORLD_ONE;
         float facingDeg = (float)(((double)inst.yaw / 65536.0) * 360.0);
-        float facingRad = (facingDeg - 90.0f) * (float)(PI / 180.0);
-        float cosF = std::cos(facingRad);
-        float sinF = std::sin(facingRad);
 
         float wx = halfW - cellX;
         float wy = cellY - halfH;
@@ -1166,36 +1560,88 @@ static bool exportUnitPlaceholders(const std::string& outFolder,
         snprintf(name, sizeof(name), "%s_%zu", tagToFileStem(t->typeTag).c_str(), ii);
         obj += "o "; obj += name; obj += "\n";
         obj += "g "; obj += name; obj += "\n";
-        obj += "usemtl unit_placeholder\n";
 
-        // Simple standing marker: a small diamond footprint plus a facing spike.
-        const float r = 0.35f;
-        const float h = 1.8f;
-        auto emitVertex = [&](float lx, float ly, float lz) {
-            float rx = cosF * lx - sinF * ly;
-            float ry = sinF * lx + cosF * ly;
-            char buf[128];
-            snprintf(buf, sizeof(buf), "v %.6f %.6f %.6f\n", wx + rx, wz + lz, wy + ry);
+        auto dit = spriteDefs.find(t->typeTag);
+        const UnitSpriteDef* def = dit == spriteDefs.end() ? nullptr : &dit->second;
+        bool textured = def && def->textured && def->viewCount > 0;
+        int viewIndex = 0;
+        if (textured) {
+            viewIndex = (int)std::floor(((double)facingDeg / 360.0) * def->viewCount + 0.5);
+            viewIndex %= def->viewCount;
+            if (viewIndex < 0) viewIndex += def->viewCount;
+            if (def->texturePngs[(size_t)viewIndex].empty()) {
+                int fallbackView = -1;
+                for (int vi = 0; vi < def->viewCount; vi++) {
+                    if (!def->texturePngs[(size_t)vi].empty()) {
+                        fallbackView = vi;
+                        break;
+                    }
+                }
+                if (fallbackView >= 0) viewIndex = fallbackView;
+                else textured = false;
+            }
+        }
+        if (textured) {
+            obj += "usemtl " + tagToFileStem(t->typeTag) + "_unit_"
+                 + std::to_string(viewIndex) + "_sprite\n";
+
+            float cardW = std::max(0.25f, (float)def->width / 64.0f);
+            float cardH = std::max(0.25f, (float)def->height / 64.0f);
+            float x0 = wx - cardW * 0.5f;
+            float x1 = wx + cardW * 0.5f;
+            float z0 = wz;
+            float z1 = wz + cardH;
+            char buf[512];
+            snprintf(buf, sizeof(buf),
+                     "v %.6f %.6f %.6f\nv %.6f %.6f %.6f\n"
+                     "v %.6f %.6f %.6f\nv %.6f %.6f %.6f\n",
+                     x0, z0, wy, x1, z0, wy, x1, z1, wy, x0, z1, wy);
             obj += buf;
-        };
+            obj += "vt 0.000000 0.000000\nvt 1.000000 0.000000\n";
+            obj += "vt 1.000000 1.000000\nvt 0.000000 1.000000\n";
+            char fbuf[128];
+            snprintf(fbuf, sizeof(fbuf), "f %d/%d %d/%d %d/%d %d/%d\n\n",
+                     vBase, vtBase, vBase+1, vtBase+1,
+                     vBase+2, vtBase+2, vBase+3, vtBase+3);
+            obj += fbuf;
+            vBase += 4;
+            vtBase += 4;
+            texturedCount++;
+        } else {
+            obj += "usemtl unit_placeholder\n";
+            float facingRad = (facingDeg - 90.0f) * (float)(PI / 180.0);
+            float cosF = std::cos(facingRad);
+            float sinF = std::sin(facingRad);
 
-        emitVertex(0.0f, 0.0f, h);      // top
-        emitVertex(-r, 0.0f, 0.0f);     // left
-        emitVertex(0.0f, r, 0.0f);      // front
-        emitVertex(r, 0.0f, 0.0f);      // right
-        emitVertex(0.0f, -r, 0.0f);     // back
-        emitVertex(0.0f, r * 1.9f, h * 0.55f); // facing spike
+            // Simple standing marker: a small diamond footprint plus a facing spike.
+            const float r = 0.35f;
+            const float h = 1.8f;
+            auto emitVertex = [&](float lx, float ly, float lz) {
+                float rx = cosF * lx - sinF * ly;
+                float ry = sinF * lx + cosF * ly;
+                char buf[128];
+                snprintf(buf, sizeof(buf), "v %.6f %.6f %.6f\n", wx + rx, wz + lz, wy + ry);
+                obj += buf;
+            };
 
-        char fbuf[256];
-        snprintf(fbuf, sizeof(fbuf),
-                 "f %d %d %d\nf %d %d %d\nf %d %d %d\nf %d %d %d\nf %d %d %d\n\n",
-                 vBase, vBase+1, vBase+2,
-                 vBase, vBase+2, vBase+3,
-                 vBase, vBase+3, vBase+4,
-                 vBase, vBase+4, vBase+1,
-                 vBase, vBase+2, vBase+5);
-        obj += fbuf;
-        vBase += 6;
+            emitVertex(0.0f, 0.0f, h);      // top
+            emitVertex(-r, 0.0f, 0.0f);     // left
+            emitVertex(0.0f, r, 0.0f);      // front
+            emitVertex(r, 0.0f, 0.0f);      // right
+            emitVertex(0.0f, -r, 0.0f);     // back
+            emitVertex(0.0f, r * 1.9f, h * 0.55f); // facing spike
+
+            char fbuf[256];
+            snprintf(fbuf, sizeof(fbuf),
+                     "f %d %d %d\nf %d %d %d\nf %d %d %d\nf %d %d %d\nf %d %d %d\n\n",
+                     vBase, vBase+1, vBase+2,
+                     vBase, vBase+2, vBase+3,
+                     vBase, vBase+3, vBase+4,
+                     vBase, vBase+4, vBase+1,
+                     vBase, vBase+2, vBase+5);
+            obj += fbuf;
+            vBase += 6;
+        }
 
         if (unitCount) json += ",\n";
         json += "    {\"tag\": ";
@@ -1203,8 +1649,14 @@ static bool exportUnitPlaceholders(const std::string& outFolder,
         char jbuf[256];
         snprintf(jbuf, sizeof(jbuf),
                  ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
-                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu}",
-                 cellX, cellY, cellZ, facingDeg, (int)inst.paletteIdx, ii);
+                 ", \"facing_deg\": %.4f, \"sequence\": %d"
+                 ", \"view\": %d, \"textured\": %s"
+                 ", \"pal_idx\": %d, \"marker_idx\": %zu}",
+                 cellX, cellY, cellZ, facingDeg,
+                 textured ? def->sequenceIndex : -1,
+                 textured ? viewIndex : -1,
+                 textured ? "true" : "false",
+                 (int)inst.paletteIdx, ii);
         json += jbuf;
         unitCount++;
     }
@@ -1217,7 +1669,8 @@ static bool exportUnitPlaceholders(const std::string& outFolder,
     bool okObj = writeText(objPath, obj);
     bool okJson = writeText(jsonPath, json);
     if (okObj)
-        printf("Unit placeholders: %s (%d units)\n", objPath.c_str(), unitCount);
+        printf("Unit sprites:      %s (%d units, %d textured)\n",
+               objPath.c_str(), unitCount, texturedCount);
     if (okJson)
         printf("Unit placement:    %s\n", jsonPath.c_str());
     return okObj && okJson;
@@ -1226,7 +1679,9 @@ static bool exportUnitPlaceholders(const std::string& outFolder,
 static bool exportSoundPlaceholders(const std::string& outFolder,
                                     const MeshHeader& mh,
                                     const std::vector<ObjectInstance>& instances,
-                                    const std::map<int16_t, std::vector<const UnitType*>>& typeRelIdx) {
+                                    const std::map<int16_t, std::vector<const UnitType*>>& typeRelIdx,
+                                    const std::vector<TagEntry>& tags,
+                                    bool overwriteSounds) {
     auto itTR = typeRelIdx.find(5);
     if (itTR == typeRelIdx.end() || itTR->second.empty())
         return false;
@@ -1234,9 +1689,9 @@ static bool exportSoundPlaceholders(const std::string& outFolder,
     const float halfW = (float)(mh.submeshW * 32) * 0.5f;
     const float halfH = (float)(mh.submeshH * 32) * 0.5f;
 
-    std::string objPath = outFolder + "/models/sounds.obj";
-    std::string mtlPath = outFolder + "/models/sounds.mtl";
-    std::string jsonPath = outFolder + "/models/sounds.json";
+    std::string objPath = outFolder + "/assets/sounds/sounds.obj";
+    std::string mtlPath = outFolder + "/assets/sounds/sounds.mtl";
+    std::string jsonPath = outFolder + "/assets/sounds/sounds.json";
 
     std::string mtl;
     mtl += "newmtl sound_placeholder\n";
@@ -1255,6 +1710,8 @@ static bool exportSoundPlaceholders(const std::string& outFolder,
 
     int vBase = 1;
     int soundCount = 0;
+    int extractedSoundCount = 0;
+    std::map<uint32_t, std::vector<SoundPermutationExport>> extractedByTag;
     for (size_t ii = 0; ii < instances.size(); ii++) {
         const auto& inst = instances[ii];
         if (inst.markerType != 5) continue;
@@ -1273,6 +1730,14 @@ static bool exportSoundPlaceholders(const std::string& outFolder,
         float wx = halfW - cellX;
         float wy = cellY - halfH;
         float wz = cellZ;
+
+        auto exIt = extractedByTag.find(t->typeTag);
+        if (exIt == extractedByTag.end()) {
+            std::vector<SoundPermutationExport> perms;
+            exportSoundTagWavs(tags, t->typeTag, outFolder, overwriteSounds, perms);
+            exIt = extractedByTag.emplace(t->typeTag, std::move(perms)).first;
+            extractedSoundCount += (int)exIt->second.size();
+        }
 
         char name[128];
         snprintf(name, sizeof(name), "%s_%zu", tagToFileStem(t->typeTag).c_str(), ii);
@@ -1316,9 +1781,20 @@ static bool exportSoundPlaceholders(const std::string& outFolder,
         char jbuf[256];
         snprintf(jbuf, sizeof(jbuf),
                  ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
-                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu}",
-                 cellX, cellY, cellZ, facingDeg, (int)inst.paletteIdx, ii);
+                 ", \"obj_x\": %.4f, \"obj_y\": %.4f, \"obj_z\": %.4f"
+                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu",
+                 cellX, cellY, cellZ, wx, wz, wy, facingDeg, (int)inst.paletteIdx, ii);
         json += jbuf;
+        json += ", \"audio\": [";
+        for (size_t ai = 0; ai < exIt->second.size(); ai++) {
+            if (ai) json += ", ";
+            json += "{\"name\": ";
+            appendJsonString(json, exIt->second[ai].name);
+            json += ", \"path\": ";
+            appendJsonString(json, exIt->second[ai].relativePath);
+            json += "}";
+        }
+        json += "]}";
         soundCount++;
     }
 
@@ -1333,6 +1809,9 @@ static bool exportSoundPlaceholders(const std::string& outFolder,
         printf("Sound placeholders: %s (%d sounds)\n", objPath.c_str(), soundCount);
     if (okJson)
         printf("Sound placement:    %s\n", jsonPath.c_str());
+    if (extractedSoundCount > 0)
+        printf("Sound WAVs:         %s/assets/sounds/wav (%d permutations)\n",
+               outFolder.c_str(), extractedSoundCount);
     return okObj && okJson;
 }
 
@@ -1375,7 +1854,7 @@ static ScenerySpriteDef resolveScenerySprite(const std::string& outFolder,
     std::vector<uint8_t> collData;
     if (!readTagData(*collEntry, collData)) return def;
 
-    std::string texDir = outFolder + "/models/textures";
+    std::string texDir = outFolder + "/assets/sprites/textures";
     makeDirs(texDir);
     std::string pngName = tagToFileStem(typeTag) + "_sprite.png";
     std::string pngPath = texDir + "/" + pngName;
@@ -1412,9 +1891,9 @@ static bool exportSceneryPlaceholders(const std::string& outFolder,
     const float halfW = (float)(mh.submeshW * 32) * 0.5f;
     const float halfH = (float)(mh.submeshH * 32) * 0.5f;
 
-    std::string objPath = outFolder + "/models/scenery.obj";
-    std::string mtlPath = outFolder + "/models/scenery.mtl";
-    std::string jsonPath = outFolder + "/models/scenery.json";
+    std::string objPath = outFolder + "/assets/sprites/scenery.obj";
+    std::string mtlPath = outFolder + "/assets/sprites/scenery.mtl";
+    std::string jsonPath = outFolder + "/assets/sprites/scenery.json";
 
     std::string obj;
     obj += "# Myth II sprite scenery billboards\n";
@@ -1579,9 +2058,9 @@ static bool exportProjectilePlaceholders(const std::string& outFolder,
     const float halfW = (float)(mh.submeshW * 32) * 0.5f;
     const float halfH = (float)(mh.submeshH * 32) * 0.5f;
 
-    std::string objPath = outFolder + "/models/projectiles.obj";
-    std::string mtlPath = outFolder + "/models/projectiles.mtl";
-    std::string jsonPath = outFolder + "/models/projectiles.json";
+    std::string objPath = outFolder + "/assets/models/projectiles.obj";
+    std::string mtlPath = outFolder + "/assets/models/projectiles.mtl";
+    std::string jsonPath = outFolder + "/assets/models/projectiles.json";
 
     std::string mtl;
     mtl += "newmtl projectile_placeholder\n";
@@ -1694,18 +2173,18 @@ static void usage(const char* p) {
         "  tags_folder    folder containing Myth II tag files (e.g. 'small install')\n"
         "  out_folder     extracted map folder (e.g. out/le3e, must contain raw/mesh_tag.bin)\n"
         "  terrain.obj    terrain OBJ to inline into map_combined.obj\n"
-        "                 (auto-detected from models/displacement.obj if present)\n"
+        "                 (auto-detected from assets/models/displacement.obj if present)\n"
         "  --world-space  per-instance OBJs use world (map) coordinates instead of local origin\n\n"
-        "  --overwrite    regenerate existing models/textures/*.png files\n\n"
+        "  --overwrite    regenerate existing asset texture/audio files\n\n"
         "  --animation-frame first|none|all\n"
         "                 animation frames to include in map_combined.obj (default: first)\n\n"
         "Output:\n"
-        "  <out_folder>/models/<tag>.obj      per-type geometry (local origin)\n"
-        "  <out_folder>/models/<tag>.mtl\n"
-        "  <out_folder>/models/<tag>_<N>.obj  per-instance geometry\n"
-        "  <out_folder>/models/<tag>_<N>.mtl\n"
-        "  <out_folder>/models/<anim>_<N>_frame##_*.obj  model-animation frames\n"
-        "  <out_folder>/models/animations.json  model-animation frame manifest\n"
+        "  <out_folder>/assets/models/<tag>.obj      per-type geometry (local origin)\n"
+        "  <out_folder>/assets/models/<tag>.mtl\n"
+        "  <out_folder>/assets/models/<tag>_<N>.obj  per-instance geometry\n"
+        "  <out_folder>/assets/models/<tag>_<N>.mtl\n"
+        "  <out_folder>/assets/models/<anim>_<N>_frame##_*.obj  model-animation frames\n"
+        "  <out_folder>/assets/models/animations.json  model-animation frame manifest\n"
         "  <out_folder>/placement.json        all scenery instance placements\n",
         p);
 }
@@ -1748,9 +2227,9 @@ int main(int argc, char* argv[]) {
     while (!outFolder.empty() && (outFolder.back()=='/'||outFolder.back()=='\\'))
         outFolder.pop_back();
 
-    // Auto-detect terrain OBJ from models/ if not specified on command line
+    // Auto-detect terrain OBJ from assets/models/ if not specified on command line
     if (terrainObjPath.empty()) {
-        std::string candidate = outFolder + "/models/displacement.obj";
+        std::string candidate = outFolder + "/assets/models/displacement.obj";
         if (fs::exists(candidate))
             terrainObjPath = candidate;
     }
@@ -1876,7 +2355,9 @@ int main(int argc, char* argv[]) {
     // Use float division for smooth placement: cellX = posX / WORLD_ONE.
 
     // Create output directories
-    makeDirs(outFolder+"/models");
+    makeDirs(outFolder + "/assets/models");
+    makeDirs(outFolder + "/assets/sprites");
+    makeDirs(outFolder + "/assets/sounds");
 
     // ---- Export 3D models per scenery type ----
     std::set<uint32_t> exportedTypes;
@@ -1969,7 +2450,7 @@ int main(int argc, char* argv[]) {
             g.collectionRefTag = collEntry->subgroupTag;
             std::vector<uint8_t> collData;
             if (readTagData(*collEntry, collData)) {
-                std::string texDir = outFolder + "/models/textures";
+                std::string texDir = outFolder + "/assets/models/textures";
                 makeDirs(texDir);
                 std::string collStr = tagToFileStem(g.collectionRefTag);
                 for (auto& mat: g.materials) {
@@ -1999,8 +2480,8 @@ int main(int argc, char* argv[]) {
             if (ok) validTris++;
         }
 
-        std::string objPath = outFolder+"/models/"+tagFile+".obj";
-        std::string mtlPath = outFolder+"/models/"+tagFile+".mtl";
+        std::string objPath = outFolder+"/assets/models/"+tagFile+".obj";
+        std::string mtlPath = outFolder+"/assets/models/"+tagFile+".mtl";
 
         bool ok = exportOBJ(objPath, mtlPath, tagStr, g);
         std::string collNote = tagToString(g.collectionRefTag);
@@ -2088,11 +2569,11 @@ int main(int argc, char* argv[]) {
             if (cit != collCache.end()) {
                 const std::vector<uint8_t>& collData = cit->second;
                 std::string collStr = tagToFileStem(g.collectionRefTag);
-                std::string texDir = outFolder + "/models/textures";
+                std::string texDir = outFolder + "/assets/models/textures";
                 int perm = (int)inst.permutationIndex;
 
-                std::string instObjPath = outFolder + "/models/" + tagFile + "_" + std::to_string(ii) + ".obj";
-                std::string instMtlPath = outFolder + "/models/" + tagFile + "_" + std::to_string(ii) + ".mtl";
+                std::string instObjPath = outFolder + "/assets/models/" + tagFile + "_" + std::to_string(ii) + ".obj";
+                std::string instMtlPath = outFolder + "/assets/models/" + tagFile + "_" + std::to_string(ii) + ".mtl";
 
                 // Build a copy of the geometry with per-permutation texture paths.
                 // Look up view index per material from the mode tag permutation table.
@@ -2294,14 +2775,14 @@ int main(int argc, char* argv[]) {
                     std::string pngName = tagToFileStem(frameGeom.collectionRefTag) + "_"
                                         + std::to_string(mat.sequenceIndex) + "_"
                                         + std::to_string(vi) + ".png";
-                    std::string pngPath = outFolder + "/models/textures/" + pngName;
+                    std::string pngPath = outFolder + "/assets/models/textures/" + pngName;
                     mat.texturePng = fs::exists(pngPath) ? pngPath : "";
                 }
                 permTexPngs.push_back(mat.texturePng);
             }
 
-            exportOBJ(outFolder + "/models/" + stem + ".obj",
-                      outFolder + "/models/" + stem + ".mtl",
+            exportOBJ(outFolder + "/assets/models/" + stem + ".obj",
+                      outFolder + "/assets/models/" + stem + ".mtl",
                       animStr + "_" + frameTagStr,
                       frameGeom,
                       worldSpace ? &wt : nullptr,
@@ -2339,20 +2820,20 @@ int main(int argc, char* argv[]) {
         printf("Placement written: %s\n", placePath.c_str());
 
     if (!firstAnimManifest) {
-        std::string animPath = outFolder + "/models/animations.json";
+        std::string animPath = outFolder + "/assets/models/animations.json";
         if (writeText(animPath, animationsJson))
             printf("Animations written: %s\n", animPath.c_str());
     }
 
-    exportUnitPlaceholders(outFolder, mh, instances, typeRelIdx);
-    exportSoundPlaceholders(outFolder, mh, instances, typeRelIdx);
+    exportUnitPlaceholders(outFolder, mh, instances, typeRelIdx, tags, overwriteTextures);
+    exportSoundPlaceholders(outFolder, mh, instances, typeRelIdx, tags, overwriteTextures);
     exportSceneryPlaceholders(outFolder, mh, instances, typeRelIdx, tags, overwriteTextures);
     exportProjectilePlaceholders(outFolder, mh, instances, typeRelIdx);
 
     // ---- Write combined map OBJ ----
     if (!placedInstances.empty()) {
-        std::string combinedObj = outFolder+"/models/map_combined.obj";
-        std::string combinedMtl = outFolder+"/models/map_combined.mtl";
+        std::string combinedObj = outFolder+"/assets/models/map_combined.obj";
+        std::string combinedMtl = outFolder+"/assets/models/map_combined.mtl";
         if (exportCombinedOBJ(combinedObj, combinedMtl, placedInstances, terrainObjPath))
             printf("Combined map:    %s (%zu instances%s)\n",
                    combinedObj.c_str(), placedInstances.size(),

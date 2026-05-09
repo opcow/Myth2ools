@@ -96,9 +96,9 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 
 - `--edit` reapplies edited assets from the extracted folder before packing.
 - `--obj` imports Myth II terrain displacement from an OBJ into `raw/mesh_tag.bin`.
-- If `--obj` is omitted, `build_plugin --edit` auto-detects `<folder>/models/displacement.obj`, then `<folder>/displacement.obj`.
+- If `--obj` is omitted, `build_plugin --edit` auto-detects `<folder>/assets/models/displacement.obj`.
 - `--water-obj` imports Myth II water-surface heights from an OBJ into wet cells' `media_height`.
-- If `--water-obj` is omitted, `build_plugin --edit` auto-detects `<folder>/models/water.obj`, then `<folder>/water.obj`, then the old `<folder>/<mesh_tag>_water.obj` name.
+- If `--water-obj` is omitted, `build_plugin --edit` auto-detects `<folder>/assets/models/water.obj`.
 - When a water OBJ is imported, `terrain/water.bmp` is not imported.
 - During `--edit`, `terrain/water.bmp` is safely reapplied by default as flags/types only.
 - `--water` experimentally imports `terrain/water.bmp` with media-height changes as well.
@@ -157,18 +157,20 @@ export_models <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwr
 Extracts 3D scenery models and placement data from an extracted Myth II mesh tag
 (`raw/mesh_tag.bin`). For each scenery type that has a `geom` tag, it writes:
 
-- `models/<tag>.obj` + `.mtl` — per-type geometry with UV coordinates
-- `models/map_combined.obj` + `.mtl` — all scenery instances placed at their
+- `assets/models/<tag>.obj` + `.mtl` — per-type geometry with UV coordinates
+- `assets/models/map_combined.obj` + `.mtl` — all scenery instances placed at their
   correct map positions and orientations, ready to import into Blender
-- `models/animations.json` plus `models/<anim>_<N>_frame##_*.obj` — model
+- `assets/models/animations.json` plus `assets/models/<anim>_<N>_frame##_*.obj` — model
   animation manifests and frame OBJs for animated map objects such as gates
-- `models/scenery.obj` plus `models/scenery.json` — textured crossed billboards
+- `assets/sprites/scenery.obj` plus `assets/sprites/scenery.json` — textured crossed billboards
   and coordinates for sprite-based scenery markers when present
-- `models/units.obj` plus `models/units.json` — simple placeholders and
+- `assets/sprites/units.obj` plus `assets/sprites/units.json` — textured billboards and
   coordinates for sprite-based monster/unit markers when present
-- `models/sounds.obj` plus `models/sounds.json` — simple placeholders and
-  coordinates for placed sound markers when present
-- `models/projectiles.obj` plus `models/projectiles.json` — simple placeholders
+- `assets/sounds/sounds.obj` plus `assets/sounds/sounds.json` — simple placeholders,
+  coordinates, and WAV references for placed sound markers when present
+- `assets/sounds/wav/*.wav` — decoded 16-bit PCM WAV files for placed `soun`
+  tag permutations
+- `assets/models/projectiles.obj` plus `assets/models/projectiles.json` — simple placeholders
   and coordinates for placed projectile markers when present
 - `placement.json` — all instance positions (cell coords) and facing angles
 
@@ -178,7 +180,7 @@ as a separate named object (`o terrain`), giving a single file with both the
 terrain surface and all placed scenery.
 
 To preview model animations in Blender, run `tools/import_animations.py`
-from Blender's Text Editor and choose the map's `models/animations.json`. The
+from Blender's Text Editor and choose the map's `assets/models/animations.json`. The
 file picker includes options to import `map_combined.obj`, replace a prior
 `myth2_animations` collection, and hide static animation snapshots. Use
 `--animation-frame none` when extracting if you want `map_combined.obj` to omit
@@ -214,14 +216,22 @@ or:
 ./create_blend.sh out/le3e
 ```
 
-The Blender importer uses `models/map_combined.obj` when present. If that OBJ
-already contains the terrain object, it will not import `models/displacement.obj`
-a second time. `models/water.obj` and `models/animations.json` are imported when
-present. `models/units.obj` is also imported when present.
-`models/sounds.obj` is imported into a tag-grouped `sounds` collection when
-present. `models/scenery.obj` is imported into a tag-grouped `scenery`
-collection when present, with sprite material transparency enabled.
-`models/projectiles.obj` is imported into a tag-grouped `projectiles`
+The Blender importer uses `assets/models/map_combined.obj` when present. If that
+OBJ already contains the terrain object, it will not import
+`assets/models/displacement.obj` a second time. `assets/models/water.obj` and
+`assets/models/animations.json` are imported when present.
+`assets/sprites/units.obj` is also imported when present.
+`assets/sounds/sounds.obj` is imported into a tag-grouped `sounds` collection
+when present. When `assets/sounds/sounds.json` references extracted WAV files, Blender
+speaker objects are also added at the sound marker locations. These speakers
+are muted by default so timeline playback does not trigger every map sound at
+once. Blender may disable embedded scripts when the `.blend` opens; allow script
+execution or run the embedded `myth2_sound_tools.py` text block manually. Then
+select a speaker and use the `Myth II` tab in the 3D View sidebar, or press F3
+and choose `Myth II: Play Selected Sound`.
+`assets/sprites/scenery.obj` is imported into a tag-grouped `scenery` collection when
+present, with sprite material transparency enabled.
+`assets/models/projectiles.obj` is imported into a tag-grouped `projectiles`
 collection when present.
 
 ```bash
@@ -232,7 +242,7 @@ export_models myth2_tags out/le3e
 build_plugin out/le3e out/le3e_plugin --edit
 ```
 
-`export_mesh` and `export_water_mesh` write their default OBJs into `models/`.
+`export_mesh` and `export_water_mesh` write their default OBJs into `assets/models/`.
 Their MTL files reference PNG textures copied from `layers/`. During `--edit`,
 `build_plugin` auto-detects those OBJ files and uses them for terrain and
 water-surface geometry.
@@ -383,6 +393,10 @@ single image-space cleanup pass to reduce isolated jagged triangle spikes.
   `mesh` tag and its referenced assets rather than relying on hard-coded offsets.
 - Image outputs use standard BMP files as editable containers. The games store
   palette-indexed image data internally.
+- See `Doc/sprite_storage.md` for the current `.256` sprite/bitmap decoding
+  notes.
+- See `Doc/sound_storage.md` for the current `soun` tag and WAV extraction
+  notes.
 
 ## Building
 

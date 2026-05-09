@@ -413,7 +413,7 @@ static void usage(const char* p) {
         "  %s <tag_folder> [output.obj] [heightscale]\n\n"
         "Arguments:\n"
         "  tag_folder    Extracted Myth II map folder from extract\n"
-        "  output.obj    Output OBJ path (default: <tag_folder>/models/water.obj)\n"
+        "  output.obj    Output OBJ path (default: <tag_folder>/assets/models/water.obj)\n"
         "  heightscale   Vertical scale multiplier (default: 1/512)\n\n"
         "Example:\n"
         "  %s 85gy\n"
@@ -430,7 +430,7 @@ int main(int argc, char** argv) {
     std::string folder = argv[1];
     float heightScale = argc >= 4 ? (float)atof(argv[3]) : (1.0f / 512.0f);
 
-    std::string objPath = argc >= 3 ? argv[2] : (folder + "/models/water.obj");
+    std::string objPath = argc >= 3 ? argv[2] : (folder + "/assets/models/water.obj");
     std::error_code ec;
     fs::create_directories(fs::path(objPath).parent_path(), ec);
 

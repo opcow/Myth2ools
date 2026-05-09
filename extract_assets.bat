@@ -72,7 +72,7 @@ echo Exporting water mesh...
 if errorlevel 1 exit /b 1
 
 echo Exporting scenery models...
-"%BIN_DIR%export_models.exe" "%TAGS_FOLDER%" "%OUT_FOLDER%" "%OUT_FOLDER%\models\displacement.obj" %MODEL_ARGS%
+"%BIN_DIR%export_models.exe" "%TAGS_FOLDER%" "%OUT_FOLDER%" "%OUT_FOLDER%\assets\models\displacement.obj" %MODEL_ARGS%
 if errorlevel 1 exit /b 1
 
 echo Done. Output written to "%OUT_FOLDER%".
