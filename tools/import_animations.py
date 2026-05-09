@@ -11,6 +11,7 @@ import math
 from pathlib import Path
 
 import bpy
+from mathutils import Matrix
 from bpy.props import BoolProperty, IntProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper
 
@@ -75,9 +76,17 @@ def place_object(obj, anim, manifest):
     cell_y = float(anim["y"])
     cell_z = float(anim["z"])
     facing_deg = float(anim["facing_deg"])
+    facing_rad = math.radians(facing_deg - 90.0)
 
-    obj.location = (half_w - cell_x, cell_z, cell_y - half_h)
-    obj.rotation_euler = (0.0, -math.radians(facing_deg - 90.0), 0.0)
+    # Match export_models.cpp's map_combined.obj placement transform. Bake the
+    # placement into the mesh and reset the object transform, so animated frame
+    # OBJs have the same world-space vertex layout as map_combined.obj.
+    placement = (
+        Matrix.Translation((half_w - cell_x, cell_z, cell_y - half_h))
+        @ Matrix.Rotation(-facing_rad, 4, "Y")
+    )
+    obj.data.transform(placement)
+    obj.matrix_world = Matrix.Identity(4)
 
 
 def hide_static_snapshot(anim):
@@ -152,7 +161,8 @@ def import_animations(manifest_path, frame_scale, replace_existing, import_map, 
             end = start + frame_duration
             set_visible(obj, False, 1)
             set_visible(obj, True, start)
-            set_visible(obj, False, end)
+            if index + 1 < frame_count:
+                set_visible(obj, False, end)
 
     scene.frame_end = max(scene.frame_end, last_frame)
     scene.frame_set(1)

@@ -193,6 +193,24 @@ On Linux/macOS, use the Bash version:
 
 It runs `extract_map`, `export_mesh`, `export_water_mesh`, and `export_models`.
 
+To create a Blender scene from an extracted/exported map folder, set
+`BLENDER_PATH` or put Blender's executable path in `blender_path.txt`, then run:
+
+```bat
+create_blend.bat out\le3e
+```
+
+or:
+
+```bash
+./create_blend.sh out/le3e
+```
+
+The Blender importer uses `models/map_combined.obj` when present. If that OBJ
+already contains the terrain object, it will not import `models/displacement.obj`
+a second time. `models/water.obj` and `models/animations.json` are imported when
+present.
+
 ```bash
 extract_map myth2_tags le3e --out out/le3e
 export_mesh out/le3e

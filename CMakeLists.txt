@@ -114,15 +114,37 @@ foreach(target IN LISTS RELEASE_TARGETS)
 endforeach()
 if(WIN32)
     list(APPEND PACKAGE_COPY_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${PACKAGE_STAGING_DIR}/tools"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_SOURCE_DIR}/extract_assets.bat"
             "${PACKAGE_STAGING_DIR}/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/create_blend.bat"
+            "${PACKAGE_STAGING_DIR}/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/tools/create_blend.py"
+            "${PACKAGE_STAGING_DIR}/tools/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/tools/import_animations.py"
+            "${PACKAGE_STAGING_DIR}/tools/"
     )
 else()
     list(APPEND PACKAGE_COPY_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${PACKAGE_STAGING_DIR}/tools"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_SOURCE_DIR}/extract_assets.sh"
             "${PACKAGE_STAGING_DIR}/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/create_blend.sh"
+            "${PACKAGE_STAGING_DIR}/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/tools/create_blend.py"
+            "${PACKAGE_STAGING_DIR}/tools/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/tools/import_animations.py"
+            "${PACKAGE_STAGING_DIR}/tools/"
     )
 endif()
 

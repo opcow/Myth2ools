@@ -502,6 +502,10 @@ struct Geometry {
     std::vector<GeomSurface> surfaces;
 };
 
+struct ModelOrigin {
+    float x=0, y=0, z=0;
+};
+
 struct AnimationFrame {
     uint32_t modelTag = 0;
     int16_t permutationIndex = 0;
@@ -627,7 +631,8 @@ struct WorldTransform {
 static bool exportOBJ(const std::string& objPath, const std::string& mtlPath,
                       const std::string& typeTag, const Geometry& g,
                       const WorldTransform* wt = nullptr,
-                      const std::vector<bool>* hiddenMaterials = nullptr) {
+                      const std::vector<bool>* hiddenMaterials = nullptr,
+                      const ModelOrigin* originOverride = nullptr) {
     // Only export surfaces with all valid vertex indices
     // Collect valid triangles
     struct Tri {
@@ -700,10 +705,11 @@ static bool exportOBJ(const std::string& objPath, const std::string& mtlPath,
         obj += fs::path(mtlPath).filename().string();
         obj += "\n\n";
 
+        ModelOrigin origin = originOverride ? *originOverride : ModelOrigin{g.cx, g.cy, g.cz};
         for (const auto& vtx: g.vertices) {
-            float mx = -((vtx.x - g.cx) / WORLD_ONE);
-            float my =   (vtx.y - g.cy) / WORLD_ONE;
-            float mz =   (vtx.z - g.cz) / WORLD_ONE;
+            float mx = -((vtx.x - origin.x) / WORLD_ONE);
+            float my =   (vtx.y - origin.y) / WORLD_ONE;
+            float mz =   (vtx.z - origin.z) / WORLD_ONE;
             float ox, oy, oz;
             if (wt) {
                 float cosF = std::cos(wt->facingRad);
@@ -780,6 +786,7 @@ enum class AnimationFrameMode {
 struct PlacedInstance {
     const Geometry* geom;
     std::string typeTag;
+    ModelOrigin origin;
     float cellX, cellY, cellZ;
     float facingRad;  // rotation around up axis
     float halfW, halfH; // half grid dimensions, for terrain-matching coordinate transform
@@ -937,9 +944,9 @@ static bool exportCombinedOBJ(const std::string& objPath,
         for (const auto& vtx: g.vertices) {
             // Scale from world units to cell units
             // Subtract center to get vertex relative to local origin, then mirror X
-            float mx = -((vtx.x - inst.geom->cx) / WORLD_ONE);
-            float my = (vtx.y - inst.geom->cy) / WORLD_ONE;
-            float mz = (vtx.z - inst.geom->cz) / WORLD_ONE;
+            float mx = -((vtx.x - inst.origin.x) / WORLD_ONE);
+            float my = (vtx.y - inst.origin.y) / WORLD_ONE;
+            float mz = (vtx.z - inst.origin.z) / WORLD_ONE;
             // Rotate around Z (up) by facing angle
             float rx =  cosF * mx - sinF * my;
             float ry =  sinF * mx + cosF * my;
@@ -1454,6 +1461,7 @@ int main(int argc, char* argv[]) {
             PlacedInstance pi;
             pi.geom       = &git->second;
             pi.typeTag    = tagStr;
+            pi.origin     = ModelOrigin{git->second.cx, git->second.cy, git->second.cz};
             pi.cellX      = cellX;
             pi.cellY      = cellY;
             pi.cellZ      = cellZ;
@@ -1540,6 +1548,16 @@ int main(int argc, char* argv[]) {
         wt.halfW     = (float)(mh.submeshW * 32) * 0.5f;
         wt.halfH     = (float)(mh.submeshH * 32) * 0.5f;
 
+        ModelOrigin animOrigin;
+        bool haveAnimOrigin = false;
+        if (!anim.frames.empty()) {
+            auto firstGeom = geomCache.find(anim.frames[0].modelTag);
+            if (firstGeom != geomCache.end()) {
+                animOrigin = ModelOrigin{firstGeom->second.cx, firstGeom->second.cy, firstGeom->second.cz};
+                haveAnimOrigin = true;
+            }
+        }
+
         for (size_t fi = 0; fi < anim.frames.size(); fi++) {
             const AnimationFrame& frame = anim.frames[fi];
             std::string frameTagStr = tagToString(frame.modelTag);
@@ -1610,7 +1628,8 @@ int main(int argc, char* argv[]) {
                       animStr + "_" + frameTagStr,
                       frameGeom,
                       worldSpace ? &wt : nullptr,
-                      &hiddenMaterials);
+                      &hiddenMaterials,
+                      haveAnimOrigin ? &animOrigin : nullptr);
 
             bool includeInCombined =
                 animationFrameMode == AnimationFrameMode::All ||
@@ -1619,6 +1638,7 @@ int main(int argc, char* argv[]) {
                 PlacedInstance pi;
                 pi.geom       = &git->second;
                 pi.typeTag    = animStr + "_" + frameTagStr;
+                pi.origin     = haveAnimOrigin ? animOrigin : ModelOrigin{git->second.cx, git->second.cy, git->second.cz};
                 pi.cellX      = cellX;
                 pi.cellY      = cellY;
                 pi.cellZ      = cellZ;
