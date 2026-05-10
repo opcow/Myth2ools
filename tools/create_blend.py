@@ -14,12 +14,16 @@ import sys
 from pathlib import Path
 
 import bpy
+from mathutils import Matrix, Vector
 
 ROOT_COLLECTION = "myth2"
 
 SOUND_HELPER_TEXT = r'''
 import bpy
 import aud
+import json
+import re
+from pathlib import Path
 from mathutils import Vector
 
 _myth2_sound_device = None
@@ -75,6 +79,44 @@ def _world_bounds_min_z(obj):
     return obj.location.z
 
 
+def _iter_unit_objects():
+    for obj in bpy.context.scene.objects:
+        if obj.get("myth2_asset_kind") == "unit":
+            yield obj
+
+
+def _iter_asset_objects(kind):
+    for obj in bpy.context.scene.objects:
+        if obj.get("myth2_asset_kind") == kind:
+            yield obj
+
+
+def _unit_output_path(context):
+    active = context.object
+    if active and active.get("myth2_map_folder"):
+        base = Path(active["myth2_map_folder"])
+    else:
+        base = Path(bpy.path.abspath("//"))
+    return base / "assets" / "sprites" / "units_edited.json"
+
+
+def _map_folder_for_context(context):
+    active = context.object
+    if active and active.get("myth2_map_folder"):
+        return Path(active["myth2_map_folder"])
+    return Path(bpy.path.abspath("//"))
+
+
+def _marker_cell_position(obj):
+    dx = float(obj.location.x) - float(obj.get("myth2_origin_x", 0.0))
+    dy = float(obj.location.y) - float(obj.get("myth2_origin_y", 0.0))
+    dz = float(obj.location.z) - float(obj.get("myth2_origin_z", 0.0))
+    x = float(obj.get("myth2_cell_x", 0.0)) - dx
+    y = float(obj.get("myth2_cell_y", 0.0)) - dy
+    z = float(obj.get("myth2_cell_z", 0.0)) + dz
+    return x, y, z
+
+
 class MYTH2_OT_play_selected_sound(bpy.types.Operator):
     bl_idname = "myth2.play_selected_sound"
     bl_label = "Myth II: Play Selected Sound"
@@ -108,6 +150,164 @@ class MYTH2_OT_stop_selected_sound(bpy.types.Operator):
         if _myth2_sound_handle:
             _myth2_sound_handle.stop()
             _myth2_sound_handle = None
+        return {"FINISHED"}
+
+
+class MYTH2_OT_export_unit_placements(bpy.types.Operator):
+    bl_idname = "myth2.export_unit_placements"
+    bl_label = "Myth II: Export Unit Placements"
+    bl_description = "Write moved unit sprite marker positions for build_plugin --edit"
+    bl_options = {"REGISTER"}
+
+    selected_only: bpy.props.BoolProperty(
+        name="Selected Only",
+        default=False,
+    )
+
+    def execute(self, context):
+        objects = list(context.selected_objects) if self.selected_only else list(_iter_unit_objects())
+        units = []
+        for obj in objects:
+            if obj.get("myth2_asset_kind") != "unit":
+                continue
+            marker_idx = obj.get("myth2_marker_idx")
+            if marker_idx is None:
+                continue
+            x, y, z = _marker_cell_position(obj)
+            entry = {
+                "tag": obj.get("myth2_tag", ""),
+                "x": round(x, 4),
+                "y": round(y, 4),
+                "z": round(z, 4),
+                "facing_deg": round(float(obj.get("myth2_facing_deg", 0.0)), 4),
+            }
+            if obj.get("myth2_new_unit") or re.search(r"\.\d{3}$", obj.name):
+                entry["add"] = True
+                entry["source_marker_idx"] = int(marker_idx)
+            else:
+                entry["marker_idx"] = int(marker_idx)
+            units.append(entry)
+
+        if not units:
+            self.report({"WARNING"}, "No unit sprite marker objects found")
+            return {"CANCELLED"}
+
+        out_path = _unit_output_path(context)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps({"units": units}, indent=2) + "\n", encoding="utf-8")
+        self.report({"INFO"}, f"Wrote {len(units)} unit placement(s) to {out_path}")
+        return {"FINISHED"}
+
+
+class MYTH2_OT_export_marker_placements(bpy.types.Operator):
+    bl_idname = "myth2.export_marker_placements"
+    bl_label = "Myth II: Export Marker Placements"
+    bl_description = "Write moved Myth II marker positions for build_plugin --edit"
+    bl_options = {"REGISTER"}
+
+    asset_kind: bpy.props.StringProperty(default="scenery")
+    array_name: bpy.props.StringProperty(default="scenery")
+    relative_path: bpy.props.StringProperty(default="assets/sprites/scenery.json")
+    selected_only: bpy.props.BoolProperty(
+        name="Selected Only",
+        default=False,
+    )
+
+    def execute(self, context):
+        objects = list(context.selected_objects) if self.selected_only else list(_iter_asset_objects(self.asset_kind))
+        entries = []
+        for obj in objects:
+            if obj.get("myth2_asset_kind") != self.asset_kind:
+                continue
+            marker_idx = obj.get("myth2_marker_idx")
+            if marker_idx is None:
+                continue
+            x, y, z = _marker_cell_position(obj)
+            entries.append({
+                "tag": obj.get("myth2_tag", ""),
+                "x": round(x, 4),
+                "y": round(y, 4),
+                "z": round(z, 4),
+                "facing_deg": round(float(obj.get("myth2_facing_deg", 0.0)), 4),
+                "marker_idx": int(marker_idx),
+            })
+
+        if not entries:
+            self.report({"WARNING"}, f"No {self.asset_kind} marker objects found")
+            return {"CANCELLED"}
+
+        out_path = _map_folder_for_context(context) / self.relative_path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if out_path.exists():
+            try:
+                data = json.loads(out_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                data = {}
+        existing = data.get(self.array_name, [])
+        if isinstance(existing, list):
+            by_marker = {
+                int(item["marker_idx"]): dict(item)
+                for item in existing
+                if isinstance(item, dict) and "marker_idx" in item
+            }
+            order = [
+                int(item["marker_idx"])
+                for item in existing
+                if isinstance(item, dict) and "marker_idx" in item
+            ]
+            for entry in entries:
+                marker_idx = int(entry["marker_idx"])
+                if marker_idx not in by_marker:
+                    order.append(marker_idx)
+                merged = by_marker.get(marker_idx, {})
+                merged.update(entry)
+                by_marker[marker_idx] = merged
+            data[self.array_name] = [by_marker[idx] for idx in order if idx in by_marker]
+        else:
+            data[self.array_name] = entries
+        out_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        self.report({"INFO"}, f"Wrote {len(entries)} {self.asset_kind} marker placement(s) to {out_path}")
+        return {"FINISHED"}
+
+
+class MYTH2_OT_mark_selected_units_new(bpy.types.Operator):
+    bl_idname = "myth2.mark_selected_units_new"
+    bl_label = "Myth II: Mark Selected Units As New"
+    bl_description = "Export selected duplicated unit sprites as added unit markers"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        changed = 0
+        for obj in context.selected_objects:
+            if obj.get("myth2_asset_kind") != "unit":
+                continue
+            obj["myth2_new_unit"] = True
+            changed += 1
+        if not changed:
+            self.report({"WARNING"}, "No unit sprite marker objects selected")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Marked {changed} unit(s) as new")
+        return {"FINISHED"}
+
+
+class MYTH2_OT_mark_selected_units_existing(bpy.types.Operator):
+    bl_idname = "myth2.mark_selected_units_existing"
+    bl_label = "Myth II: Mark Selected Units As Existing"
+    bl_description = "Export selected unit sprites as edits to their existing markers"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        changed = 0
+        for obj in context.selected_objects:
+            if obj.get("myth2_asset_kind") != "unit":
+                continue
+            obj["myth2_new_unit"] = False
+            changed += 1
+        if not changed:
+            self.report({"WARNING"}, "No unit sprite marker objects selected")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Marked {changed} unit(s) as existing")
         return {"FINISHED"}
 
 
@@ -208,12 +408,113 @@ class MYTH2_PT_terrain_tools(bpy.types.Panel):
         op.offset = 0.0
 
 
+class MYTH2_PT_unit_tools(bpy.types.Panel):
+    bl_label = "Myth II Units"
+    bl_idname = "MYTH2_PT_unit_tools"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Myth II"
+
+    @classmethod
+    def poll(cls, context):
+        return any(True for _obj in _iter_unit_objects())
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator("myth2.export_unit_placements", text="Export All Unit Placements", icon="EXPORT")
+        op = layout.operator("myth2.export_unit_placements", text="Export Selected Unit Placements", icon="RESTRICT_SELECT_OFF")
+        op.selected_only = True
+        layout.separator()
+        layout.operator("myth2.mark_selected_units_new", text="Mark Selected As New", icon="ADD")
+        layout.operator("myth2.mark_selected_units_existing", text="Mark Selected As Existing", icon="CHECKMARK")
+
+
+class MYTH2_PT_scenery_tools(bpy.types.Panel):
+    bl_label = "Myth II Scenery"
+    bl_idname = "MYTH2_PT_scenery_tools"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Myth II"
+
+    @classmethod
+    def poll(cls, context):
+        return any(True for _obj in _iter_asset_objects("scenery"))
+
+    def draw(self, context):
+        layout = self.layout
+        op = layout.operator("myth2.export_marker_placements", text="Export All Scenery Placements", icon="EXPORT")
+        op.asset_kind = "scenery"
+        op.array_name = "scenery"
+        op.relative_path = "assets/sprites/scenery.json"
+        op = layout.operator("myth2.export_marker_placements", text="Export Selected Scenery Placements", icon="RESTRICT_SELECT_OFF")
+        op.asset_kind = "scenery"
+        op.array_name = "scenery"
+        op.relative_path = "assets/sprites/scenery.json"
+        op.selected_only = True
+
+
+class MYTH2_PT_projectile_tools(bpy.types.Panel):
+    bl_label = "Myth II Projectiles"
+    bl_idname = "MYTH2_PT_projectile_tools"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Myth II"
+
+    @classmethod
+    def poll(cls, context):
+        return any(True for _obj in _iter_asset_objects("projectile"))
+
+    def draw(self, context):
+        layout = self.layout
+        op = layout.operator("myth2.export_marker_placements", text="Export All Projectile Placements", icon="EXPORT")
+        op.asset_kind = "projectile"
+        op.array_name = "projectiles"
+        op.relative_path = "assets/models/projectiles.json"
+        op = layout.operator("myth2.export_marker_placements", text="Export Selected Projectile Placements", icon="RESTRICT_SELECT_OFF")
+        op.asset_kind = "projectile"
+        op.array_name = "projectiles"
+        op.relative_path = "assets/models/projectiles.json"
+        op.selected_only = True
+
+
+class MYTH2_PT_model_tools(bpy.types.Panel):
+    bl_label = "Myth II Models"
+    bl_idname = "MYTH2_PT_model_tools"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Myth II"
+
+    @classmethod
+    def poll(cls, context):
+        return any(True for _obj in _iter_asset_objects("model"))
+
+    def draw(self, context):
+        layout = self.layout
+        op = layout.operator("myth2.export_marker_placements", text="Export All Model Placements", icon="EXPORT")
+        op.asset_kind = "model"
+        op.array_name = "instances"
+        op.relative_path = "placement.json"
+        op = layout.operator("myth2.export_marker_placements", text="Export Selected Model Placements", icon="RESTRICT_SELECT_OFF")
+        op.asset_kind = "model"
+        op.array_name = "instances"
+        op.relative_path = "placement.json"
+        op.selected_only = True
+
+
 _CLASSES = (
     MYTH2_OT_play_selected_sound,
     MYTH2_OT_stop_selected_sound,
+    MYTH2_OT_export_unit_placements,
+    MYTH2_OT_export_marker_placements,
+    MYTH2_OT_mark_selected_units_new,
+    MYTH2_OT_mark_selected_units_existing,
     MYTH2_OT_drop_selected_to_terrain,
     MYTH2_PT_sound_preview,
     MYTH2_PT_terrain_tools,
+    MYTH2_PT_unit_tools,
+    MYTH2_PT_scenery_tools,
+    MYTH2_PT_projectile_tools,
+    MYTH2_PT_model_tools,
 )
 
 
@@ -304,6 +605,119 @@ def group_imported_objects_by_tag(obj_path, root_name):
     for obj in imported:
         move_to_collection(obj, child_collection(unit_tag_from_object_name(obj.name), root))
     return imported
+
+
+def marker_idx_from_object_name(name):
+    base = name.split(".", 1)[0]
+    if "_" not in base:
+        return None
+    tail = base.rsplit("_", 1)[1]
+    return int(tail) if tail.isdigit() else None
+
+
+def ordinal_idx_from_object_name(name):
+    return marker_idx_from_object_name(name)
+
+
+def apply_unit_metadata(objects, units_json, map_folder):
+    if not units_json.exists():
+        return
+    with units_json.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    by_marker = {int(item["marker_idx"]): item for item in data.get("units", []) if "marker_idx" in item}
+    for obj in objects:
+        marker_idx = marker_idx_from_object_name(obj.name)
+        if marker_idx is None or marker_idx not in by_marker:
+            continue
+        item = by_marker[marker_idx]
+        obj["myth2_asset_kind"] = "unit"
+        obj["myth2_marker_idx"] = marker_idx
+        obj["myth2_tag"] = item.get("tag", "")
+        obj["myth2_cell_x"] = float(item.get("x", 0.0))
+        obj["myth2_cell_y"] = float(item.get("y", 0.0))
+        obj["myth2_cell_z"] = float(item.get("z", 0.0))
+        obj["myth2_facing_deg"] = float(item.get("facing_deg", 0.0))
+        obj["myth2_map_folder"] = str(map_folder)
+        origin = object_bottom_center_world(obj)
+        move_origin_to_world(obj, origin)
+        obj["myth2_origin_x"] = float(obj.location.x)
+        obj["myth2_origin_y"] = float(obj.location.y)
+        obj["myth2_origin_z"] = float(obj.location.z)
+
+
+def apply_marker_metadata(objects, metadata_json, array_name, asset_kind, map_folder):
+    if not metadata_json.exists():
+        return
+    with metadata_json.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    by_marker = {int(item["marker_idx"]): item for item in data.get(array_name, []) if "marker_idx" in item}
+    for obj in objects:
+        marker_idx = marker_idx_from_object_name(obj.name)
+        if marker_idx is None or marker_idx not in by_marker:
+            continue
+        item = by_marker[marker_idx]
+        obj["myth2_asset_kind"] = asset_kind
+        obj["myth2_marker_idx"] = marker_idx
+        obj["myth2_tag"] = item.get("tag", "")
+        obj["myth2_cell_x"] = float(item.get("x", 0.0))
+        obj["myth2_cell_y"] = float(item.get("y", 0.0))
+        obj["myth2_cell_z"] = float(item.get("z", 0.0))
+        obj["myth2_facing_deg"] = float(item.get("facing_deg", 0.0))
+        obj["myth2_map_folder"] = str(map_folder)
+        origin = object_bottom_center_world(obj)
+        move_origin_to_world(obj, origin)
+        obj["myth2_origin_x"] = float(obj.location.x)
+        obj["myth2_origin_y"] = float(obj.location.y)
+        obj["myth2_origin_z"] = float(obj.location.z)
+
+
+def apply_ordered_marker_metadata(objects, metadata_json, array_name, asset_kind, map_folder):
+    if not metadata_json.exists():
+        return
+    with metadata_json.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    entries = data.get(array_name, [])
+    for obj in objects:
+        if obj.name.lower() == "terrain" or obj.name.lower().startswith("terrain."):
+            continue
+        ordinal_idx = ordinal_idx_from_object_name(obj.name)
+        if ordinal_idx is None or ordinal_idx < 0 or ordinal_idx >= len(entries):
+            continue
+        item = entries[ordinal_idx]
+        obj["myth2_asset_kind"] = asset_kind
+        obj["myth2_marker_idx"] = int(item.get("marker_idx", -1))
+        obj["myth2_tag"] = item.get("tag", "")
+        obj["myth2_cell_x"] = float(item.get("x", 0.0))
+        obj["myth2_cell_y"] = float(item.get("y", 0.0))
+        obj["myth2_cell_z"] = float(item.get("z", 0.0))
+        obj["myth2_facing_deg"] = float(item.get("facing_deg", 0.0))
+        obj["myth2_map_folder"] = str(map_folder)
+        origin = object_bottom_center_world(obj)
+        move_origin_to_world(obj, origin)
+        obj["myth2_origin_x"] = float(obj.location.x)
+        obj["myth2_origin_y"] = float(obj.location.y)
+        obj["myth2_origin_z"] = float(obj.location.z)
+
+
+def object_bottom_center_world(obj):
+    if obj.type == "MESH" and obj.bound_box:
+        corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+        min_x = min(c.x for c in corners)
+        max_x = max(c.x for c in corners)
+        min_y = min(c.y for c in corners)
+        max_y = max(c.y for c in corners)
+        min_z = min(c.z for c in corners)
+        return Vector(((min_x + max_x) * 0.5, (min_y + max_y) * 0.5, min_z))
+    return obj.location.copy()
+
+
+def move_origin_to_world(obj, origin):
+    old_matrix = obj.matrix_world.copy()
+    new_matrix = old_matrix.copy()
+    new_matrix.translation = origin
+    if obj.type == "MESH" and obj.data:
+        obj.data.transform(new_matrix.inverted() @ old_matrix)
+    obj.matrix_world = new_matrix
 
 
 def add_sound_speakers(sounds_json, map_folder):
@@ -432,6 +846,13 @@ def import_combined_map(path):
     return imported
 
 
+def imported_model_objects(objects):
+    return [
+        obj for obj in objects
+        if obj.name.lower() != "terrain" and not obj.name.lower().startswith("terrain.")
+    ]
+
+
 def obj_has_terrain(path):
     try:
         with path.open("r", encoding="utf-8", errors="replace") as f:
@@ -505,8 +926,12 @@ def main():
     units_obj = sprites_dir / "units.obj"
     sounds_obj = sounds_dir / "sounds.obj"
     sounds_json = sounds_dir / "sounds.json"
+    units_json = sprites_dir / "units.json"
+    scenery_json = sprites_dir / "scenery.json"
     scenery_obj = sprites_dir / "scenery.obj"
     projectiles_obj = models_dir / "projectiles.obj"
+    projectiles_json = models_dir / "projectiles.json"
+    placement_json = map_folder / "placement.json"
     animations_json = models_dir / "animations.json"
 
     setup_scene()
@@ -515,7 +940,8 @@ def main():
     imported_combined = False
     combined_has_terrain = False
     if combined_obj.exists():
-        import_combined_map(combined_obj)
+        combined_objects = import_combined_map(combined_obj)
+        apply_ordered_marker_metadata(imported_model_objects(combined_objects), placement_json, "instances", "model", map_folder)
         imported_combined = True
         combined_has_terrain = obj_has_terrain(combined_obj)
 
@@ -528,17 +954,20 @@ def main():
         set_material_alpha(import_into_collection(water_obj, "water"), 0.25)
 
     if units_obj.exists():
-        group_imported_objects_by_tag(units_obj, "units")
+        apply_unit_metadata(group_imported_objects_by_tag(units_obj, "units"), units_json, map_folder)
 
     sound_speakers = add_sound_speakers(sounds_json, map_folder)
     if not sound_speakers and sounds_obj.exists():
         group_imported_objects_by_tag(sounds_obj, "sounds")
 
     if scenery_obj.exists():
-        enable_alpha_for_sprite_materials(group_imported_objects_by_tag(scenery_obj, "scenery"))
+        scenery_objects = group_imported_objects_by_tag(scenery_obj, "scenery")
+        apply_marker_metadata(scenery_objects, scenery_json, "scenery", "scenery", map_folder)
+        enable_alpha_for_sprite_materials(scenery_objects)
 
     if projectiles_obj.exists():
-        group_imported_objects_by_tag(projectiles_obj, "projectiles")
+        projectile_objects = group_imported_objects_by_tag(projectiles_obj, "projectiles")
+        apply_marker_metadata(projectile_objects, projectiles_json, "projectiles", "projectile", map_folder)
 
     if not args.no_animations and animations_json.exists():
         ensure_animation_root()
