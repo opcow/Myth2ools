@@ -1584,10 +1584,39 @@ static bool applyMapActionsFromJson(std::vector<uint8_t>& meshData, const std::s
     bumpSectionOffset(0xC0);  // media_coverage_region_offset
     bumpSectionOffset(0xCC);  // mesh_LOD_data_offset
     bumpSectionOffset(0x114); // connectors_offset
-    bumpSectionOffset(0x3E4); // editor_data_offset
+    bumpSectionOffset(0x120); // Myth II trailing section offset / connector-size field
 
     printf("Rebuilt map actions: %zu actions, %zu bytes from %s\n",
            actions.size(), buffer.size(), path.c_str());
+    return true;
+}
+
+static bool zeroRegenerableMeshCacheSections(std::vector<uint8_t>& meshData) {
+    constexpr size_t MESH_HEADER_SIZE = 1024;
+    if (meshData.size() < MESH_HEADER_SIZE) return false;
+
+    uint32_t actionOffset = (uint32_t)readBE32s(meshData.data(), 0x84);
+    uint32_t actionSize = (uint32_t)readBE32s(meshData.data(), 0x88);
+    uint64_t endOfActions = (uint64_t)actionOffset + (uint64_t)actionSize;
+    if (endOfActions > (uint64_t)std::numeric_limits<uint32_t>::max()) return false;
+    if (MESH_HEADER_SIZE + (size_t)endOfActions > meshData.size()) return false;
+
+    uint32_t end = (uint32_t)endOfActions;
+    writeBE32To(meshData.data() + 0x1C, end);
+
+    writeBE32To(meshData.data() + 0xC0, end); // media_coverage_region_offset
+    writeBE32To(meshData.data() + 0xC4, 0);   // media_coverage_region_size
+    writeBE32To(meshData.data() + 0xC8, 0);   // runtime pointer
+
+    writeBE32To(meshData.data() + 0xCC, end); // mesh_LOD_data_offset
+    writeBE32To(meshData.data() + 0xD0, 0);   // mesh_LOD_data_size
+    writeBE32To(meshData.data() + 0xD4, 0);   // runtime pointer
+
+    writeBE32To(meshData.data() + 0x120, end); // Myth II trailing/cache section offset
+    writeBE32To(meshData.data() + 0x124, 0);   // Myth II trailing/cache section size
+
+    meshData.resize(MESH_HEADER_SIZE + (size_t)end);
+    printf("Zeroed regenerable mesh cache sections; data_size now %u\n", end);
     return true;
 }
 
@@ -1754,7 +1783,7 @@ static bool applyUnitPlacementEdits(std::vector<uint8_t>& meshData, const std::s
             bumpSectionOffset(0xC0);  // media_coverage_region_offset
             bumpSectionOffset(0xCC);  // mesh_LOD_data_offset
             bumpSectionOffset(0x114); // connectors_offset
-            bumpSectionOffset(0x3E4); // editor_data_offset
+            bumpSectionOffset(0x120); // Myth II trailing section offset / connector-size field
             uint16_t paletteIdx = (uint16_t)readBE16s(rec.data(), 6);
             bumpUnitTypeInstanceCount(meshData, paletteIdx);
             base = MESH_HEADER_SIZE + (size_t)instanceOffset;
@@ -1893,7 +1922,7 @@ static void usage(const char* p) {
     fprintf(stderr,
         "Myth II Plugin Assembler\n\n"
         "Usage:\n"
-        "  %s <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation]\n\n"
+        "  %s <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation] [--zero-runtime-cache]\n\n"
         "  folder   Extracted Myth II map folder from extract\n"
         "  output   Output plugin path (default: <folder>_plugin)\n"
         "  --edit   Re-read edited assets from the folder before packing\n"
@@ -1902,6 +1931,7 @@ static void usage(const char* p) {
         "  --water  Experimentally import terrain/water.bmp including media-height changes\n"
         "  --water-flags Import only water flags/types from terrain/water.bmp (default under --edit)\n"
         "  --animation Experimentally import terrain/animation.bmp during --edit\n"
+        "  --zero-runtime-cache Experimentally omit regenerable post-action mesh cache sections during --edit\n"
         "  --heightscale OBJ vertical scale, default 1/512\n",
         p);
 }
@@ -1918,6 +1948,7 @@ int main(int argc, char* argv[]) {
     bool importWater = false;
     bool importWaterFlags = false;
     bool importAnimation = false;
+    bool zeroRuntimeCache = false;
     std::string objPath;
     std::string waterObjPath;
     float objHeightScale = 1.0f / 512.0f;
@@ -1931,6 +1962,8 @@ int main(int argc, char* argv[]) {
             importWaterFlags = true;
         } else if (a == "--animation") {
             importAnimation = true;
+        } else if (a == "--zero-runtime-cache") {
+            zeroRuntimeCache = true;
         } else if (a == "--obj") {
             if (i + 1 < argc) objPath = argv[++i];
             else {
@@ -2011,6 +2044,7 @@ int main(int argc, char* argv[]) {
             if (importWaterFlags && !importWater) printf("Water flags:   enabled\n\n");
         }
         if (importAnimation) printf("Animation import: enabled (experimental)\n\n");
+        if (zeroRuntimeCache) printf("Runtime cache: zero regenerated mesh sections (experimental)\n\n");
     }
 
     std::vector<TagSpec> tags;
@@ -2201,6 +2235,12 @@ int main(int argc, char* argv[]) {
                 if (fileExists(actionPath)) {
                     if (!applyMapActionsFromJson(t.data, actionPath)) {
                         fprintf(stderr, "Map action import failed: %s\n", actionPath.c_str());
+                        return 1;
+                    }
+                }
+                if (zeroRuntimeCache) {
+                    if (!zeroRegenerableMeshCacheSections(t.data)) {
+                        fprintf(stderr, "Zeroing mesh runtime cache sections failed\n");
                         return 1;
                     }
                 }
