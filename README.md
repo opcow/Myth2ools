@@ -120,6 +120,7 @@ packs the mesh plus any extracted terrain, name, and screen tags.
   - `screens/pregame.bmp`
   - `screens/postgame.bmp`
   - `strings/name.txt`
+  - `assets/sprites/units_edited.json`
 - `terrain/terrain.bmp` and `terrain/shadow.bmp` are reinjected into the terrain
   `.256` when present.
 - `terrain/passability.bmp` is converted back into Myth II terrain-type flags.
@@ -133,8 +134,25 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 - `terrain/animation.bmp` marks cells with the animated-media bit as a 4-bit indexed mask: index `0` = off, nonzero = animated.
 - In normal engine behavior, the animated-media bit is derived from wet topology: a vertex is marked animated only when the four cells meeting there are all fully wet.
 - Because the engine recomputes that bit from topology, `terrain/animation.bmp` is best treated as a diagnostic/reference layer rather than a stable standalone authoring control.
-- `screens/pregame.bmp`, `screens/overhead.bmp`, and `screens/postgame.bmp` are reinjected into their `.256` tags when present.
+- `screens/pregame.bmp`, `screens/overhead.bmp`, and `screens/postgame.bmp`
+  are reinjected into their `.256` tags when present. If a screen `_tag.bin`
+  is missing, `build_plugin` can rebuild a single-image `.256` tag directly
+  from the matching 8-bit indexed BMP.
 - `strings/name.txt` is rebuilt into the map-name `stli` when present.
+  If `strings/name_tag.bin` is missing, `build_plugin` can generate this tag
+  directly from `strings/name.txt`.
+- `assets/sprites/units_edited.json` patches placed unit/monster marker
+  positions and facing by marker index.
+- `assets/sprites/scenery.json`, `assets/sounds/sounds.json`,
+  `assets/models/projectiles.json`, `placement.json`, and
+  `assets/models/animations.json` are also treated as marker placement sources
+  during `--edit`, so their exported `x`/`y`/`z`/`facing_deg` values can rebuild
+  the corresponding scenery, sound, projectile, direct-model, and
+  model-animation marker positions.
+- `assets/actions/actions.json` rebuilds the map action/script buffer when it
+  contains `parameter_data_hex` entries from the current `export_map_actions`.
+  The decoded parameter list remains the human-readable view; the hex payload is
+  the conservative lossless source used for import.
 
 ### `export_mesh`
 
@@ -241,30 +259,51 @@ or:
 ./create_blend.sh out/le3e
 ```
 
-The Blender importer uses `assets/terrain/map_combined.obj` when present. If that
-OBJ already contains the terrain object, it will not import
+The Blender importer uses `assets/terrain/map_combined.obj` when present. If
+that OBJ already contains the terrain object, it will not import
 `assets/terrain/displacement.obj` a second time. `assets/terrain/water.obj` and
 `assets/models/animations.json` are imported when present.
-`assets/sprites/units.obj` is also imported when present.
+
+`assets/sprites/units.obj` is imported when present. Moved unit sprites can be
+written back to `assets/sprites/units_edited.json` with
+`Export All Unit Placements` or `Export Selected Unit Placements` from the
+`Myth II` sidebar. During `build_plugin --edit`, that file patches the matching
+unit marker positions in the mesh by `marker_idx`.
+
+To add a unit, duplicate an existing unit sprite in Blender, move the duplicate,
+then export unit placements. Blender duplicate names such as `.001` are written
+as new markers copied from the source unit. The sidebar also has
+`Mark Selected As New` and `Mark Selected As Existing` for cases where the
+duplicate-name heuristic is not what you want.
+
+`assets/sprites/scenery.obj` is imported into a tag-grouped `scenery`
+collection when present, with sprite material transparency enabled. Moved
+scenery can be written back with `Export All Scenery Placements` or
+`Export Selected Scenery Placements`.
+
+`assets/models/projectiles.obj` is imported into a tag-grouped `projectiles`
+collection when present. Moved projectile placeholders can be written back with
+the matching projectile placement export buttons. Direct 3D models from
+`assets/terrain/map_combined.obj` also receive editable marker origins and can
+be written back with the model placement export buttons.
+
 When `assets/sounds/sounds.json` references extracted WAV files, Blender speaker
 objects are added at the sound marker locations and `assets/sounds/sounds.obj`
 is left as fallback/reference geometry rather than imported by default. If no
 speakers can be created, the placeholder OBJ is imported into a tag-grouped
 `sounds` collection. Speakers are muted by default so timeline playback does
-not trigger every map sound at once. Blender may disable embedded scripts when
-the `.blend` opens; allow script execution or run the embedded
-`myth2_sound_tools.py` text block manually. Then select a speaker and use the
-`Myth II` tab in the 3D View sidebar, or press F3 and choose
-`Myth II: Play Selected Sound`.
+not trigger every map sound at once.
+
+Blender may disable embedded scripts when the `.blend` opens. Allow script
+execution or run the embedded `myth2_sound_tools.py` text block manually. Then
+select a speaker and use the `Myth II` tab in the 3D View sidebar, or press F3
+and choose `Myth II: Play Selected Sound`.
+
 The same sidebar also includes terrain helpers. Select moved sprites, models,
 or speakers and use `Drop Origin To Terrain` to place the Myth marker/origin on
 the displacement surface. `Drop Bounds To Terrain` is available as a secondary
 bounding-box helper, but exported sprites and models are normally authored with
 their origin at ground level.
-`assets/sprites/scenery.obj` is imported into a tag-grouped `scenery` collection when
-present, with sprite material transparency enabled.
-`assets/models/projectiles.obj` is imported into a tag-grouped `projectiles`
-collection when present.
 
 ```bash
 extract_map myth2_tags le3e --out out/le3e
