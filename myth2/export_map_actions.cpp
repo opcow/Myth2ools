@@ -203,6 +203,16 @@ static void appendIntArray(std::string& json, const std::vector<int32_t>& vals) 
     json += "]";
 }
 
+static void appendHexString(std::string& out, const uint8_t* data, size_t size) {
+    static const char* hex = "0123456789abcdef";
+    out.push_back('"');
+    for (size_t i = 0; i < size; i++) {
+        out.push_back(hex[data[i] >> 4]);
+        out.push_back(hex[data[i] & 0x0F]);
+    }
+    out.push_back('"');
+}
+
 struct ActionHead {
     uint16_t id = 0;
     uint16_t expirationMode = 0;
@@ -458,6 +468,9 @@ static bool parseActions(const std::vector<uint8_t>& mesh, std::string& json, st
         json += "      \"indent\": " + std::to_string(h.indent) + ",\n";
         json += "      \"parameter_data_offset\": " + std::to_string(h.offset) + ",\n";
         json += "      \"parameter_data_size\": " + std::to_string(h.size) + ",\n";
+        json += "      \"parameter_data_hex\": ";
+        appendHexString(json, buf + paramsStart, h.size);
+        json += ",\n";
         json += "      \"parameters\": [\n";
         if (!paramsJson.empty()) {
             json += paramsJson;
