@@ -94,7 +94,7 @@ canonical files under `terrain/`, `screens/`, and `strings/`.
 ### `build_plugin`
 
 ```bash
-build_plugin <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation]
+build_plugin <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation] [--zero-runtime-cache]
 ```
 
 Rebuilds a Myth II `dng2` plugin from an extracted map folder. The first pass
@@ -110,6 +110,9 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 - `--water` experimentally imports `terrain/water.bmp` with media-height changes as well.
 - `--water-flags` explicitly selects the same safe flags-only `terrain/water.bmp` path.
 - `--animation` experimentally imports `terrain/animation.bmp` back into the mesh during `--edit`; it is not imported by default.
+- `--zero-runtime-cache` experimentally removes regenerable post-action mesh
+  cache sections during `--edit`. This is a test path toward bin-free mesh
+  rebuilds; validate the resulting plugin in Myth II before relying on it.
 - `build_plugin` reads editable assets from the canonical extracted paths:
   - `terrain/terrain.bmp`
   - `terrain/shadow.bmp`
