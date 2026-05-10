@@ -19,6 +19,7 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <limits>
 
 #include "mesh_flags.h"
@@ -167,6 +168,28 @@ static std::vector<uint8_t> readBMPIndexed4Or8(const std::string& path, int& out
     return px;
 }
 
+static bool copyBMPPaletteToMyth256(uint8_t* colorBase, const std::vector<uint8_t>& bmpRaw) {
+    if (bmpRaw.size() < 54 || bmpRaw[0] != 'B' || bmpRaw[1] != 'M') return false;
+    uint32_t dibSz = get32le(bmpRaw.data() + 14);
+    uint32_t palStart = 14 + dibSz;
+    uint32_t pixOff = get32le(bmpRaw.data() + 10);
+    if (palStart > bmpRaw.size() || pixOff > bmpRaw.size() || pixOff < palStart) return false;
+    uint32_t nEntries = (pixOff - palStart) / 4;
+    if (nEntries > 256) nEntries = 256;
+    for (int i = 0; i < 256; i++) {
+        uint8_t* ce = colorBase + (size_t)i * 8;
+        ce[0] = ce[1] = ce[2] = ce[3] = ce[4] = ce[5] = ce[6] = ce[7] = 0;
+    }
+    for (uint32_t i = 0; i < nEntries; i++) {
+        uint8_t b = bmpRaw[palStart + i * 4 + 0];
+        uint8_t g = bmpRaw[palStart + i * 4 + 1];
+        uint8_t r = bmpRaw[palStart + i * 4 + 2];
+        uint8_t* ce = colorBase + (size_t)i * 8;
+        ce[0] = r; ce[1] = 0; ce[2] = g; ce[3] = 0; ce[4] = b; ce[5] = 0; ce[6] = 0; ce[7] = 0;
+    }
+    return true;
+}
+
 static std::vector<uint8_t> readBMP24(const std::string& path, int& outW, int& outH) {
     auto raw = readFile(path);
     if (raw.size() < 54 || raw[0] != 'B' || raw[1] != 'M') return {};
@@ -236,22 +259,7 @@ static bool injectTerrainTiles(std::vector<uint8_t>& terrain,
     if (colorBase + 256 * 8 > terrain.size()) return false;
 
     if (updatePalette && bmpRaw.size() >= 54) {
-        uint32_t dibSz = get32le(bmpRaw.data() + 14);
-        uint32_t palStart = 14 + dibSz;
-        uint32_t pixOff = get32le(bmpRaw.data() + 10);
-        uint32_t nEntries = (pixOff > palStart) ? (pixOff - palStart) / 4 : 0;
-        if (nEntries > 256) nEntries = 256;
-        for (int i = 0; i < 256; i++) {
-            uint8_t* ce = terrain.data() + colorBase + (size_t)i * 8;
-            ce[0] = ce[1] = ce[2] = ce[3] = ce[4] = ce[5] = ce[6] = ce[7] = 0;
-        }
-        for (uint32_t i = 0; i < nEntries; i++) {
-            uint8_t b = bmpRaw[palStart + i * 4 + 0];
-            uint8_t g = bmpRaw[palStart + i * 4 + 1];
-            uint8_t r = bmpRaw[palStart + i * 4 + 2];
-            uint8_t* ce = terrain.data() + colorBase + (size_t)i * 8;
-            ce[0] = r; ce[1] = 0; ce[2] = g; ce[3] = 0; ce[4] = b; ce[5] = 0; ce[6] = 0; ce[7] = 0;
-        }
+        copyBMPPaletteToMyth256(terrain.data() + colorBase, bmpRaw);
     }
 
     std::vector<uint32_t> relOfs((size_t)sections);
@@ -292,7 +300,7 @@ static bool injectTerrainShadow(std::vector<uint8_t>& terrain,
 
 static bool injectSingleImage256(std::vector<uint8_t>& data, const std::vector<uint8_t>& bmpRaw,
                                  const std::vector<uint8_t>& bmp, int bW, int bH) {
-    const size_t HDR = 320, TEXHDR = 52, BITMAP_REF_SIZE = 128;
+    const size_t HDR = 320, BITMAP_REF_SIZE = 128, BITMAP_HEADER = 48;
     if (data.size() < HDR + sizeof(Myth256Palette)) return false;
     int32_t bulkOff = readBE32s(data.data(), 248);
     int32_t palOff = readBE32s(data.data(), 68);
@@ -302,18 +310,25 @@ static bool injectSingleImage256(std::vector<uint8_t>& data, const std::vector<u
 
     int w = 0, h = 0;
     long pixDataOff = -1;
+    long imgAbs = -1;
+    long imgLen = -1;
     size_t refBase = (size_t)bulkOff + (size_t)bitmapRefsOff;
     for (int bi = 0; bi < bitmapCount; bi++) {
         size_t ref = refBase + (size_t)bi * BITMAP_REF_SIZE;
         if (ref + BITMAP_REF_SIZE > data.size()) return false;
         int32_t imgDataOff = readBE32s(data.data(), ref + 64);
+        int32_t imgDataLen = readBE32s(data.data(), ref + 68);
         int candidateW = (int)readBE16s(data.data(), ref + 76);
         int candidateH = (int)readBE16s(data.data(), ref + 78);
-        long candidatePix = (long)bulkOff + (long)imgDataOff + (long)TEXHDR;
+        long candidateImg = (long)bulkOff + (long)imgDataOff;
+        long candidatePix = candidateImg + (long)BITMAP_HEADER + (long)candidateH * 4L;
         if (candidateW <= 0 || candidateW > 4096 || candidateH <= 0 || candidateH > 4096) continue;
-        if (candidatePix < 0 || candidatePix + (long)candidateW * candidateH > (long)data.size()) continue;
+        if (imgDataLen < (int32_t)(BITMAP_HEADER + candidateH * 4 + candidateW * candidateH)) continue;
+        if (candidateImg < 0 || candidateImg + imgDataLen > (long)data.size()) continue;
         w = candidateW;
         h = candidateH;
+        imgAbs = candidateImg;
+        imgLen = imgDataLen;
         pixDataOff = candidatePix;
         break;
     }
@@ -322,28 +337,114 @@ static bool injectSingleImage256(std::vector<uint8_t>& data, const std::vector<u
 
     size_t colorBase = (size_t)bulkOff + (size_t)palOff + 32;
     if (colorBase + 256 * 8 > data.size()) return false;
-    if (bmpRaw.size() >= 54) {
-        uint32_t dibSz = get32le(bmpRaw.data() + 14);
-        uint32_t palStart = 14 + dibSz;
-        uint32_t pixOff = get32le(bmpRaw.data() + 10);
-        uint32_t nEntries = (pixOff > palStart) ? (pixOff - palStart) / 4 : 0;
-        if (nEntries > 256) nEntries = 256;
-        for (int i = 0; i < 256; i++) {
-            uint8_t* ce = data.data() + colorBase + (size_t)i * 8;
-            ce[0] = ce[1] = ce[2] = ce[3] = ce[4] = ce[5] = ce[6] = ce[7] = 0;
-        }
-        for (uint32_t i = 0; i < nEntries; i++) {
-            uint8_t b = bmpRaw[palStart + i * 4 + 0];
-            uint8_t g = bmpRaw[palStart + i * 4 + 1];
-            uint8_t r = bmpRaw[palStart + i * 4 + 2];
-            uint8_t* ce = data.data() + colorBase + (size_t)i * 8;
-            ce[0] = r; ce[1] = 0; ce[2] = g; ce[3] = 0; ce[4] = b; ce[5] = 0; ce[6] = 0; ce[7] = 0;
-        }
-    }
+    copyBMPPaletteToMyth256(data.data() + colorBase, bmpRaw);
 
     if (pixDataOff < 0 || pixDataOff + (long)w * h > (long)data.size()) return false;
+    if (imgAbs < 0 || imgLen < (long)(BITMAP_HEADER + h * 4 + w * h)) return false;
+    uint32_t firstRowOffset = (uint32_t)(BITMAP_HEADER + h * 4);
+    for (int y = 0; y < h; y++) {
+        writeBE32To(data.data() + (size_t)imgAbs + BITMAP_HEADER + (size_t)y * 4,
+                    firstRowOffset + (uint32_t)y * (uint32_t)w);
+    }
     memcpy(data.data() + pixDataOff, bmp.data(), (size_t)w * h);
     return true;
+}
+
+static int ceilLog2Int(int v) {
+    if (v <= 1) return 0;
+    int p = 0;
+    int n = 1;
+    while (n < v && p < 31) {
+        n <<= 1;
+        p++;
+    }
+    return p;
+}
+
+static std::vector<uint8_t> buildSingleImage256FromBMP(const std::string& bmpPath, const std::string& imageName) {
+    int w = 0, h = 0;
+    std::vector<uint8_t> bmpRaw = readFile(bmpPath);
+    std::vector<uint8_t> bmp = readBMP8(bmpPath, w, h);
+    if (bmp.empty() || w <= 0 || h <= 0 || w > 4096 || h > 4096) return {};
+
+    const uint32_t HDR = 320;
+    const uint32_t PAL_OFF = 0;
+    const uint32_t PAL_LEN = (uint32_t)sizeof(Myth256Palette);
+    const uint32_t INST_OFF = PAL_OFF + PAL_LEN;
+    const uint32_t INST_LEN = 64;
+    const uint32_t SEQ_OFF = INST_OFF + INST_LEN;
+    const uint32_t SEQ_LEN = 128;
+    const uint32_t AUX_OFF = SEQ_OFF + SEQ_LEN + 112;
+    const uint32_t AUX_LEN = 32;
+    const uint32_t REF_OFF = AUX_OFF + AUX_LEN;
+    const uint32_t REF_LEN = 128;
+    const uint32_t IMG_OFF = REF_OFF + REF_LEN;
+    const uint32_t BITMAP_HEADER = 48;
+    uint32_t imgLen = BITMAP_HEADER + (uint32_t)h * 4u + (uint32_t)w * (uint32_t)h;
+    uint32_t bulkLen = IMG_OFF + imgLen;
+
+    std::vector<uint8_t> out((size_t)HDR + bulkLen, 0);
+    writeBE32To(out.data() + 4, 32);
+    writeBE32To(out.data() + 64, 1);
+    writeBE32To(out.data() + 68, PAL_OFF);
+    writeBE32To(out.data() + 72, PAL_LEN);
+    writeBE32To(out.data() + 84, PAL_LEN);
+    writeBE32To(out.data() + 96, 1);
+    writeBE32To(out.data() + 100, REF_OFF);
+    writeBE32To(out.data() + 104, REF_LEN);
+    writeBE32To(out.data() + 112, 1);
+    writeBE32To(out.data() + 116, INST_OFF);
+    writeBE32To(out.data() + 120, INST_LEN);
+    writeBE32To(out.data() + 128, 1);
+    writeBE32To(out.data() + 132, SEQ_OFF);
+    writeBE32To(out.data() + 136, SEQ_LEN);
+    writeBE32To(out.data() + 144, 1);
+    writeBE32To(out.data() + 148, AUX_OFF);
+    writeBE32To(out.data() + 152, AUX_LEN);
+    writeBE32To(out.data() + 248, HDR);
+    writeBE32To(out.data() + 252, bulkLen);
+
+    uint8_t* bulk = out.data() + HDR;
+    writeBE32To(bulk + PAL_OFF, 256);
+    if (!copyBMPPaletteToMyth256(bulk + PAL_OFF + 32, bmpRaw)) return {};
+
+    uint8_t* inst = bulk + INST_OFF;
+    writeBE32To(inst + 0, 16);
+    writeBE16To(inst + 6, 0xFFFFu);
+    writeBE16To(inst + 12, (uint16_t)(w / 2));
+    writeBE16To(inst + 14, (uint16_t)(h - 1));
+
+    uint8_t* seq = bulk + SEQ_OFF;
+    std::string seqName = imageName.empty() ? "screen" : imageName;
+    memcpy(seq, seqName.c_str(), std::min<size_t>(seqName.size(), 63));
+    writeBE16To(seq + 68, 1);
+
+    uint8_t* ref = bulk + REF_OFF;
+    char name[64];
+    std::snprintf(name, sizeof(name), "bitmap #0 (#%d,#%d)", w, h);
+    memcpy(ref, name, std::min<size_t>(strlen(name), 63));
+    writeBE32To(ref + 64, IMG_OFF);
+    writeBE32To(ref + 68, imgLen);
+    writeBE32To(ref + 72, BITMAP_HEADER + (uint32_t)h * 4u);
+    writeBE16To(ref + 76, (uint16_t)w);
+    writeBE16To(ref + 78, (uint16_t)h);
+
+    uint8_t* img = bulk + IMG_OFF;
+    writeBE16To(img + 0, (uint16_t)w);
+    writeBE16To(img + 2, (uint16_t)h);
+    writeBE16To(img + 4, (uint16_t)w);
+    writeBE16To(img + 8, 8);
+    writeBE16To(img + 28, (uint16_t)ceilLog2Int(w));
+    writeBE16To(img + 30, (uint16_t)ceilLog2Int(h));
+    writeBE16To(img + 32, (uint16_t)std::max(1, (w + 255) / 256));
+    writeBE16To(img + 34, (uint16_t)std::max(1, (h + 127) / 128));
+    uint32_t firstRowOffset = BITMAP_HEADER + (uint32_t)h * 4u;
+    for (int y = 0; y < h; y++) {
+        writeBE32To(img + BITMAP_HEADER + (size_t)y * 4,
+                    firstRowOffset + (uint32_t)y * (uint32_t)w);
+    }
+    memcpy(img + firstRowOffset, bmp.data(), bmp.size());
+    return out;
 }
 
 static bool parseOBJHeights(const std::string& path, float hs, int vertexW, int vertexH,
@@ -1197,6 +1298,483 @@ struct Manifest {
     int submeshHeight = 0;
 };
 
+struct UnitPlacementEdit {
+    int markerIdx = -1;
+    int sourceMarkerIdx = -1;
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    double facingDeg = 0.0;
+    bool hasFacing = false;
+    bool add = false;
+};
+
+struct MarkerPlacementEdit {
+    int markerIdx = -1;
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    double facingDeg = 0.0;
+    bool hasFacing = false;
+};
+
+static bool jsonNumberNear(const std::string& obj, const std::string& key, double& out) {
+    std::string needle = "\"" + key + "\"";
+    size_t p = obj.find(needle);
+    if (p == std::string::npos) return false;
+    p = obj.find(':', p + needle.size());
+    if (p == std::string::npos) return false;
+    p++;
+    while (p < obj.size() && std::isspace((unsigned char)obj[p])) p++;
+    char* end = nullptr;
+    out = std::strtod(obj.c_str() + p, &end);
+    return end && end != obj.c_str() + p;
+}
+
+static bool jsonIntNear(const std::string& obj, const std::string& key, int& out) {
+    double v = 0.0;
+    if (!jsonNumberNear(obj, key, v)) return false;
+    out = (int)std::lround(v);
+    return true;
+}
+
+static bool jsonBoolNear(const std::string& obj, const std::string& key, bool& out) {
+    std::string needle = "\"" + key + "\"";
+    size_t p = obj.find(needle);
+    if (p == std::string::npos) return false;
+    p = obj.find(':', p + needle.size());
+    if (p == std::string::npos) return false;
+    p++;
+    while (p < obj.size() && std::isspace((unsigned char)obj[p])) p++;
+    if (obj.compare(p, 4, "true") == 0) {
+        out = true;
+        return true;
+    }
+    if (obj.compare(p, 5, "false") == 0) {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+static std::vector<std::string> jsonObjectsInArray(const std::string& j, const std::string& key) {
+    std::vector<std::string> objects;
+    std::string needle = "\"" + key + "\"";
+    size_t p = j.find(needle);
+    if (p == std::string::npos) return objects;
+    p = j.find('[', p + needle.size());
+    if (p == std::string::npos) return objects;
+
+    bool inString = false;
+    bool escape = false;
+    int arrayDepth = 0;
+    int objectDepth = 0;
+    size_t objectStart = std::string::npos;
+    for (; p < j.size(); p++) {
+        char c = j[p];
+        if (escape) {
+            escape = false;
+            continue;
+        }
+        if (inString) {
+            if (c == '\\') escape = true;
+            else if (c == '"') inString = false;
+            continue;
+        }
+        if (c == '"') {
+            inString = true;
+        } else if (c == '[') {
+            arrayDepth++;
+        } else if (c == ']') {
+            arrayDepth--;
+            if (arrayDepth == 0) break;
+        } else if (c == '{') {
+            if (arrayDepth == 1 && objectDepth == 0) objectStart = p;
+            objectDepth++;
+        } else if (c == '}') {
+            if (objectDepth > 0) objectDepth--;
+            if (arrayDepth == 1 && objectDepth == 0 && objectStart != std::string::npos) {
+                objects.push_back(j.substr(objectStart, p - objectStart + 1));
+                objectStart = std::string::npos;
+            }
+        }
+    }
+    return objects;
+}
+
+static std::vector<std::string> jsonObjectsWithMarkerIdx(const std::string& j) {
+    std::vector<std::string> objects;
+    size_t p = 0;
+    while ((p = j.find("\"marker_idx\"", p)) != std::string::npos) {
+        size_t objStart = j.rfind('{', p);
+        size_t objEnd = j.find('}', p);
+        if (objStart != std::string::npos && objEnd != std::string::npos && objEnd > objStart) {
+            objects.push_back(j.substr(objStart, objEnd - objStart + 1));
+            p = objEnd + 1;
+        } else {
+            p += 12;
+        }
+    }
+    return objects;
+}
+
+static int hexValue(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static bool parseHexBytes(const std::string& s, std::vector<uint8_t>& out) {
+    out.clear();
+    if (s.size() % 2 != 0) return false;
+    out.reserve(s.size() / 2);
+    for (size_t i = 0; i < s.size(); i += 2) {
+        int hi = hexValue(s[i]);
+        int lo = hexValue(s[i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out.push_back((uint8_t)((hi << 4) | lo));
+    }
+    return true;
+}
+
+static size_t alignToSize(size_t value, size_t align) {
+    return (value + align - 1) & ~(align - 1);
+}
+
+static size_t actionParameterValueBytes(uint16_t type, uint16_t count) {
+    switch (type) {
+    case 1:  // string
+    case 0:  // flag
+        return alignToSize(count, 4);
+    case 7:  // field name
+    case 9:  // projectile
+    case 10: // string list
+    case 11: // sound
+    case 12: // projectile or world point 2d
+        return (size_t)count * 4;
+    case 13: // world point 2d
+        return (size_t)count * 8;
+    case 18: // world point 3d
+        return (size_t)count * 12;
+    case 5:  // integer
+    case 6:  // world distance
+    case 8:  // fixed
+        return (size_t)count * 4;
+    default:
+        return alignToSize(count, 2) * 2;
+    }
+}
+
+static bool countActionParameters(const std::vector<uint8_t>& paramData, uint16_t& countOut) {
+    size_t p = 0;
+    uint32_t count = 0;
+    while (p < paramData.size()) {
+        if (p + 8 > paramData.size()) return false;
+        uint16_t type = (uint16_t)readBE16s(paramData.data(), p + 0);
+        uint16_t countItems = (uint16_t)readBE16s(paramData.data(), p + 2);
+        p += 8;
+        size_t bytes = actionParameterValueBytes(type, countItems);
+        if (p + bytes > paramData.size()) return false;
+        p += bytes;
+        count++;
+        if (count > 0xFFFFu) return false;
+    }
+    countOut = (uint16_t)count;
+    return true;
+}
+
+struct ActionJsonEntry {
+    uint16_t id = 0;
+    uint16_t expirationMode = 0;
+    std::string type;
+    uint32_t flags = 0;
+    uint32_t triggerLower = 0;
+    uint32_t triggerDelta = 0;
+    uint32_t parameterOffset = 0;
+    uint16_t indent = 0;
+    uint16_t numParams = 0;
+    std::vector<uint8_t> parameterData;
+};
+
+static bool readActionJsonEntries(const std::string& path, std::vector<ActionJsonEntry>& actions) {
+    actions.clear();
+    std::string j = readTextFile(path);
+    if (j.empty()) return false;
+
+    for (const std::string& obj : jsonObjectsInArray(j, "actions")) {
+        ActionJsonEntry e;
+        int id = 0, expiration = 0, flags = 0, indent = 0, parameterOffset = 0;
+        if (!jsonIntNear(obj, "id", id) ||
+            !jsonIntNear(obj, "expiration_mode_id", expiration) ||
+            !jsonIntNear(obj, "flags_raw", flags) ||
+            !jsonIntNear(obj, "indent", indent) ||
+            !jsonIntNear(obj, "parameter_data_offset", parameterOffset)) {
+            return false;
+        }
+        double lower = 0.0, delta = 0.0;
+        jsonNumberNear(obj, "trigger_time_lower_bound_seconds", lower);
+        jsonNumberNear(obj, "trigger_time_delta_seconds", delta);
+        e.id = (uint16_t)id;
+        e.expirationMode = (uint16_t)expiration;
+        e.type = jsonString(obj, "type", "");
+        e.flags = (uint32_t)flags;
+        e.triggerLower = (uint32_t)std::lround(lower * 30.0);
+        e.triggerDelta = (uint32_t)std::lround(delta * 30.0);
+        e.parameterOffset = (uint32_t)parameterOffset;
+        e.indent = (uint16_t)indent;
+        std::string hex = jsonString(obj, "parameter_data_hex", "");
+        if (!parseHexBytes(hex, e.parameterData)) return false;
+        if (e.parameterData.size() > 0xFFFFu) return false;
+        if (!countActionParameters(e.parameterData, e.numParams)) return false;
+        actions.push_back(std::move(e));
+    }
+    return true;
+}
+
+static bool applyMapActionsFromJson(std::vector<uint8_t>& meshData, const std::string& path) {
+    constexpr size_t MESH_HEADER_SIZE = 1024;
+    constexpr size_t ACTION_HEAD_SIZE = 64;
+    std::vector<ActionJsonEntry> actions;
+    if (!readActionJsonEntries(path, actions)) return false;
+
+    std::string j = readTextFile(path);
+    size_t actionHeadEnd = actions.size() * ACTION_HEAD_SIZE;
+    size_t bufferSize = (size_t)std::max(jsonInt(j, "action_buffer_size", 0), (int)actionHeadEnd);
+    for (const ActionJsonEntry& a : actions) {
+        bufferSize = std::max(bufferSize, actionHeadEnd + (size_t)a.parameterOffset + a.parameterData.size());
+    }
+    std::vector<uint8_t> buffer(bufferSize, 0);
+    for (size_t i = 0; i < actions.size(); i++) {
+        const ActionJsonEntry& a = actions[i];
+        size_t h = i * ACTION_HEAD_SIZE;
+        writeBE16To(buffer.data() + h + 0, a.id);
+        writeBE16To(buffer.data() + h + 2, a.expirationMode);
+        writeBE32To(buffer.data() + h + 4, a.type.empty() ? 0xFFFFFFFFu : tagFromString(a.type));
+        writeBE32To(buffer.data() + h + 8, a.flags);
+        writeBE32To(buffer.data() + h + 12, a.triggerLower);
+        writeBE32To(buffer.data() + h + 16, a.triggerDelta);
+        writeBE16To(buffer.data() + h + 20, a.numParams);
+        writeBE16To(buffer.data() + h + 22, (uint16_t)a.parameterData.size());
+        writeBE32To(buffer.data() + h + 24, a.parameterOffset);
+        writeBE16To(buffer.data() + h + 28, a.indent);
+        std::copy(a.parameterData.begin(), a.parameterData.end(),
+                  buffer.begin() + (ptrdiff_t)(actionHeadEnd + (size_t)a.parameterOffset));
+    }
+
+    uint32_t oldOffset = (uint32_t)readBE32s(meshData.data(), 0x84);
+    uint32_t oldSize = (uint32_t)readBE32s(meshData.data(), 0x88);
+    size_t oldStart = MESH_HEADER_SIZE + (size_t)oldOffset;
+    size_t oldEnd = oldStart + (size_t)oldSize;
+    if (oldStart > meshData.size() || oldEnd > meshData.size() || oldStart > oldEnd) return false;
+
+    meshData.erase(meshData.begin() + (ptrdiff_t)oldStart, meshData.begin() + (ptrdiff_t)oldEnd);
+    meshData.insert(meshData.begin() + (ptrdiff_t)oldStart, buffer.begin(), buffer.end());
+    int64_t delta = (int64_t)buffer.size() - (int64_t)oldSize;
+    writeBE32To(meshData.data() + 0x80, (uint32_t)actions.size());
+    writeBE32To(meshData.data() + 0x88, (uint32_t)buffer.size());
+    writeBE32To(meshData.data() + 0x1C, (uint32_t)((int64_t)readBE32s(meshData.data(), 0x1C) + delta));
+
+    auto bumpSectionOffset = [&](size_t fieldOff) {
+        uint32_t offset = (uint32_t)readBE32s(meshData.data(), fieldOff);
+        if (offset > oldOffset) {
+            writeBE32To(meshData.data() + fieldOff, (uint32_t)((int64_t)offset + delta));
+        }
+    };
+    bumpSectionOffset(0xC0);  // media_coverage_region_offset
+    bumpSectionOffset(0xCC);  // mesh_LOD_data_offset
+    bumpSectionOffset(0x114); // connectors_offset
+    bumpSectionOffset(0x3E4); // editor_data_offset
+
+    printf("Rebuilt map actions: %zu actions, %zu bytes from %s\n",
+           actions.size(), buffer.size(), path.c_str());
+    return true;
+}
+
+static std::vector<UnitPlacementEdit> readUnitPlacementEdits(const std::string& path) {
+    std::vector<UnitPlacementEdit> edits;
+    std::string j = readTextFile(path);
+    if (j.empty()) return edits;
+    size_t p = 0;
+    while ((p = j.find('{', p)) != std::string::npos) {
+        size_t objStart = p;
+        size_t objEnd = j.find('}', p);
+        if (objStart == std::string::npos || objEnd == std::string::npos || objEnd <= objStart) {
+            p++;
+            continue;
+        }
+        std::string obj = j.substr(objStart, objEnd - objStart + 1);
+        UnitPlacementEdit e;
+        jsonBoolNear(obj, "add", e.add);
+        bool hasMarker = jsonIntNear(obj, "marker_idx", e.markerIdx);
+        bool hasSource = jsonIntNear(obj, "source_marker_idx", e.sourceMarkerIdx);
+        if ((hasMarker || (e.add && hasSource)) &&
+            jsonNumberNear(obj, "x", e.x) &&
+            jsonNumberNear(obj, "y", e.y) &&
+            jsonNumberNear(obj, "z", e.z)) {
+            e.hasFacing = jsonNumberNear(obj, "facing_deg", e.facingDeg);
+            edits.push_back(e);
+        }
+        p = objEnd + 1;
+    }
+    return edits;
+}
+
+static std::vector<MarkerPlacementEdit> readMarkerPlacementEdits(const std::string& path) {
+    std::vector<MarkerPlacementEdit> edits;
+    std::string j = readTextFile(path);
+    if (j.empty()) return edits;
+
+    for (const std::string& obj : jsonObjectsWithMarkerIdx(j)) {
+        MarkerPlacementEdit e;
+        if (jsonIntNear(obj, "marker_idx", e.markerIdx) &&
+            jsonNumberNear(obj, "x", e.x) &&
+            jsonNumberNear(obj, "y", e.y) &&
+            jsonNumberNear(obj, "z", e.z)) {
+            e.hasFacing = jsonNumberNear(obj, "facing_deg", e.facingDeg);
+            edits.push_back(e);
+        }
+    }
+    return edits;
+}
+
+static uint16_t yawFromDegrees(double deg) {
+    while (deg < 0.0) deg += 360.0;
+    while (deg >= 360.0) deg -= 360.0;
+    int v = (int)std::lround((deg / 360.0) * 65536.0);
+    v &= 0xFFFF;
+    return (uint16_t)v;
+}
+
+static bool applyMarkerPlacementEdits(std::vector<uint8_t>& meshData, const std::string& path,
+                                      int expectedMarkerType, const char* label) {
+    constexpr int WORLD_ONE = 512;
+    constexpr size_t MESH_HEADER_SIZE = 1024;
+    constexpr size_t INSTANCE_SIZE = 64;
+    if (meshData.size() < MESH_HEADER_SIZE) return false;
+
+    std::vector<MarkerPlacementEdit> edits = readMarkerPlacementEdits(path);
+    if (edits.empty()) return true;
+
+    uint32_t instanceCount = (uint32_t)readBE32s(meshData.data(), 0x34);
+    uint32_t instanceOffset = (uint32_t)readBE32s(meshData.data(), 0x38);
+    size_t base = MESH_HEADER_SIZE + (size_t)instanceOffset;
+    if (base + (size_t)instanceCount * INSTANCE_SIZE > meshData.size()) return false;
+
+    int changed = 0;
+    for (const MarkerPlacementEdit& e : edits) {
+        if (e.markerIdx < 0 || (uint32_t)e.markerIdx >= instanceCount) continue;
+        size_t off = base + (size_t)e.markerIdx * INSTANCE_SIZE;
+        int16_t markerType = readBE16s(meshData.data(), off + 4);
+        if (markerType != expectedMarkerType) continue;
+        writeBE32To(meshData.data() + off + 12, (uint32_t)(int32_t)std::lround(e.x * WORLD_ONE));
+        writeBE32To(meshData.data() + off + 16, (uint32_t)(int32_t)std::lround(e.y * WORLD_ONE));
+        writeBE32To(meshData.data() + off + 20, (uint32_t)(int32_t)std::lround(e.z * WORLD_ONE));
+        if (e.hasFacing) writeBE16To(meshData.data() + off + 32, yawFromDegrees(e.facingDeg));
+        changed++;
+    }
+    printf("Applied %s marker placement edits: %d markers from %s\n", label, changed, path.c_str());
+    return true;
+}
+
+static bool bumpUnitTypeInstanceCount(std::vector<uint8_t>& meshData, uint16_t paletteIdx) {
+    constexpr size_t MESH_HEADER_SIZE = 1024;
+    uint32_t unitTypeCount = (uint32_t)readBE32s(meshData.data(), 0x24);
+    uint32_t unitTypeOffset = (uint32_t)readBE32s(meshData.data(), 0x28);
+    size_t base = MESH_HEADER_SIZE + (size_t)unitTypeOffset;
+    if (base + (size_t)unitTypeCount * 32 > meshData.size()) return false;
+
+    uint16_t rel = 0;
+    for (uint32_t i = 0; i < unitTypeCount; i++) {
+        size_t off = base + (size_t)i * 32;
+        int16_t markerType = readBE16s(meshData.data(), off);
+        if (markerType != 3) continue;
+        if (rel == paletteIdx) {
+            uint16_t count = (uint16_t)readBE16s(meshData.data(), off + 28);
+            writeBE16To(meshData.data() + off + 28, (uint16_t)(count + 1));
+            return true;
+        }
+        rel++;
+    }
+    return false;
+}
+
+static bool applyUnitPlacementEdits(std::vector<uint8_t>& meshData, const std::string& path) {
+    constexpr int WORLD_ONE = 512;
+    constexpr size_t MESH_HEADER_SIZE = 1024;
+    constexpr size_t INSTANCE_SIZE = 64;
+    if (meshData.size() < MESH_HEADER_SIZE) return false;
+    std::vector<UnitPlacementEdit> edits = readUnitPlacementEdits(path);
+    if (edits.empty()) return true;
+
+    uint32_t instanceCount = (uint32_t)readBE32s(meshData.data(), 0x34);
+    uint32_t instanceOffset = (uint32_t)readBE32s(meshData.data(), 0x38);
+    size_t base = MESH_HEADER_SIZE + (size_t)instanceOffset;
+    if (base + (size_t)instanceCount * INSTANCE_SIZE > meshData.size()) return false;
+
+    int changed = 0;
+    int added = 0;
+    for (const UnitPlacementEdit& e : edits) {
+        if (e.add) {
+            int sourceIdx = e.sourceMarkerIdx >= 0 ? e.sourceMarkerIdx : e.markerIdx;
+            if (sourceIdx < 0 || (uint32_t)sourceIdx >= instanceCount) continue;
+            size_t sourceOff = base + (size_t)sourceIdx * INSTANCE_SIZE;
+            int16_t markerType = readBE16s(meshData.data(), sourceOff + 4);
+            if (markerType != 3) continue;
+
+            auto bumpSectionOffset = [&](size_t fieldOff) {
+                uint32_t offset = (uint32_t)readBE32s(meshData.data(), fieldOff);
+                if (offset > instanceOffset) {
+                    writeBE32To(meshData.data() + fieldOff, offset + (uint32_t)INSTANCE_SIZE);
+                }
+            };
+            size_t insertOff = base + (size_t)instanceCount * INSTANCE_SIZE;
+            if (insertOff > meshData.size()) return false;
+            std::vector<uint8_t> rec(meshData.begin() + (ptrdiff_t)sourceOff,
+                                     meshData.begin() + (ptrdiff_t)sourceOff + (ptrdiff_t)INSTANCE_SIZE);
+            writeBE32To(rec.data() + 12, (uint32_t)(int32_t)std::lround(e.x * WORLD_ONE));
+            writeBE32To(rec.data() + 16, (uint32_t)(int32_t)std::lround(e.y * WORLD_ONE));
+            writeBE32To(rec.data() + 20, (uint32_t)(int32_t)std::lround(e.z * WORLD_ONE));
+            if (e.hasFacing) writeBE16To(rec.data() + 32, yawFromDegrees(e.facingDeg));
+
+            int16_t maxIdentifier = 0;
+            for (uint32_t i = 0; i < instanceCount; i++) {
+                int16_t identifier = readBE16s(meshData.data(), base + (size_t)i * INSTANCE_SIZE + 8);
+                if (identifier > maxIdentifier) maxIdentifier = identifier;
+            }
+            writeBE16To(rec.data() + 8, (uint16_t)(maxIdentifier + 1));
+            std::fill(rec.begin() + 56, rec.end(), 0);
+
+            meshData.insert(meshData.begin() + (ptrdiff_t)insertOff, rec.begin(), rec.end());
+            instanceCount++;
+            writeBE32To(meshData.data() + 0x34, instanceCount);
+            writeBE32To(meshData.data() + 0x3C, instanceCount * (uint32_t)INSTANCE_SIZE);
+            writeBE32To(meshData.data() + 0x1C, (uint32_t)(readBE32s(meshData.data(), 0x1C) + INSTANCE_SIZE));
+            bumpSectionOffset(0x84);  // map_actions_offset
+            bumpSectionOffset(0xC0);  // media_coverage_region_offset
+            bumpSectionOffset(0xCC);  // mesh_LOD_data_offset
+            bumpSectionOffset(0x114); // connectors_offset
+            bumpSectionOffset(0x3E4); // editor_data_offset
+            uint16_t paletteIdx = (uint16_t)readBE16s(rec.data(), 6);
+            bumpUnitTypeInstanceCount(meshData, paletteIdx);
+            base = MESH_HEADER_SIZE + (size_t)instanceOffset;
+            added++;
+            continue;
+        }
+        if (e.markerIdx < 0 || (uint32_t)e.markerIdx >= instanceCount) continue;
+        size_t off = base + (size_t)e.markerIdx * INSTANCE_SIZE;
+        int16_t markerType = readBE16s(meshData.data(), off + 4);
+        if (markerType != 3) continue;
+        writeBE32To(meshData.data() + off + 12, (uint32_t)(int32_t)std::lround(e.x * WORLD_ONE));
+        writeBE32To(meshData.data() + off + 16, (uint32_t)(int32_t)std::lround(e.y * WORLD_ONE));
+        writeBE32To(meshData.data() + off + 20, (uint32_t)(int32_t)std::lround(e.z * WORLD_ONE));
+        if (e.hasFacing) writeBE16To(meshData.data() + off + 32, yawFromDegrees(e.facingDeg));
+        changed++;
+    }
+    printf("Applied unit placement edits: %d moved, %d added from %s\n", changed, added, path.c_str());
+    return true;
+}
+
 static bool readManifest(const std::string& path, Manifest& m) {
     auto raw = readFile(path);
     if (raw.empty()) {
@@ -1453,17 +2031,67 @@ int main(int argc, char* argv[]) {
         tags.push_back(std::move(t));
     };
 
+    auto addGeneratedTag = [&](const std::string& label, std::vector<uint8_t> data,
+                               uint32_t group, const std::string& id,
+                               const std::string& fallbackName, uint16_t version) {
+        if (data.empty() || id.size() != 4) return;
+        TagSpec t;
+        t.filePath = label;
+        t.data = std::move(data);
+        t.groupTag = group;
+        t.subgroupTag = tagFromString(id);
+        t.name = fallbackName.empty() ? id : fallbackName;
+        t.version = version;
+        tags.push_back(std::move(t));
+    };
+
+    auto addScreenTag = [&](const std::string& tagPath, const std::initializer_list<std::string>& bmpPaths,
+                            const std::string& id, const std::string& label) {
+        if (isNullTagString(id)) return;
+        if (fileExists(tagPath)) {
+            addTag(tagPath, 0x2E323536u, id, id + " " + label, 4);
+            return;
+        }
+        std::string bmpPath = firstExistingPath(bmpPaths);
+        if (bmpPath.empty()) return;
+        std::vector<uint8_t> data = buildSingleImage256FromBMP(bmpPath, label);
+        if (!data.empty()) {
+            addGeneratedTag(bmpPath, std::move(data), 0x2E323536u, id, id + " " + label, 4);
+            printf("Generated %s .256 from %s\n", label.c_str(), bmpPath.c_str());
+        }
+    };
+
     addTag(folder + "/raw/mesh_tag.bin", 0x6D657368u, mf.meshTag, mf.meshTag, 11);
     addTag(folder + "/terrain/terrain_tag.bin", 0x2E323536u, mf.landscapeTag,
            isNullTagString(mf.landscapeTag) ? "" : (mf.landscapeTag + " terrain"), 4);
-    addTag(folder + "/strings/name_tag.bin", 0x73746C69u, mf.mapNameTag,
-           isNullTagString(mf.mapNameTag) ? "" : mf.mapNameTag, 1);
-    addTag(folder + "/screens/pregame_tag.bin", 0x2E323536u, mf.pregameTag,
-           isNullTagString(mf.pregameTag) ? "" : (mf.pregameTag + " pregame"), 4);
-    addTag(folder + "/screens/overhead_tag.bin", 0x2E323536u, mf.overheadTag,
-           isNullTagString(mf.overheadTag) ? "" : (mf.overheadTag + " overhead"), 4);
-    addTag(folder + "/screens/postgame_tag.bin", 0x2E323536u, mf.postgameTag,
-           isNullTagString(mf.postgameTag) ? "" : (mf.postgameTag + " postgame"), 4);
+    if (!isNullTagString(mf.mapNameTag)) {
+        std::string nameTagPath = folder + "/strings/name_tag.bin";
+        if (fileExists(nameTagPath)) {
+            addTag(nameTagPath, 0x73746C69u, mf.mapNameTag, mf.mapNameTag, 1);
+        } else {
+            std::string txtPath = firstExistingPath({
+                folder + "/strings/name.txt",
+                folder + "/layers/20_name.txt"
+            });
+            std::string txt = readTextFile(txtPath);
+            if (!txt.empty()) {
+                std::string stli = textToStli(txt);
+                addGeneratedTag(txtPath.empty() ? "generated:name_stli" : txtPath,
+                                std::vector<uint8_t>(stli.begin(), stli.end()),
+                                0x73746C69u, mf.mapNameTag, mf.mapNameTag, 1);
+                printf("Generated map name stli from %s\n", txtPath.c_str());
+            }
+        }
+    }
+    addScreenTag(folder + "/screens/pregame_tag.bin",
+                 {folder + "/screens/pregame.bmp", folder + "/layers/11_pregame.bmp"},
+                 mf.pregameTag, "pregame");
+    addScreenTag(folder + "/screens/overhead_tag.bin",
+                 {folder + "/screens/overhead.bmp", folder + "/layers/10_overhead.bmp"},
+                 mf.overheadTag, "overhead");
+    addScreenTag(folder + "/screens/postgame_tag.bin",
+                 {folder + "/screens/postgame.bmp", folder + "/layers/12_postgame.bmp"},
+                 mf.postgameTag, "postgame");
 
     if (tags.empty()) {
         fprintf(stderr, "No tag binaries found in %s\n", folder.c_str());
@@ -1535,6 +2163,45 @@ int main(int argc, char* argv[]) {
                             fprintf(stderr, "Animation map import failed: %s\n", animationBmp.c_str());
                             return 1;
                         }
+                    }
+                }
+                std::string unitPlacementPath = firstExistingPath({
+                    folder + "/assets/sprites/units_edited.json"
+                });
+                if (fileExists(unitPlacementPath)) {
+                    if (!applyUnitPlacementEdits(t.data, unitPlacementPath)) {
+                        fprintf(stderr, "Unit placement import failed: %s\n", unitPlacementPath.c_str());
+                        return 1;
+                    }
+                }
+                struct MarkerJsonImport {
+                    const char* path;
+                    int markerType;
+                    const char* label;
+                };
+                const MarkerJsonImport markerImports[] = {
+                    {"/assets/sprites/scenery.json", 1, "sprite scenery"},
+                    {"/assets/sounds/sounds.json", 5, "sound"},
+                    {"/assets/models/projectiles.json", 9, "projectile"},
+                    {"/placement.json", 6, "direct model"},
+                    {"/assets/models/animations.json", 11, "model animation"},
+                };
+                for (const auto& markerImport : markerImports) {
+                    std::string markerPath = folder + markerImport.path;
+                    if (!fileExists(markerPath)) continue;
+                    if (!applyMarkerPlacementEdits(t.data, markerPath, markerImport.markerType, markerImport.label)) {
+                        fprintf(stderr, "%s marker placement import failed: %s\n",
+                                markerImport.label, markerPath.c_str());
+                        return 1;
+                    }
+                }
+                std::string actionPath = firstExistingPath({
+                    folder + "/assets/actions/actions.json"
+                });
+                if (fileExists(actionPath)) {
+                    if (!applyMapActionsFromJson(t.data, actionPath)) {
+                        fprintf(stderr, "Map action import failed: %s\n", actionPath.c_str());
+                        return 1;
                     }
                 }
             } else if (t.groupTag == 0x73746C69u && t.subgroupTag == tagFromString(mf.mapNameTag)) {
