@@ -326,6 +326,7 @@ static void makeDirs(const std::string& base){
     makeDir(base);
     makeDir(base+"/terrain");
     makeDir(base+"/screens");
+    makeDir(base+"/sounds");
     makeDir(base+"/strings");
     makeDir(base+"/raw");
     makeDir(base+"/layers");
@@ -729,6 +730,320 @@ static bool extractSingleImage256FromData(const std::vector<uint8_t>& data, cons
     return writeBMPMythPal(outPath.c_str(),w,h,pal,px);
 }
 
+static std::string sanitizeName(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for(char ch : s) {
+        unsigned char c = (unsigned char)ch;
+        if((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+           c == '-' || c == '_' || c == '.') {
+            out.push_back((char)c);
+        } else if(c == ' ' || c == '\t') {
+            out.push_back('_');
+        }
+    }
+    if(out.empty()) out = "unnamed";
+    if(out.size() > 80) out.resize(80);
+    return out;
+}
+
+static std::string fixedString(const uint8_t* p, size_t n) {
+    size_t len = 0;
+    while(len < n && p[len] != 0) len++;
+    return std::string((const char*)p, len);
+}
+
+static std::string jsonEscape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for(char ch : s) {
+        unsigned char c = (unsigned char)ch;
+        switch(c) {
+            case '\\': out += "\\\\"; break;
+            case '"': out += "\\\""; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if(c < 32) {
+                    char buf[7];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out.push_back((char)c);
+                }
+                break;
+        }
+    }
+    return out;
+}
+
+static bool decodeBitmap256FromData(const std::vector<uint8_t>& data, int bi,
+                                    Myth256Palette& pal, int& w, int& h,
+                                    std::vector<uint8_t>& px,
+                                    std::string* bitmapName = nullptr) {
+    const size_t HDR=320, BITMAP_META_SIZE=52, BITMAP_REF_SIZE=128;
+    if(data.size()<HDR+sizeof(Myth256Palette)) return false;
+    int32_t bulkOff = readBE32s(data.data(),248);
+    int32_t palOff = readBE32s(data.data(),68);
+    int32_t bitmapCount = readBE32s(data.data(),96);
+    int32_t bitmapRefsOff = readBE32s(data.data(),100);
+    if(bulkOff<0 || palOff<0 || bitmapRefsOff<0 || bitmapCount<1 || bitmapCount>4096) return false;
+    if(bi < 0 || bi >= bitmapCount) return false;
+
+    size_t palAbs = (size_t)bulkOff + (size_t)palOff;
+    if(palAbs + sizeof(pal) > data.size()) return false;
+    memcpy(&pal,data.data()+palAbs,sizeof(pal));
+
+    size_t ref = (size_t)bulkOff + (size_t)bitmapRefsOff + (size_t)bi * BITMAP_REF_SIZE;
+    if(ref + BITMAP_REF_SIZE > data.size()) return false;
+    if(bitmapName) *bitmapName = fixedString(data.data() + ref, 64);
+    int32_t imgDataOff = readBE32s(data.data(), ref + 64);
+    int32_t imgDataLen = readBE32s(data.data(), ref + 68);
+    w = (int)readBE16s(data.data(), ref + 76);
+    h = (int)readBE16s(data.data(), ref + 78);
+    if(w<=0 || w>4096 || h<=0 || h>4096) return false;
+    long imgAbs = (long)bulkOff + (long)imgDataOff;
+    if(imgDataLen <= 0 || imgAbs < 0 || imgAbs + imgDataLen > (long)data.size()) return false;
+
+    px.assign((size_t)w*h, 0);
+    uint16_t flags = (uint16_t)readBE16s(data.data(), (size_t)imgAbs + 6);
+    bool compressed1Bit = (flags & 0x0004u) != 0;
+    bool compressed4Bit = (flags & 0x0010u) != 0;
+    bool noRowAddressTable = (flags & 0x0020u) != 0;
+
+    if(compressed1Bit || compressed4Bit) {
+        size_t addressTableSize = noRowAddressTable ? 0 : (size_t)std::max(0, h - 1) * 4u;
+        size_t streamStart = (size_t)imgAbs + BITMAP_META_SIZE + addressTableSize;
+        size_t streamEnd = (size_t)imgAbs + (size_t)imgDataLen;
+        size_t pos = streamStart;
+        for(int y=0; y<h; y++) {
+            if(pos + 4 > streamEnd) return false;
+            int spanCount = (int)readBE16s(data.data(), pos);
+            int pixelCount = (int)readBE16s(data.data(), pos + 2);
+            if(spanCount < 0 || pixelCount < 0 || spanCount > w || pixelCount > w) return false;
+            size_t spanTable = pos + 4;
+            size_t pixelStart = spanTable + (size_t)spanCount * 4u;
+            size_t pixelBytes = (size_t)pixelCount * (compressed4Bit ? 2u : 1u);
+            if(pixelStart + pixelBytes > streamEnd) return false;
+            int pi = 0;
+            for(int si=0; si<spanCount; si++) {
+                int x0 = (int)readBE16s(data.data(), spanTable + (size_t)si * 4u);
+                int x1 = (int)readBE16s(data.data(), spanTable + (size_t)si * 4u + 2u);
+                if(x0 < 0 || x1 < x0 || x1 > w) return false;
+                for(int x=x0; x<x1; x++) {
+                    size_t p = pixelStart + (size_t)pi * (compressed4Bit ? 2u : 1u);
+                    px[(size_t)y * w + x] = compressed4Bit ? data[p + 1] : data[p];
+                    pi++;
+                }
+            }
+            if(pi != pixelCount) return false;
+            pos = pixelStart + pixelBytes;
+            if(flags & 0x0040u) pos = (pos + 1u) & ~1u;
+        }
+        return true;
+    }
+
+    // Uncompressed layout matches extractSingleImage256FromData: a 48-byte
+    // bitmap header followed by h row pointers (BE32 each), then the pixel/
+    // span data. The on-disk row pointers are runtime virtual addresses; the
+    // engine (re)normalises them by subtracting (rowPtr[0] - firstRowOffset).
+    const size_t BITMAP_HEADER = 48;
+    bool decodedRows = false;
+    if(imgDataLen >= (int32_t)(BITMAP_HEADER + h * 4 + w * h)) {
+        std::vector<uint32_t> rowPtr((size_t)h + 1);
+        for(int y=0; y<h; y++)
+            rowPtr[(size_t)y] = readBE32(data.data(), (size_t)imgAbs + BITMAP_HEADER + (size_t)y * 4);
+        uint32_t firstRowOffset = (uint32_t)(BITMAP_HEADER + h * 4);
+        if(rowPtr[0] >= firstRowOffset) {
+            uint32_t virtualBase = rowPtr[0] - firstRowOffset;
+            rowPtr[(size_t)h] = virtualBase + (uint32_t)imgDataLen;
+            decodedRows = true;
+            for(int y=0; y<h && decodedRows; y++) {
+                if(rowPtr[(size_t)y] < virtualBase || rowPtr[(size_t)y + 1] < rowPtr[(size_t)y]) {
+                    decodedRows = false;
+                    break;
+                }
+                size_t rowStart = (size_t)(rowPtr[(size_t)y] - virtualBase);
+                size_t rowEnd = (size_t)(rowPtr[(size_t)y + 1] - virtualBase);
+                if(rowStart > rowEnd || rowEnd > (size_t)imgDataLen) {
+                    decodedRows = false;
+                    break;
+                }
+                const uint8_t* row = data.data() + (size_t)imgAbs + rowStart;
+                size_t rowLen = rowEnd - rowStart;
+                if(rowLen == (size_t)w) {
+                    memcpy(px.data() + (size_t)y * w, row, (size_t)w);
+                    continue;
+                }
+                if(rowLen == (size_t)w * 2) {
+                    uint8_t* dst = px.data() + (size_t)y * w;
+                    for(int x=0; x<w; x++) dst[x] = row[(size_t)x * 2 + 1];
+                    continue;
+                }
+                if(rowLen < 4) continue;
+                int spanCount = (int)readBE16s(row, 0);
+                int pixelCount = (int)readBE16s(row, 2);
+                size_t spanTableLen = 4 + (size_t)spanCount * 4;
+                if(spanCount < 0 || pixelCount < 0 || spanTableLen + (size_t)pixelCount > rowLen) {
+                    decodedRows = false;
+                    break;
+                }
+                int summedPixels = 0;
+                for(int si=0; si<spanCount; si++) {
+                    int x0 = (int)readBE16s(row, 4 + (size_t)si * 4);
+                    int x1 = (int)readBE16s(row, 6 + (size_t)si * 4);
+                    if(x0 < 0 || x1 < x0 || x1 > w) {
+                        decodedRows = false;
+                        break;
+                    }
+                    summedPixels += x1 - x0;
+                }
+                if(!decodedRows || summedPixels != pixelCount) {
+                    decodedRows = false;
+                    break;
+                }
+                const uint8_t* rowPixels = row + spanTableLen;
+                int pi = 0;
+                for(int si=0; si<spanCount; si++) {
+                    int x0 = (int)readBE16s(row, 4 + (size_t)si * 4);
+                    int x1 = (int)readBE16s(row, 6 + (size_t)si * 4);
+                    for(int x=x0; x<x1; x++) px[(size_t)y * w + x] = rowPixels[pi++];
+                }
+            }
+        }
+    }
+    if(!decodedRows) {
+        // Pixels follow the 48-byte header AND the h*4-byte row offset table.
+        long pixOff = imgAbs + (long)(BITMAP_HEADER + h * 4);
+        if(pixOff<0 || pixOff+(long)w*h>(long)data.size()) return false;
+        memcpy(px.data(),data.data()+pixOff,(size_t)w*h);
+    }
+    return true;
+}
+
+static bool extractCollection256FromData(const std::vector<uint8_t>& data,
+                                         const std::string& outDir,
+                                         const char* label) {
+    const size_t HDR=320, BITMAP_REF_SIZE=128, BITMAP_INSTANCE_SIZE=64, SEQUENCE_REF_SIZE=128;
+    if(data.size()<HDR+sizeof(Myth256Palette)) return false;
+    int32_t bulkOff = readBE32s(data.data(),248);
+    int32_t bitmapCount = readBE32s(data.data(),96);
+    int32_t bitmapRefsOff = readBE32s(data.data(),100);
+    int32_t bitmapInstanceCount = readBE32s(data.data(),112);
+    int32_t bitmapInstancesOff = readBE32s(data.data(),116);
+    int32_t sequenceCount = readBE32s(data.data(),128);
+    int32_t sequenceRefsOff = readBE32s(data.data(),132);
+    if(bulkOff<0 || bitmapCount<1 || bitmapCount>4096 || bitmapRefsOff<0) return false;
+
+    fs::create_directories(outDir);
+    std::vector<std::string> bitmapFiles((size_t)bitmapCount);
+    int written = 0;
+    for(int bi=0; bi<bitmapCount; bi++) {
+        Myth256Palette pal;
+        int w=0, h=0;
+        std::vector<uint8_t> px;
+        std::string name;
+        if(!decodeBitmap256FromData(data, bi, pal, w, h, px, &name)) continue;
+        char prefix[32];
+        std::snprintf(prefix, sizeof(prefix), "bitmap_%03d_", bi);
+        std::string file = std::string(prefix) + sanitizeName(name) + ".bmp";
+        if(writeBMPMythPal((outDir + "/" + file).c_str(), w, h, pal, px)) {
+            bitmapFiles[(size_t)bi] = file;
+            written++;
+        }
+    }
+
+    std::string meta;
+    meta += "{\n";
+    meta += "  \"label\": \"" + jsonEscape(label ? label : "collection") + "\",\n";
+    meta += "  \"bitmap_count\": " + std::to_string(bitmapCount) + ",\n";
+    meta += "  \"bitmap_instance_count\": " + std::to_string(std::max(0, bitmapInstanceCount)) + ",\n";
+    meta += "  \"sequence_count\": " + std::to_string(std::max(0, sequenceCount)) + ",\n";
+    meta += "  \"bitmaps\": [\n";
+    for(int bi=0; bi<bitmapCount; bi++) {
+        size_t ref = (size_t)bulkOff + (size_t)bitmapRefsOff + (size_t)bi * BITMAP_REF_SIZE;
+        std::string name;
+        int w=0, h=0;
+        if(ref + BITMAP_REF_SIZE <= data.size()) {
+            name = fixedString(data.data() + ref, 64);
+            w = (int)readBE16s(data.data(), ref + 76);
+            h = (int)readBE16s(data.data(), ref + 78);
+        }
+        meta += "    { \"index\": " + std::to_string(bi) +
+                ", \"name\": \"" + jsonEscape(name) +
+                "\", \"width\": " + std::to_string(w) +
+                ", \"height\": " + std::to_string(h) +
+                ", \"file\": \"" + jsonEscape(bitmapFiles[(size_t)bi]) + "\" }";
+        meta += (bi + 1 == bitmapCount) ? "\n" : ",\n";
+    }
+    meta += "  ],\n";
+    meta += "  \"bitmap_instances\": [\n";
+    int instLimit = 0;
+    if(bitmapInstanceCount > 0 && bitmapInstanceCount < 4096 && bitmapInstancesOff >= 0) instLimit = bitmapInstanceCount;
+    for(int ii=0; ii<instLimit; ii++) {
+        size_t inst = (size_t)bulkOff + (size_t)bitmapInstancesOff + (size_t)ii * BITMAP_INSTANCE_SIZE;
+        if(inst + BITMAP_INSTANCE_SIZE > data.size()) { instLimit = ii; break; }
+        int bitmapIndex = readBE16s(data.data(), inst + 28);
+        meta += "    { \"index\": " + std::to_string(ii) +
+                ", \"bitmap_index\": " + std::to_string(bitmapIndex) +
+                ", \"reg_x\": " + std::to_string(readBE16s(data.data(), inst + 12)) +
+                ", \"reg_y\": " + std::to_string(readBE16s(data.data(), inst + 14)) +
+                ", \"key_x\": " + std::to_string(readBE16s(data.data(), inst + 24)) +
+                ", \"key_y\": " + std::to_string(readBE16s(data.data(), inst + 26)) + " }";
+        meta += (ii + 1 == instLimit) ? "\n" : ",\n";
+    }
+    meta += "  ],\n";
+    meta += "  \"sequences\": [\n";
+    int seqLimit = 0;
+    if(sequenceCount > 0 && sequenceCount < 4096 && sequenceRefsOff >= 0) seqLimit = sequenceCount;
+    for(int si=0; si<seqLimit; si++) {
+        size_t seqRef = (size_t)bulkOff + (size_t)sequenceRefsOff + (size_t)si * SEQUENCE_REF_SIZE;
+        if(seqRef + SEQUENCE_REF_SIZE > data.size()) { seqLimit = si; break; }
+        std::string name = fixedString(data.data() + seqRef, 64);
+        int32_t seqOff = readBE32s(data.data(), seqRef + 64);
+        int32_t seqSize = readBE32s(data.data(), seqRef + 68);
+        size_t seq = (size_t)bulkOff + (size_t)seqOff;
+        int views = 0, frames = 0, ticks = 0;
+        if(seqOff >= 0 && seqSize >= 64 && seq + 64 <= data.size()) {
+            views = readBE16s(data.data(), seq + 8);
+            frames = readBE16s(data.data(), seq + 10);
+            ticks = readBE16s(data.data(), seq + 12);
+        }
+        meta += "    { \"index\": " + std::to_string(si) +
+                ", \"name\": \"" + jsonEscape(name) +
+                "\", \"views\": " + std::to_string(views) +
+                ", \"frames_per_view\": " + std::to_string(frames) +
+                ", \"ticks_per_frame\": " + std::to_string(ticks) +
+                ", \"frames\": [";
+        bool frameOk = views > 0 && views < 128 && frames > 0 && frames < 4096 &&
+                       seqOff >= 0 && seqSize >= 64 && seq + 64 <= data.size();
+        if(frameOk) {
+            size_t framePos = seq + 64;
+            for(int fi=0; fi<frames; fi++) {
+                if(framePos + 46 + (size_t)views * 2 > data.size()) break;
+                if(fi > 0) meta += ", ";
+                meta += "{ \"index\": " + std::to_string(fi) + ", \"views\": [";
+                size_t viewPos = framePos + 46;
+                for(int vi=0; vi<views; vi++) {
+                    if(vi > 0) meta += ", ";
+                    meta += std::to_string(readBE16s(data.data(), viewPos + (size_t)vi * 2));
+                }
+                meta += "] }";
+                framePos = viewPos + (size_t)views * 2;
+            }
+        }
+        meta += "] }";
+        meta += (si + 1 == seqLimit) ? "\n" : ",\n";
+    }
+    meta += "  ]\n";
+    meta += "}\n";
+    writeText(outDir + "/collection.json", meta);
+    printf("Extracted %s collection: %d/%d bitmaps -> %s\n",
+           label ? label : ".256", written, bitmapCount, outDir.c_str());
+    return written > 0;
+}
+
 struct MeshRefs {
     uint32_t landscapeTag=0;
     uint32_t mediaTag=0;
@@ -739,6 +1054,14 @@ struct MeshRefs {
     uint32_t postgameTag=0;
     uint32_t pregameTag=0;
     uint32_t overheadTag=0;
+    uint32_t globalAmbientSoundTag=0;
+    uint32_t narrationSoundTag=0;
+    uint32_t winAmbientSoundTag=0;
+    uint32_t lossAmbientSoundTag=0;
+    uint32_t pregameStorylineTag=0;
+    uint32_t storylineTag2=0;
+    uint32_t storylineTag3=0;
+    uint32_t storylineTag4=0;
 };
 
 static const uint8_t TERRAIN_TYPE_COLORS[16][3] = {
@@ -850,6 +1173,182 @@ static void exportMeshMaps(const std::vector<uint8_t>& meshData, int submeshW, i
     if(writeBMP4(animationBmp.c_str(),outW,outH,animationPalette,animation)) printf("Extracted animation.bmp from mesh\n");
 }
 
+// Sound (.soun) tag extraction. Mirrors export_map_objects.cpp's
+// exportSoundTagWavs but operates on raw tag data rather than the TagEntry
+// catalogue, so we can use it directly inside extract_map's screen-side
+// extraction (narration, win-ambient, loss-ambient).
+static bool writeWavPCM16(const std::string& path,
+                          const std::vector<int16_t>& samples,
+                          uint16_t channels,
+                          uint32_t sampleRate){
+    if(channels == 0 || sampleRate == 0) return false;
+    uint32_t dataSize = (uint32_t)(samples.size() * sizeof(int16_t));
+    uint32_t byteRate = sampleRate * channels * 2;
+    uint16_t blockAlign = (uint16_t)(channels * 2);
+
+    std::vector<uint8_t> out;
+    out.reserve(44 + dataSize);
+    out.insert(out.end(), {'R','I','F','F'});
+    appendLE32(out, 36 + dataSize);
+    out.insert(out.end(), {'W','A','V','E','f','m','t',' '});
+    appendLE32(out, 16);
+    appendLE16(out, 1);
+    appendLE16(out, channels);
+    appendLE32(out, sampleRate);
+    appendLE32(out, byteRate);
+    appendLE16(out, blockAlign);
+    appendLE16(out, 16);
+    out.insert(out.end(), {'d','a','t','a'});
+    appendLE32(out, dataSize);
+    for(int16_t s : samples) appendLE16(out, (uint16_t)s);
+    return writeFile(path, out);
+}
+
+static int clamp16(int v){
+    if(v < -32768) return -32768;
+    if(v > 32767) return 32767;
+    return v;
+}
+
+static void decompressAppleIMAPacket(int16_t state, const uint8_t* encoded, int16_t* dst){
+    static const int indexTab[16] = {
+        -1,-1,-1,-1, 2, 4, 6, 8,
+        -1,-1,-1,-1, 2, 4, 6, 8
+    };
+    static const int stepTab[89] = {
+        7, 8, 9, 10, 11, 12, 13, 14,
+        16, 17, 19, 21, 23, 25, 28,
+        31, 34, 37, 41, 45, 50, 55,
+        60, 66, 73, 80, 88, 97, 107,
+        118, 130, 143, 157, 173, 190, 209,
+        230, 253, 279, 307, 337, 371, 408,
+        449, 494, 544, 598, 658, 724, 796,
+        876, 963, 1060, 1166, 1282, 1411, 1552,
+        1707, 1878, 2066, 2272, 2499, 2749, 3024,
+        3327, 3660, 4026, 4428, 4871, 5358, 5894,
+        6484, 7132, 7845, 8630, 9493, 10442, 11487,
+        12635, 13899, 15289, 16818, 18500, 20350,
+        22385, 24623, 27086, 29794, 32767
+    };
+
+    int index = state & 0x7F;
+    if(index < 0) index = 0;
+    if(index > 88) index = 88;
+    int pred = (int)state & ~0x7F;
+    int step = stepTab[index];
+
+    for(int sample = 0; sample < 64; sample++){
+        int byte = encoded[sample >> 1];
+        int code = (sample & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
+        int diff = step >> 3;
+        if(code & 4) diff += step;
+        if(code & 2) diff += step >> 1;
+        if(code & 1) diff += step >> 2;
+        if(code & 8) diff = -diff;
+
+        pred = clamp16(pred + diff);
+        dst[sample] = (int16_t)pred;
+        index += indexTab[code];
+        if(index < 0) index = 0;
+        if(index > 88) index = 88;
+        step = stepTab[index];
+    }
+}
+
+// Decodes a Myth II 'soun' tag's permutations into one WAV per permutation.
+// Sound permutation table: numPerms × 32-byte permutation header followed by
+// numPerms × 32-byte sample headers, then sample data. See
+// export_map_objects.cpp:exportSoundTagWavs for the canonical implementation.
+static int extractSoundTagWavs(const std::vector<uint8_t>& d,
+                               const std::string& outDir,
+                               const std::string& stem){
+    if(d.size() < 64) return 0;
+    int32_t soundOffset = readBE32s(d.data(), 20);
+    int32_t numPerms    = readBE32s(d.data(), 36);
+    int32_t permOffset  = readBE32s(d.data(), 40);
+    int32_t permSize    = readBE32s(d.data(), 44);
+    if(numPerms <= 0 || numPerms > 5) return 0;
+    if(permSize != numPerms * 32) return 0;
+    if(permOffset < 0 || soundOffset < 0) return 0;
+    if((size_t)permOffset + (size_t)numPerms * 32 > d.size()) return 0;
+    if((size_t)soundOffset + (size_t)numPerms * 32 > d.size()) return 0;
+
+    fs::create_directories(outDir);
+    int written = 0;
+    size_t sampleOffset = (size_t)soundOffset + (size_t)numPerms * 32;
+    for(int i = 0; i < numPerms; i++){
+        size_t permAbs = (size_t)permOffset + (size_t)i * 32;
+        size_t hdrAbs  = (size_t)soundOffset + (size_t)i * 32;
+        std::string permName((const char*)d.data() + permAbs + 6,
+                             strnlen((const char*)d.data() + permAbs + 6, 26));
+
+        uint32_t sampleFlags     = readBE32(d.data(), hdrAbs + 0);
+        uint16_t bits            = (uint16_t)readBE16s(d.data(), hdrAbs + 4);
+        uint16_t physicalMinusOne= (uint16_t)readBE16s(d.data(), hdrAbs + 6);
+        uint16_t channels        = (uint16_t)readBE16s(d.data(), hdrAbs + 8);
+        uint32_t sampleRate      = readBE32(d.data(), hdrAbs + 12) >> 16;
+        uint32_t sampleCount     = readBE32(d.data(), hdrAbs + 16);
+
+        size_t storedSize = (sampleFlags & 1)
+            ? (size_t)sampleCount * 34
+            : (size_t)sampleCount << physicalMinusOne;
+        if(sampleOffset + storedSize > d.size()) return written;
+
+        std::string wavName = stem + "_" + std::to_string(i);
+        std::string pretty;
+        for(char c : permName){
+            unsigned char ch = (unsigned char)c;
+            if(ch < 32 || ch > 126 ||
+               c == '<' || c == '>' || c == ':' || c == '"' ||
+               c == '/' || c == '\\' || c == '|' || c == '?' || c == '*')
+                pretty.push_back('_');
+            else
+                pretty.push_back(c);
+        }
+        while(!pretty.empty() && (pretty.back() == ' ' || pretty.back() == '.'))
+            pretty.back() = '_';
+        if(!pretty.empty()) wavName += "_" + pretty;
+        wavName += ".wav";
+        std::string wavPath = outDir + "/" + wavName;
+
+        bool ok = false;
+        if((sampleFlags & 1) && bits == 16 && channels >= 1 && channels <= 2){
+            std::vector<int16_t> pcm;
+            if(channels == 1){
+                pcm.resize((size_t)sampleCount * 64);
+                for(uint32_t p = 0; p < sampleCount; p++){
+                    size_t packet = sampleOffset + (size_t)p * 34;
+                    int16_t state = readBE16s(d.data(), packet);
+                    decompressAppleIMAPacket(state, d.data() + packet + 2, pcm.data() + (size_t)p * 64);
+                }
+            } else {
+                uint32_t framePackets = sampleCount / 2;
+                pcm.resize((size_t)framePackets * 64 * 2);
+                int16_t left[64], right[64];
+                for(uint32_t p = 0; p < framePackets; p++){
+                    size_t lPacket = sampleOffset + (size_t)(p * 2) * 34;
+                    size_t rPacket = lPacket + 34;
+                    decompressAppleIMAPacket(readBE16s(d.data(), lPacket),     d.data() + lPacket + 2, left);
+                    decompressAppleIMAPacket(readBE16s(d.data(), rPacket),     d.data() + rPacket + 2, right);
+                    for(int s = 0; s < 64; s++){
+                        pcm[((size_t)p * 64 + s) * 2 + 0] = left[s];
+                        pcm[((size_t)p * 64 + s) * 2 + 1] = right[s];
+                    }
+                }
+            }
+            ok = writeWavPCM16(wavPath, pcm, channels, sampleRate);
+        } else if(!(sampleFlags & 1) && bits == 16 && channels >= 1 && channels <= 2){
+            std::vector<int16_t> pcm(sampleCount);
+            for(uint32_t s = 0; s < sampleCount; s++)
+                pcm[s] = readBE16s(d.data(), sampleOffset + (size_t)s * 2);
+            ok = writeWavPCM16(wavPath, pcm, channels, sampleRate);
+        }
+        if(ok) written++;
+        sampleOffset += storedSize;
+    }
+    return written;
+}
+
 static bool parseMeshRefs(const std::vector<uint8_t>& meshData, MeshRefs& m){
     if(meshData.size()<1024) return false;
     m.landscapeTag = readBE32(meshData.data(),0);
@@ -864,6 +1363,14 @@ static bool parseMeshRefs(const std::vector<uint8_t>& meshData, MeshRefs& m){
     m.postgameTag  = readBE32(meshData.data(),144);
     m.pregameTag   = readBE32(meshData.data(),148);
     m.overheadTag  = readBE32(meshData.data(),152);
+    m.globalAmbientSoundTag = readBE32(meshData.data(),0x7C);
+    m.narrationSoundTag     = readBE32(meshData.data(),0x100);
+    m.winAmbientSoundTag    = readBE32(meshData.data(),0x104);
+    m.lossAmbientSoundTag   = readBE32(meshData.data(),0x108);
+    m.pregameStorylineTag   = readBE32(meshData.data(),0xB0);
+    m.storylineTag2         = readBE32(meshData.data(),0xB4);
+    m.storylineTag3         = readBE32(meshData.data(),0xB8);
+    m.storylineTag4         = readBE32(meshData.data(),0xBC);
     return true;
 }
 
@@ -1017,11 +1524,75 @@ int main(int argc, char* argv[]){
         writeFile(outBin,data);
         if(extractSingleImage256FromData(data,outBmp))
             printf("Extracted %s from %s\n",label,e->sourceFile.c_str());
+        extractCollection256FromData(data, base + "/screens/" + std::string(label) + "_collection", label);
     };
 
     extractScreen(refs.overheadTag, base+"/screens/overhead.bmp", base+"/screens/overhead_tag.bin", "overhead");
     extractScreen(refs.pregameTag,  base+"/screens/pregame.bmp",  base+"/screens/pregame_tag.bin",  "pregame");
     extractScreen(refs.postgameTag, base+"/screens/postgame.bmp", base+"/screens/postgame_tag.bin", "postgame");
+
+    auto extractSound = [&](uint32_t id, const std::string& outBin, const std::string& wavDir,
+                            const std::string& wavStem, const char* label){
+        if(isNullTag(id)) return;
+        const TagEntry* e = findTag(tags, 0x736F756Eu, id); // 'soun'
+        if(!e) return;
+        std::vector<uint8_t> data;
+        if(!readTagData(*e, data) || data.empty()) return;
+        writeFile(outBin, data);
+        int wavs = extractSoundTagWavs(data, wavDir, wavStem);
+        printf("Extracted %s sound (%s) from %s -> %d wav(s)\n",
+               label, tagToString(id).c_str(), e->sourceFile.c_str(), wavs);
+    };
+
+    // Per-map sound tags. The mesh format reserves win_ambient_sound_tag and
+    // loss_ambient_sound_tag for postgame audio, but Bungie's stock vanilla
+    // maps leave both null — postgame audio in Myth II is game-wide rather
+    // than per-map, so the extractor only fires for narration in practice.
+    // The win/loss slots are still wired so custom maps that do use them
+    // round-trip correctly.
+    extractSound(refs.narrationSoundTag,
+                 base + "/sounds/narration_tag.bin",
+                 base + "/sounds", "narration", "narration");
+    extractSound(refs.winAmbientSoundTag,
+                 base + "/sounds/win_ambient_tag.bin",
+                 base + "/sounds", "win_ambient", "win ambient");
+    extractSound(refs.lossAmbientSoundTag,
+                 base + "/sounds/loss_ambient_tag.bin",
+                 base + "/sounds", "loss_ambient", "loss ambient");
+
+    // 'text' group tags (group=0x74657874): scrolling-prologue / storyline
+    // narration text. The mesh references a primary pregame_storyline_tag
+    // plus three additional slots (storyline_string_tags_2/3/4) per
+    // mesh_tag.py from reference_source/mythextract.
+    auto extractText = [&](uint32_t id, const std::string& outBin, const std::string& outTxt,
+                           const char* label){
+        if(isNullTag(id)) return;
+        const TagEntry* e = findTag(tags, 0x74657874u, id); // 'text'
+        if(!e) return;
+        std::vector<uint8_t> data;
+        if(!readTagData(*e, data) || data.empty()) return;
+        writeFile(outBin, data);
+        // text tags are CR-separated narration text — same shape as stli, so
+        // stliToText already filters non-printables and converts CR→LF.
+        std::string txt = stliToText(data);
+        writeText(outTxt, txt);
+        printf("Extracted %s text (%s) from %s -> %zu chars\n",
+               label, tagToString(id).c_str(), e->sourceFile.c_str(), txt.size());
+    };
+
+    extractText(refs.pregameStorylineTag,
+                base + "/strings/pregame_storyline_tag.bin",
+                base + "/strings/pregame_storyline.txt",
+                "pregame storyline");
+    extractText(refs.storylineTag2,
+                base + "/strings/storyline_2_tag.bin",
+                base + "/strings/storyline_2.txt", "storyline 2");
+    extractText(refs.storylineTag3,
+                base + "/strings/storyline_3_tag.bin",
+                base + "/strings/storyline_3.txt", "storyline 3");
+    extractText(refs.storylineTag4,
+                base + "/strings/storyline_4_tag.bin",
+                base + "/strings/storyline_4.txt", "storyline 4");
 
     writeLayerBundle(base);
     if(emitOra){

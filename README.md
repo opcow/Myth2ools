@@ -138,9 +138,13 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 - In normal engine behavior, the animated-media bit is derived from wet topology: a vertex is marked animated only when the four cells meeting there are all fully wet.
 - Because the engine recomputes that bit from topology, `terrain/animation.bmp` is best treated as a diagnostic/reference layer rather than a stable standalone authoring control.
 - `screens/pregame.bmp`, `screens/overhead.bmp`, and `screens/postgame.bmp`
-  are reinjected into their `.256` tags when present. If a screen `_tag.bin`
-  is missing, `build_plugin` can rebuild a single-image `.256` tag directly
-  from the matching 8-bit indexed BMP.
+  are reinjected into existing `.256` tags when present. `overhead.bmp` can
+  also be rebuilt into a simple single-image `.256` tag if its `_tag.bin` is
+  missing. Pregame and postgame screens are multi-sequence slideshow bundles,
+  so `extract_map` also writes `screens/<name>_collection/` with every bitmap
+  and a `collection.json` sequence map. If a screen `_tag.bin` is missing,
+  `build_plugin` can rebuild that full collection from the folder; the single
+  BMP preview alone is not enough.
 - `strings/name.txt` is rebuilt into the map-name `stli` when present.
   If `strings/name_tag.bin` is missing, `build_plugin` can generate this tag
   directly from `strings/name.txt`.
