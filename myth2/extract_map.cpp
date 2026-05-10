@@ -1612,7 +1612,14 @@ int main(int argc, char* argv[]){
         fprintf(mf,"    \"map_name_stli\": %s,\n",isNullTag(refs.mapDescStli)?"null":("\""+tagToString(refs.mapDescStli)+"\"").c_str());
         fprintf(mf,"    \"pregame_256\": %s,\n",isNullTag(refs.pregameTag)?"null":("\""+tagToString(refs.pregameTag)+"\"").c_str());
         fprintf(mf,"    \"overhead_256\": %s,\n",isNullTag(refs.overheadTag)?"null":("\""+tagToString(refs.overheadTag)+"\"").c_str());
-        fprintf(mf,"    \"postgame_256\": %s\n",isNullTag(refs.postgameTag)?"null":("\""+tagToString(refs.postgameTag)+"\"").c_str());
+        fprintf(mf,"    \"postgame_256\": %s,\n",isNullTag(refs.postgameTag)?"null":("\""+tagToString(refs.postgameTag)+"\"").c_str());
+        fprintf(mf,"    \"pregame_storyline_text\": %s,\n",isNullTag(refs.pregameStorylineTag)?"null":("\""+tagToString(refs.pregameStorylineTag)+"\"").c_str());
+        fprintf(mf,"    \"storyline_2_text\": %s,\n",isNullTag(refs.storylineTag2)?"null":("\""+tagToString(refs.storylineTag2)+"\"").c_str());
+        fprintf(mf,"    \"storyline_3_text\": %s,\n",isNullTag(refs.storylineTag3)?"null":("\""+tagToString(refs.storylineTag3)+"\"").c_str());
+        fprintf(mf,"    \"storyline_4_text\": %s,\n",isNullTag(refs.storylineTag4)?"null":("\""+tagToString(refs.storylineTag4)+"\"").c_str());
+        fprintf(mf,"    \"narration_sound\": %s,\n",isNullTag(refs.narrationSoundTag)?"null":("\""+tagToString(refs.narrationSoundTag)+"\"").c_str());
+        fprintf(mf,"    \"win_ambient_sound\": %s,\n",isNullTag(refs.winAmbientSoundTag)?"null":("\""+tagToString(refs.winAmbientSoundTag)+"\"").c_str());
+        fprintf(mf,"    \"loss_ambient_sound\": %s\n",isNullTag(refs.lossAmbientSoundTag)?"null":("\""+tagToString(refs.lossAmbientSoundTag)+"\"").c_str());
         fprintf(mf,"  },\n");
         fprintf(mf,"  \"mesh_layout\": {\n");
         fprintf(mf,"    \"mesh_offset\": %u,\n",refs.meshOffset);

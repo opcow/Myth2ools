@@ -20,7 +20,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <filesystem>
 #include <limits>
+#include <system_error>
 
 #include "mesh_flags.h"
 
@@ -99,6 +101,7 @@ static bool fileExists(const std::string& path) {
     return true;
 }
 
+
 static std::string readTextFile(const std::string& path) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) return {};
@@ -123,6 +126,222 @@ static uint32_t get32le(const uint8_t* b) {
 }
 static int32_t get32les(const uint8_t* b) { return (int32_t)get32le(b); }
 static uint16_t get16le(const uint8_t* b) { return (uint16_t)(b[0] | ((uint16_t)b[1] << 8)); }
+
+// ---------------------------------------------------------------------------
+// WAV reader (PCM16 only, mono or stereo). Returns interleaved samples.
+// ---------------------------------------------------------------------------
+static bool readWavPCM16(const std::string& path,
+                        std::vector<int16_t>& outSamples,
+                        uint16_t& outChannels,
+                        uint32_t& outSampleRate) {
+    auto raw = readFile(path);
+    if (raw.size() < 44) return false;
+    if (memcmp(raw.data(), "RIFF", 4) != 0 || memcmp(raw.data() + 8, "WAVE", 4) != 0) return false;
+
+    size_t p = 12;
+    uint16_t channels = 0;
+    uint32_t sampleRate = 0;
+    uint16_t bits = 0;
+    uint16_t fmt = 0;
+    const uint8_t* dataPtr = nullptr;
+    uint32_t dataLen = 0;
+
+    while (p + 8 <= raw.size()) {
+        const uint8_t* hdr = raw.data() + p;
+        uint32_t chunkSz = get32le(hdr + 4);
+        if (memcmp(hdr, "fmt ", 4) == 0) {
+            if (chunkSz < 16 || p + 8 + chunkSz > raw.size()) return false;
+            fmt        = get16le(hdr + 8);
+            channels   = get16le(hdr + 10);
+            sampleRate = get32le(hdr + 12);
+            bits       = get16le(hdr + 22);
+        } else if (memcmp(hdr, "data", 4) == 0) {
+            if (p + 8 + chunkSz > raw.size()) return false;
+            dataPtr = hdr + 8;
+            dataLen = chunkSz;
+            break;
+        }
+        p += 8 + chunkSz + (chunkSz & 1); // chunks are word-aligned
+    }
+    if (fmt != 1 || bits != 16 || channels < 1 || channels > 2 || !dataPtr) return false;
+
+    outChannels = channels;
+    outSampleRate = sampleRate;
+    size_t sampleCount = dataLen / 2;
+    outSamples.resize(sampleCount);
+    for (size_t i = 0; i < sampleCount; i++) {
+        outSamples[i] = (int16_t)(dataPtr[i * 2] | ((uint16_t)dataPtr[i * 2 + 1] << 8));
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Apple IMA ADPCM encoder (the inverse of the decoder in extract_map.cpp).
+// One packet = 2-byte preamble (predictor + step index) + 32 bytes of nibbles
+// = 64 samples. The predictor is mirrored from what the decoder will produce
+// for each chosen 4-bit code so encoder/decoder stay phase-locked.
+// ---------------------------------------------------------------------------
+static void encodeAppleIMAPacket(const int16_t* src, int& predState, int& stepIndex,
+                                 uint8_t* packetOut) {
+    static const int indexTab[16] = {
+        -1,-1,-1,-1, 2, 4, 6, 8,
+        -1,-1,-1,-1, 2, 4, 6, 8
+    };
+    static const int stepTab[89] = {
+        7, 8, 9, 10, 11, 12, 13, 14,
+        16, 17, 19, 21, 23, 25, 28,
+        31, 34, 37, 41, 45, 50, 55,
+        60, 66, 73, 80, 88, 97, 107,
+        118, 130, 143, 157, 173, 190, 209,
+        230, 253, 279, 307, 337, 371, 408,
+        449, 494, 544, 598, 658, 724, 796,
+        876, 963, 1060, 1166, 1282, 1411, 1552,
+        1707, 1878, 2066, 2272, 2499, 2749, 3024,
+        3327, 3660, 4026, 4428, 4871, 5358, 5894,
+        6484, 7132, 7845, 8630, 9493, 10442, 11487,
+        12635, 13899, 15289, 16818, 18500, 20350,
+        22385, 24623, 27086, 29794, 32767
+    };
+
+    if (stepIndex < 0) stepIndex = 0;
+    if (stepIndex > 88) stepIndex = 88;
+
+    // Encode preamble: high 9 bits = predictor (clamped/quantised), low 7 bits = index.
+    uint16_t preamble = (uint16_t)((predState & ~0x7F) | (stepIndex & 0x7F));
+    packetOut[0] = (uint8_t)(preamble >> 8);
+    packetOut[1] = (uint8_t)(preamble & 0xFF);
+    // The decoder reconstructs predState from the preamble it reads, so quantise here too.
+    int pred = (int)(int16_t)(preamble & ~0x7F);
+    int index = stepIndex;
+    int step = stepTab[index];
+
+    for (int sample = 0; sample < 64; sample++) {
+        int target = src[sample];
+        int delta = target - pred;
+        int sign = 0;
+        if (delta < 0) { sign = 8; delta = -delta; }
+        int code = sign;
+        int residual = delta;
+        if (residual >= step)        { code |= 4; residual -= step; }
+        if (residual >= (step >> 1)) { code |= 2; residual -= step >> 1; }
+        if (residual >= (step >> 2)) { code |= 1; }
+
+        // Mirror the decoder so pred lands where it'll land at decode time.
+        int diff = step >> 3;
+        if (code & 4) diff += step;
+        if (code & 2) diff += step >> 1;
+        if (code & 1) diff += step >> 2;
+        if (code & 8) diff = -diff;
+        pred += diff;
+        if (pred < -32768) pred = -32768;
+        if (pred >  32767) pred =  32767;
+
+        if (sample & 1) packetOut[2 + (sample >> 1)] |= (uint8_t)((code & 0xF) << 4);
+        else            packetOut[2 + (sample >> 1)]  = (uint8_t)(code & 0xF);
+
+        index += indexTab[code & 0xF];
+        if (index < 0) index = 0;
+        if (index > 88) index = 88;
+        step = stepTab[index];
+    }
+
+    predState = pred;
+    stepIndex = index;
+}
+
+// ---------------------------------------------------------------------------
+// Build a Myth II 'soun' tag with one ADPCM-compressed permutation from a
+// PCM16 source. Header layout / magic constants mirror the structure dumped
+// from a stock le3e narration tag (see Doc/sound_storage.md for the field
+// breakdown). The ADPCM-compressed flag is bit 0 of sampleFlags; the engine's
+// runtime then routes through the same decompressAppleIMAPacket path that
+// extract_map uses.
+// ---------------------------------------------------------------------------
+static std::vector<uint8_t> buildSoundTagFromWAV(const std::string& wavPath,
+                                                 const std::string& permName) {
+    std::vector<int16_t> samples;
+    uint16_t channels = 0;
+    uint32_t sampleRate = 0;
+    if (!readWavPCM16(wavPath, samples, channels, sampleRate)) return {};
+
+    // ADPCM: 64 samples per 34-byte packet. Stereo = L,R,L,R packets, each
+    // taken from a 64-sample window of one channel.
+    size_t framesPerChannel = samples.size() / channels;
+    size_t packetsPerChannel = (framesPerChannel + 63) / 64;
+    size_t totalPackets = packetsPerChannel * channels;
+    std::vector<uint8_t> adpcm(totalPackets * 34, 0);
+
+    int16_t mono[64];
+    int16_t leftBuf[64], rightBuf[64];
+    int predL = 0, idxL = 0, predR = 0, idxR = 0;
+
+    for (size_t p = 0; p < packetsPerChannel; p++) {
+        if (channels == 1) {
+            for (int s = 0; s < 64; s++) {
+                size_t si = p * 64 + s;
+                mono[s] = (si < framesPerChannel) ? samples[si] : 0;
+            }
+            encodeAppleIMAPacket(mono, predL, idxL, adpcm.data() + p * 34);
+        } else {
+            for (int s = 0; s < 64; s++) {
+                size_t si = p * 64 + s;
+                if (si < framesPerChannel) {
+                    leftBuf[s]  = samples[si * 2 + 0];
+                    rightBuf[s] = samples[si * 2 + 1];
+                } else {
+                    leftBuf[s] = rightBuf[s] = 0;
+                }
+            }
+            encodeAppleIMAPacket(leftBuf,  predL, idxL, adpcm.data() + (p * 2 + 0) * 34);
+            encodeAppleIMAPacket(rightBuf, predR, idxR, adpcm.data() + (p * 2 + 1) * 34);
+        }
+    }
+
+    // Tag layout: 64-byte header + 32-byte permutation record + 32-byte sample
+    // header + ADPCM packet stream. soundOffset lands at 96 (one permutation),
+    // permOffset at 64, permSize = 32.
+    constexpr size_t HEADER_SIZE = 64;
+    constexpr size_t PERM_SIZE   = 32;
+    constexpr size_t SAMPLE_HDR  = 32;
+    size_t headerEnd = HEADER_SIZE + PERM_SIZE + SAMPLE_HDR;
+    size_t totalSize = headerEnd + adpcm.size();
+
+    std::vector<uint8_t> out(totalSize, 0);
+
+    // 64-byte tag header. Magic constants copied verbatim from a verified
+    // stock soun tag (le3e na03); only the soundOffset, size at +0x18, and
+    // perm count/size fields are derived from this build's data.
+    writeBE16To(out.data() + 0x04, 3);          // priority (matches stock)
+    writeBE16To(out.data() + 0x06, 0xFFFF);
+    writeBE16To(out.data() + 0x08, 0x0100);     // pitch lower bound (1.0 in 8.8)
+    writeBE16To(out.data() + 0x0A, 0x0100);     // pitch delta
+    writeBE16To(out.data() + 0x0E, 0x00CC);
+    writeBE16To(out.data() + 0x12, 0xFFFE);     // subtitle string index = -2
+    uint32_t soundOffset = (uint32_t)(HEADER_SIZE + PERM_SIZE); // = 96
+    writeBE32To(out.data() + 0x14, soundOffset);
+    writeBE32To(out.data() + 0x18, (uint32_t)(totalSize - soundOffset)); // sample-section size
+    writeBE32To(out.data() + 0x24, 1);          // numPerms
+    writeBE32To(out.data() + 0x28, (uint32_t)HEADER_SIZE);              // permOffset = 64
+    writeBE32To(out.data() + 0x2C, (uint32_t)PERM_SIZE);                // permSize  = 32
+
+    // Permutation record at +64. Name lives at +6, max 26 bytes (NUL-terminated).
+    uint8_t* perm = out.data() + HEADER_SIZE;
+    std::string name = permName.empty() ? "encoded" : permName;
+    if (name.size() > 25) name.resize(25);
+    memcpy(perm + 6, name.c_str(), name.size());
+
+    // Sample header at +96.
+    uint8_t* sh = out.data() + HEADER_SIZE + PERM_SIZE;
+    writeBE32To(sh + 0,  1u);                                    // sampleFlags: bit 0 = ADPCM compressed
+    writeBE16To(sh + 4,  16);                                    // bits per sample
+    writeBE16To(sh + 6,  1);                                     // physicalMinusOne (unused for ADPCM)
+    writeBE16To(sh + 8,  channels);
+    writeBE32To(sh + 12, sampleRate << 16);                      // 16.16 fixed
+    writeBE32To(sh + 16, (uint32_t)totalPackets);                // sampleCount = packet count for ADPCM
+
+    memcpy(out.data() + headerEnd, adpcm.data(), adpcm.size());
+    return out;
+}
 
 static std::vector<uint8_t> readBMP8(const std::string& path, int& outW, int& outH) {
     auto raw = readFile(path);
@@ -444,6 +663,310 @@ static std::vector<uint8_t> buildSingleImage256FromBMP(const std::string& bmpPat
                     firstRowOffset + (uint32_t)y * (uint32_t)w);
     }
     memcpy(img + firstRowOffset, bmp.data(), bmp.size());
+    return out;
+}
+
+// Forward declarations for JSON helpers defined later in the file —
+// the multi-sequence collection parser needs them.
+static int jsonInt(const std::string& j, const std::string& key, int def);
+static std::string jsonString(const std::string& j, const std::string& key, const std::string& def);
+static bool jsonIntNear(const std::string& obj, const std::string& key, int& out);
+static std::vector<std::string> jsonObjectsInArray(const std::string& j, const std::string& key);
+
+// ===========================================================================
+// Multi-sequence .256 builder
+// ===========================================================================
+// Reads the per-bitmap collection that extract_map writes
+// (collection.json + bitmap_NNN_*.bmp files) and produces a complete .256
+// collection tag with the right number of sequences, bitmap_instances, and
+// bitmap_references. Replaces the single-image stub for pregame/postgame.
+//
+// Format (per reference_source/mythextract/scripts/myth_collection.py):
+//   320-byte header  +  bulk:
+//     [0]            palette (2080 bytes)
+//     [PAL+]         bitmap_instances  (K * 64)
+//     [INST+]        sequence_refs     (S * 128)
+//     [SEQR+]        per-sequence sequence_data + frames + view tables
+//     [SEQD+]        AUX  (32 zero bytes — single-image builder reserves it)
+//     [AUX+]         bitmap_refs       (N * 128)
+//     [REF+]         per-bitmap pixel data (48-byte meta + h*4 row table + pixels;
+//                                            for h==1, no row table — pixels right after meta)
+
+struct CollBitmap { int index = 0; std::string name; int w = 0; int h = 0; std::string file; };
+struct CollInstance { int index = 0; int bitmapIndex = -1; int regX = 0, regY = 0, keyX = 0, keyY = 0; };
+struct CollFrame { int index = 0; std::vector<int16_t> views; };
+struct CollSequence { int index = 0; std::string name; int views = 0; int framesPerView = 0; int ticksPerFrame = 0; std::vector<CollFrame> frames; };
+struct CollectionData {
+    std::vector<CollBitmap> bitmaps;
+    std::vector<CollInstance> instances;
+    std::vector<CollSequence> sequences;
+};
+
+// Parse the views: [a, b, c, ...] array out of a frame object snippet.
+static std::vector<int16_t> parseViewsArray(const std::string& obj) {
+    std::vector<int16_t> v;
+    size_t p = obj.find("\"views\"");
+    if (p == std::string::npos) return v;
+    p = obj.find('[', p);
+    if (p == std::string::npos) return v;
+    size_t end = obj.find(']', p);
+    if (end == std::string::npos) return v;
+    size_t i = p + 1;
+    while (i < end) {
+        while (i < end && (obj[i] == ' ' || obj[i] == ',' || obj[i] == '\t' || obj[i] == '\n' || obj[i] == '\r')) i++;
+        if (i >= end) break;
+        bool neg = false;
+        if (obj[i] == '-') { neg = true; i++; }
+        if (!std::isdigit((unsigned char)obj[i])) break;
+        int n = 0;
+        while (i < end && std::isdigit((unsigned char)obj[i])) {
+            n = n * 10 + (obj[i] - '0');
+            i++;
+        }
+        v.push_back((int16_t)(neg ? -n : n));
+    }
+    return v;
+}
+
+static bool parseCollectionJson(const std::string& path, CollectionData& out) {
+    std::string j = readTextFile(path);
+    if (j.empty()) return false;
+
+    for (const std::string& obj : jsonObjectsInArray(j, "bitmaps")) {
+        CollBitmap b;
+        jsonIntNear(obj, "index", b.index);
+        b.name = jsonString(obj, "name", "");
+        int w = 0, h = 0;
+        jsonIntNear(obj, "width", w);
+        jsonIntNear(obj, "height", h);
+        b.w = w; b.h = h;
+        b.file = jsonString(obj, "file", "");
+        out.bitmaps.push_back(std::move(b));
+    }
+    for (const std::string& obj : jsonObjectsInArray(j, "bitmap_instances")) {
+        CollInstance i;
+        jsonIntNear(obj, "index", i.index);
+        jsonIntNear(obj, "bitmap_index", i.bitmapIndex);
+        jsonIntNear(obj, "reg_x", i.regX);
+        jsonIntNear(obj, "reg_y", i.regY);
+        jsonIntNear(obj, "key_x", i.keyX);
+        jsonIntNear(obj, "key_y", i.keyY);
+        out.instances.push_back(std::move(i));
+    }
+    for (const std::string& obj : jsonObjectsInArray(j, "sequences")) {
+        CollSequence s;
+        jsonIntNear(obj, "index", s.index);
+        s.name = jsonString(obj, "name", "");
+        jsonIntNear(obj, "views", s.views);
+        jsonIntNear(obj, "frames_per_view", s.framesPerView);
+        jsonIntNear(obj, "ticks_per_frame", s.ticksPerFrame);
+        for (const std::string& fobj : jsonObjectsInArray(obj, "frames")) {
+            CollFrame f;
+            jsonIntNear(fobj, "index", f.index);
+            f.views = parseViewsArray(fobj);
+            s.frames.push_back(std::move(f));
+        }
+        out.sequences.push_back(std::move(s));
+    }
+    return !out.bitmaps.empty();
+}
+
+static std::vector<uint8_t> buildCollection256FromFolder(const std::string& collectionDir,
+                                                         const std::string& label) {
+    CollectionData c;
+    if (!parseCollectionJson(collectionDir + "/collection.json", c)) return {};
+
+    constexpr uint32_t HDR = 320;
+    constexpr uint32_t BITMAP_HEADER = 48;
+    constexpr uint32_t INST_REC = 64;
+    constexpr uint32_t SEQ_REF = 128;
+    constexpr uint32_t BITMAP_REF = 128;
+    constexpr uint32_t AUX_LEN = 32;
+    const uint32_t PAL_LEN = (uint32_t)sizeof(Myth256Palette);
+
+    // Read each bitmap's pixels. Take the palette from the first bitmap (the
+    // collection extractor writes the same Myth palette into every BMP).
+    struct BmpData { std::vector<uint8_t> pixels; int w = 0; int h = 0; std::vector<uint8_t> raw; };
+    std::vector<BmpData> bmps(c.bitmaps.size());
+    for (size_t i = 0; i < c.bitmaps.size(); i++) {
+        std::string p = collectionDir + "/" + c.bitmaps[i].file;
+        bmps[i].raw = readFile(p);
+        bmps[i].pixels = readBMP8(p, bmps[i].w, bmps[i].h);
+        if (bmps[i].pixels.empty()) {
+            fprintf(stderr, "Failed to read %s\n", p.c_str());
+            return {};
+        }
+        if (bmps[i].w != c.bitmaps[i].w || bmps[i].h != c.bitmaps[i].h) {
+            fprintf(stderr, "Bitmap dim mismatch for %s: BMP=%dx%d, json=%dx%d\n",
+                    p.c_str(), bmps[i].w, bmps[i].h, c.bitmaps[i].w, c.bitmaps[i].h);
+            return {};
+        }
+    }
+
+    uint32_t N = (uint32_t)c.bitmaps.size();
+    uint32_t K = (uint32_t)c.instances.size();
+    uint32_t S = (uint32_t)c.sequences.size();
+
+    // Per-sequence size: 64-byte sequence_data + frames * (46-byte frame_header + views * 2).
+    auto seqSize = [](const CollSequence& s) -> uint32_t {
+        uint32_t sz = 64;
+        for (const auto& f : s.frames) sz += 46 + (uint32_t)f.views.size() * 2u;
+        return sz;
+    };
+    uint32_t seqDataTotal = 0;
+    for (const auto& s : c.sequences) seqDataTotal += seqSize(s);
+
+    // Per-bitmap size: 48-byte meta + h*4 row offset table + w*h pixels.
+    // The row table is written even for h==1 so the file layout is uniform
+    // and the extract-map fallback (which assumes h*4 bytes follow the meta
+    // header) round-trips correctly.
+    auto bmpSize = [&](size_t i) -> uint32_t {
+        int h = bmps[i].h, w = bmps[i].w;
+        return BITMAP_HEADER + (uint32_t)h * 4u + (uint32_t)w * (uint32_t)h;
+    };
+    std::vector<uint32_t> bmpOff(N);
+    std::vector<uint32_t> bmpLen(N);
+
+    // Lay out bulk offsets.
+    uint32_t PAL_OFF  = 0;
+    uint32_t INST_OFF = PAL_OFF + PAL_LEN;
+    uint32_t SEQR_OFF = INST_OFF + K * INST_REC;
+    uint32_t SEQD_OFF = SEQR_OFF + S * SEQ_REF;
+    uint32_t AUX_OFF  = SEQD_OFF + seqDataTotal;
+    uint32_t REF_OFF  = AUX_OFF + AUX_LEN;
+    uint32_t IMG_BASE = REF_OFF + N * BITMAP_REF;
+
+    uint32_t imgCursor = IMG_BASE;
+    for (uint32_t i = 0; i < N; i++) {
+        bmpOff[i] = imgCursor;
+        bmpLen[i] = bmpSize(i);
+        imgCursor += bmpLen[i];
+    }
+    uint32_t bulkLen = imgCursor;
+
+    std::vector<uint8_t> out((size_t)HDR + bulkLen, 0);
+
+    // === 320-byte header (mirrors buildSingleImage256FromBMP for the few
+    // unknown fields, and patched with the multi-collection counts/offsets.)
+    writeBE32To(out.data() + 4,   32);
+    writeBE32To(out.data() + 64,  1);
+    writeBE32To(out.data() + 68,  PAL_OFF);
+    writeBE32To(out.data() + 72,  PAL_LEN);
+    writeBE32To(out.data() + 84,  PAL_LEN);
+    writeBE32To(out.data() + 96,  N);                  // bitmapCount
+    writeBE32To(out.data() + 100, REF_OFF);
+    writeBE32To(out.data() + 104, N * BITMAP_REF);
+    writeBE32To(out.data() + 112, K);                  // bitmapInstanceCount
+    writeBE32To(out.data() + 116, INST_OFF);
+    writeBE32To(out.data() + 120, K * INST_REC);
+    writeBE32To(out.data() + 128, S);                  // sequenceCount
+    writeBE32To(out.data() + 132, SEQR_OFF);
+    writeBE32To(out.data() + 136, S * SEQ_REF);
+    writeBE32To(out.data() + 144, 1);
+    writeBE32To(out.data() + 148, AUX_OFF);
+    writeBE32To(out.data() + 152, AUX_LEN);
+    writeBE32To(out.data() + 248, HDR);
+    writeBE32To(out.data() + 252, bulkLen);
+
+    uint8_t* bulk = out.data() + HDR;
+
+    // === Palette (2080 bytes) — first 32 bytes are header (color_count and
+    // padding), then 256 × 8-byte color entries. Sourced from any bitmap.
+    writeBE32To(bulk + PAL_OFF, 256);
+    if (!copyBMPPaletteToMyth256(bulk + PAL_OFF + 32, bmps[0].raw)) return {};
+
+    // === Bitmap instances (K × 64). Field offsets per BitmapInstanceFmt in
+    // myth_collection.py.
+    for (uint32_t i = 0; i < K; i++) {
+        uint8_t* ins = bulk + INST_OFF + i * INST_REC;
+        const CollInstance& ci = c.instances[i];
+        writeBE16To(ins + 12, (uint16_t)ci.regX);
+        writeBE16To(ins + 14, (uint16_t)ci.regY);
+        writeBE16To(ins + 24, (uint16_t)ci.keyX);
+        writeBE16To(ins + 26, (uint16_t)ci.keyY);
+        writeBE16To(ins + 28, (uint16_t)ci.bitmapIndex);
+        writeBE16To(ins + 30, 0xFFFFu); // highres_bitmap_index = -1
+    }
+
+    // === Sequence references (S × 128) and per-sequence data (variable).
+    uint32_t seqCursor = SEQD_OFF;
+    for (uint32_t s = 0; s < S; s++) {
+        const CollSequence& cs = c.sequences[s];
+        uint8_t* ref = bulk + SEQR_OFF + s * SEQ_REF;
+        memcpy(ref, cs.name.c_str(), std::min<size_t>(cs.name.size(), 63));
+        uint32_t thisSize = seqSize(cs);
+        writeBE32To(ref + 64, seqCursor);
+        writeBE32To(ref + 68, thisSize);
+
+        uint8_t* sd = bulk + seqCursor;
+        // SequenceDataFmt: flags(L), pixels_to_world(l Fixed=1.0), num_views(h),
+        // frames_per_view(h), ticks_per_frame(h), key_frame(h), loop_frame(h),
+        // 6 bytes runtime sound indices, 12 bytes sound tags, 4 bytes transfer,
+        // 12 bytes radius/height0/height1, 12 bytes runtime/pad.
+        writeBE32To(sd + 0, 0x00000002);                // HAS_FRAME_DATA flag
+        writeBE32To(sd + 4, 0x00010000);                // pixels_to_world = 1.0 fixed
+        writeBE16To(sd + 8,  (uint16_t)cs.views);
+        writeBE16To(sd + 10, (uint16_t)cs.framesPerView);
+        writeBE16To(sd + 12, (uint16_t)cs.ticksPerFrame);
+        // key_frame, loop_frame, sound stuff, transfer mode = leave zero.
+        // Seq metric defaults that match what Myth writes for static screens:
+        if (cs.framesPerView > 0) {
+            // radius / height0 / height1 default to width-derived values; safest
+            // is zero (used only for sprite rendering, not screen UI).
+        }
+
+        size_t framePos = seqCursor + 64;
+        for (const auto& f : cs.frames) {
+            uint8_t* fr = bulk + framePos;
+            // SequenceFrameFmt: shadow_map_index(h)=-1, key_point_x/y/z(h), 38 pad.
+            writeBE16To(fr + 0, 0xFFFFu); // shadow_map_index = -1
+            // key_point_x/y/z left zero.
+            for (size_t v = 0; v < f.views.size(); v++) {
+                writeBE16To(fr + 46 + v * 2, (uint16_t)f.views[v]);
+            }
+            framePos += 46 + f.views.size() * 2;
+        }
+        seqCursor += thisSize;
+    }
+
+    // AUX section is 32 zero bytes. Skip — already zeroed by std::vector init.
+
+    // === Bitmap references (N × 128).
+    for (uint32_t i = 0; i < N; i++) {
+        uint8_t* ref = bulk + REF_OFF + i * BITMAP_REF;
+        const std::string& name = c.bitmaps[i].name;
+        memcpy(ref, name.c_str(), std::min<size_t>(name.size(), 63));
+        writeBE32To(ref + 64, bmpOff[i]);
+        writeBE32To(ref + 68, bmpLen[i]);
+        // first row offset (relative to bitmap start) = meta + row_table.
+        uint32_t firstRow = BITMAP_HEADER + (uint32_t)bmps[i].h * 4u;
+        writeBE32To(ref + 72, firstRow);
+        writeBE16To(ref + 76, (uint16_t)bmps[i].w);
+        writeBE16To(ref + 78, (uint16_t)bmps[i].h);
+    }
+
+    // === Per-bitmap pixel data (48-byte meta + h*4 row table + pixels).
+    for (uint32_t i = 0; i < N; i++) {
+        uint8_t* img = bulk + bmpOff[i];
+        int w = bmps[i].w, h = bmps[i].h;
+        writeBE16To(img + 0, (uint16_t)w);
+        writeBE16To(img + 2, (uint16_t)h);
+        writeBE16To(img + 4, (uint16_t)w);             // bytes_per_row
+        writeBE16To(img + 8, 8);                       // bit depth
+        writeBE16To(img + 28, (uint16_t)ceilLog2Int(w));
+        writeBE16To(img + 30, (uint16_t)ceilLog2Int(h));
+        writeBE16To(img + 32, (uint16_t)std::max(1, (w + 255) / 256));
+        writeBE16To(img + 34, (uint16_t)std::max(1, (h + 127) / 128));
+
+        uint32_t firstRow = BITMAP_HEADER + (uint32_t)h * 4u;
+        for (int y = 0; y < h; y++) {
+            writeBE32To(img + BITMAP_HEADER + (size_t)y * 4,
+                        firstRow + (uint32_t)y * (uint32_t)w);
+        }
+        memcpy(img + firstRow, bmps[i].pixels.data(), bmps[i].pixels.size());
+    }
+
+    (void)label;
     return out;
 }
 
@@ -1291,9 +1814,17 @@ struct Manifest {
     std::string meshTag;
     std::string mapNameTag;
     std::string landscapeTag;
+    std::string mediaTag;
     std::string pregameTag;
     std::string overheadTag;
     std::string postgameTag;
+    std::string pregameStorylineTextTag;
+    std::string storyline2TextTag;
+    std::string storyline3TextTag;
+    std::string storyline4TextTag;
+    std::string narrationSoundTag;
+    std::string winAmbientSoundTag;
+    std::string lossAmbientSoundTag;
     int submeshWidth = 0;
     int submeshHeight = 0;
 };
@@ -1816,11 +2347,24 @@ static bool readManifest(const std::string& path, Manifest& m) {
     m.submeshHeight = jsonInt(j, "height", 0);
     if (m.submeshWidth == 0) m.submeshWidth = jsonInt(j, "width", 0);
     if (m.submeshHeight == 0) m.submeshHeight = jsonInt(j, "height", 0);
-    m.landscapeTag = jsonString(j, "landscape_256", "");
-    m.mapNameTag = jsonString(j, "map_name_stli", "");
-    m.pregameTag = jsonString(j, "pregame_256", "");
-    m.overheadTag = jsonString(j, "overhead_256", "");
-    m.postgameTag = jsonString(j, "postgame_256", "");
+    auto pull = [&](std::string& field, const std::string& key, const std::string& tail){
+        std::string v = jsonString(tail, key, "");
+        if (!v.empty()) field = v;
+    };
+
+    pull(m.landscapeTag,           "landscape_256",          j);
+    pull(m.mediaTag,               "media_tag",              j);
+    pull(m.mapNameTag,             "map_name_stli",          j);
+    pull(m.pregameTag,             "pregame_256",            j);
+    pull(m.overheadTag,            "overhead_256",           j);
+    pull(m.postgameTag,            "postgame_256",           j);
+    pull(m.pregameStorylineTextTag,"pregame_storyline_text", j);
+    pull(m.storyline2TextTag,      "storyline_2_text",       j);
+    pull(m.storyline3TextTag,      "storyline_3_text",       j);
+    pull(m.storyline4TextTag,      "storyline_4_text",       j);
+    pull(m.narrationSoundTag,      "narration_sound",        j);
+    pull(m.winAmbientSoundTag,     "win_ambient_sound",      j);
+    pull(m.lossAmbientSoundTag,    "loss_ambient_sound",     j);
 
     if (m.submeshWidth == 0 || m.submeshHeight == 0) {
         size_t p = j.find("\"submesh_dimensions\"");
@@ -1830,15 +2374,23 @@ static bool readManifest(const std::string& path, Manifest& m) {
             m.submeshHeight = std::max(m.submeshHeight, jsonInt(tail, "height", 0));
         }
     }
-    if (m.landscapeTag.empty()) {
+    {
         size_t p = j.find("\"referenced_tags\"");
         if (p != std::string::npos) {
             std::string tail = j.substr(p);
-            m.landscapeTag = jsonString(tail, "landscape_256", "");
-            m.mapNameTag = jsonString(tail, "map_name_stli", "");
-            m.pregameTag = jsonString(tail, "pregame_256", "");
-            m.overheadTag = jsonString(tail, "overhead_256", "");
-            m.postgameTag = jsonString(tail, "postgame_256", "");
+            pull(m.landscapeTag,           "landscape_256",          tail);
+            pull(m.mediaTag,               "media_tag",              tail);
+            pull(m.mapNameTag,             "map_name_stli",          tail);
+            pull(m.pregameTag,             "pregame_256",            tail);
+            pull(m.overheadTag,            "overhead_256",           tail);
+            pull(m.postgameTag,            "postgame_256",           tail);
+            pull(m.pregameStorylineTextTag,"pregame_storyline_text", tail);
+            pull(m.storyline2TextTag,      "storyline_2_text",       tail);
+            pull(m.storyline3TextTag,      "storyline_3_text",       tail);
+            pull(m.storyline4TextTag,      "storyline_4_text",       tail);
+            pull(m.narrationSoundTag,      "narration_sound",        tail);
+            pull(m.winAmbientSoundTag,     "win_ambient_sound",      tail);
+            pull(m.lossAmbientSoundTag,    "loss_ambient_sound",     tail);
         }
     }
     return m.meshTag.size() == 4;
@@ -2082,17 +2634,47 @@ int main(int argc, char* argv[]) {
     auto addScreenTag = [&](const std::string& tagPath, const std::initializer_list<std::string>& bmpPaths,
                             const std::string& id, const std::string& label) {
         if (isNullTagString(id)) return;
+
+        // Multi-sequence collection (pregame/postgame) — preferred path.
+        // If the per-bitmap collection folder is present, build the .256
+        // from collection.json + per-bitmap BMPs. The .bin is ignored.
+        std::string collDir = folder + "/screens/" + label + "_collection";
+        if (fileExists(collDir + "/collection.json")) {
+            std::vector<uint8_t> data = buildCollection256FromFolder(collDir, label);
+            if (!data.empty()) {
+                addGeneratedTag(collDir, std::move(data), 0x2E323536u, id, id + " " + label, 4);
+                printf("Generated %s .256 from %s\n", label.c_str(), collDir.c_str());
+                return;
+            }
+            fprintf(stderr, "Failed to build multi-sequence .256 from %s\n", collDir.c_str());
+        }
+
+        // Single-image fall-through (overhead, or hand-authored maps with no
+        // collection folder). .bin wins, then top-level BMP.
         if (fileExists(tagPath)) {
             addTag(tagPath, 0x2E323536u, id, id + " " + label, 4);
             return;
         }
         std::string bmpPath = firstExistingPath(bmpPaths);
-        if (bmpPath.empty()) return;
-        std::vector<uint8_t> data = buildSingleImage256FromBMP(bmpPath, label);
-        if (!data.empty()) {
-            addGeneratedTag(bmpPath, std::move(data), 0x2E323536u, id, id + " " + label, 4);
-            printf("Generated %s .256 from %s\n", label.c_str(), bmpPath.c_str());
+        if (!bmpPath.empty()) {
+            std::vector<uint8_t> data = buildSingleImage256FromBMP(bmpPath, label);
+            if (!data.empty()) {
+                addGeneratedTag(bmpPath, std::move(data), 0x2E323536u, id, id + " " + label, 4);
+                printf("Generated %s .256 from %s\n", label.c_str(), bmpPath.c_str());
+                return;
+            }
         }
+        fprintf(stderr,
+            "WARNING: %s screen (%s) couldn't be packed.\n"
+            "  Looked for: %s/screens/%s_collection/collection.json\n"
+            "              %s\n"
+            "              %s\n"
+            "  The mesh references '%s'; without the tag the map will fail to load.\n",
+            label.c_str(), id.c_str(),
+            folder.c_str(), label.c_str(),
+            tagPath.c_str(),
+            bmpPaths.size() > 0 ? bmpPaths.begin()->c_str() : "(no bmp candidates)",
+            id.c_str());
     };
 
     addTag(folder + "/raw/mesh_tag.bin", 0x6D657368u, mf.meshTag, mf.meshTag, 11);
@@ -2100,21 +2682,25 @@ int main(int argc, char* argv[]) {
            isNullTagString(mf.landscapeTag) ? "" : (mf.landscapeTag + " terrain"), 4);
     if (!isNullTagString(mf.mapNameTag)) {
         std::string nameTagPath = folder + "/strings/name_tag.bin";
-        if (fileExists(nameTagPath)) {
-            addTag(nameTagPath, 0x73746C69u, mf.mapNameTag, mf.mapNameTag, 1);
-        } else {
-            std::string txtPath = firstExistingPath({
-                folder + "/strings/name.txt",
-                folder + "/layers/20_name.txt"
-            });
+        std::string txtPath = firstExistingPath({
+            folder + "/strings/name.txt",
+            folder + "/layers/20_name.txt"
+        });
+        // .txt wins when present — encoding is the inverse of stliToText, so
+        // a fresh extract still round-trips byte-for-byte. This makes user
+        // edits to the .txt take effect without having to delete the .bin.
+        if (!txtPath.empty()) {
             std::string txt = readTextFile(txtPath);
             if (!txt.empty()) {
                 std::string stli = textToStli(txt);
-                addGeneratedTag(txtPath.empty() ? "generated:name_stli" : txtPath,
-                                std::vector<uint8_t>(stli.begin(), stli.end()),
+                addGeneratedTag(txtPath, std::vector<uint8_t>(stli.begin(), stli.end()),
                                 0x73746C69u, mf.mapNameTag, mf.mapNameTag, 1);
                 printf("Generated map name stli from %s\n", txtPath.c_str());
+            } else if (fileExists(nameTagPath)) {
+                addTag(nameTagPath, 0x73746C69u, mf.mapNameTag, mf.mapNameTag, 1);
             }
+        } else if (fileExists(nameTagPath)) {
+            addTag(nameTagPath, 0x73746C69u, mf.mapNameTag, mf.mapNameTag, 1);
         }
     }
     addScreenTag(folder + "/screens/pregame_tag.bin",
@@ -2126,6 +2712,117 @@ int main(int argc, char* argv[]) {
     addScreenTag(folder + "/screens/postgame_tag.bin",
                  {folder + "/screens/postgame.bmp", folder + "/layers/12_postgame.bmp"},
                  mf.postgameTag, "postgame");
+
+    // Pregame/postgame storyline 'text' tags. Round-trip the raw .bin if it
+    // exists; otherwise build from the editable .txt sibling using the same
+    // encoding as stli (CR-separated text, no header).
+    // .txt wins when present. Text tags encode through textToStli, which is
+    // the byte-perfect inverse of extract_map's stliToText for printable
+    // narration text — so user edits propagate and freshly-extracted folders
+    // still produce equivalent bytes. Falls back to .bin only when no .txt
+    // exists.
+    auto addTextTag = [&](const std::string& tagPath, const std::string& txtPath,
+                          const std::string& id, const char* label){
+        if (isNullTagString(id)) return;
+        std::string txt = readTextFile(txtPath);
+        if (!txt.empty()) {
+            std::string encoded = textToStli(txt);
+            addGeneratedTag(txtPath, std::vector<uint8_t>(encoded.begin(), encoded.end()),
+                            0x74657874u, id, std::string(label) + " " + id, 1);
+            printf("Generated %s text tag from %s\n", label, txtPath.c_str());
+            return;
+        }
+        if (fileExists(tagPath))
+            addTag(tagPath, 0x74657874u, id, std::string(label) + " " + id, 1);
+    };
+
+    addTextTag(folder + "/strings/pregame_storyline_tag.bin",
+               folder + "/strings/pregame_storyline.txt",
+               mf.pregameStorylineTextTag, "pregame storyline");
+    addTextTag(folder + "/strings/storyline_2_tag.bin",
+               folder + "/strings/storyline_2.txt",
+               mf.storyline2TextTag, "storyline 2");
+    addTextTag(folder + "/strings/storyline_3_tag.bin",
+               folder + "/strings/storyline_3.txt",
+               mf.storyline3TextTag, "storyline 3");
+    addTextTag(folder + "/strings/storyline_4_tag.bin",
+               folder + "/strings/storyline_4.txt",
+               mf.storyline4TextTag, "storyline 4");
+
+    // Narration / win-ambient / loss-ambient 'soun' tags. Round-trip the raw
+    // .bin if it exists; otherwise encode a single permutation from the first
+    // matching WAV in the sounds/ folder using buildSoundTagFromWAV (PCM16 →
+    // Apple IMA ADPCM). For multi-permutation sounds the user must keep the
+    // .bin since this builder only emits a single permutation.
+    // .wav wins when present so user edits to the WAV propagate. The cost
+    // is that a fresh extract → immediate build re-encodes through ADPCM
+    // (lossy), so the rebuilt bytes won't byte-match the original .bin —
+    // but the audio is audibly identical.
+    auto addSoundTag = [&](const std::string& tagPath, const std::string& wavPrefix,
+                           const std::string& id, const char* label){
+        if (isNullTagString(id)) return;
+        // Find a usable WAV. Preference order:
+        //   1. sounds/<prefix>.wav (explicit authoring path)
+        //   2. newest sounds/<prefix>_<index>_*.wav (extract_map's exact
+        //      naming: an underscore-digits-underscore tail. Excludes
+        //      editor "- Copy.wav" siblings that don't match the pattern.)
+        std::string wavDir = folder + "/sounds";
+        std::string wavPath;
+        std::string permName = wavPrefix;
+        std::string simple = wavDir + "/" + wavPrefix + ".wav";
+        if (fileExists(simple)) {
+            wavPath = simple;
+        } else {
+            std::error_code ec;
+            std::filesystem::file_time_type bestTime{};
+            bool haveBest = false;
+            for (auto& entry : std::filesystem::directory_iterator(wavDir, ec)) {
+                if (ec || !entry.is_regular_file()) continue;
+                std::string fn = entry.path().filename().string();
+                if (fn.size() <= wavPrefix.size() + 5) continue;
+                if (fn.compare(0, wavPrefix.size() + 1, wavPrefix + "_") != 0) continue;
+                if (fn.size() < 4 || fn.compare(fn.size() - 4, 4, ".wav") != 0) continue;
+                // After "<prefix>_": require >=1 digit, then either '_' or end.
+                size_t k = wavPrefix.size() + 1;
+                if (k >= fn.size() || !std::isdigit((unsigned char)fn[k])) continue;
+                size_t digEnd = k;
+                while (digEnd < fn.size() && std::isdigit((unsigned char)fn[digEnd])) digEnd++;
+                if (digEnd >= fn.size() || (fn[digEnd] != '_' && digEnd != fn.size() - 4)) continue;
+                // Skip Windows / file-explorer duplicate markers.
+                if (fn.find(" - Copy") != std::string::npos) continue;
+                if (fn.find(" (Copy)") != std::string::npos) continue;
+                if (fn.find(" (1)")    != std::string::npos) continue;
+                if (fn.find(" (2)")    != std::string::npos) continue;
+                std::error_code tEc;
+                auto t = entry.last_write_time(tEc);
+                if (tEc) continue;
+                if (!haveBest || t > bestTime) {
+                    bestTime = t;
+                    haveBest = true;
+                    wavPath = entry.path().string();
+                    permName = fn.substr(0, fn.size() - 4);
+                }
+            }
+        }
+        if (!wavPath.empty()) {
+            std::vector<uint8_t> data = buildSoundTagFromWAV(wavPath, permName);
+            if (!data.empty()) {
+                addGeneratedTag(wavPath, std::move(data), 0x736F756Eu, id,
+                                std::string(label) + " " + id, 1);
+                printf("Generated %s soun tag from %s\n", label, wavPath.c_str());
+                return;
+            }
+            fprintf(stderr, "Failed to encode %s from %s; falling back to .bin\n",
+                    label, wavPath.c_str());
+        }
+        if (fileExists(tagPath)) {
+            addTag(tagPath, 0x736F756Eu, id, std::string(label) + " " + id, 1);
+        }
+    };
+
+    addSoundTag(folder + "/sounds/narration_tag.bin",    "narration",    mf.narrationSoundTag,   "narration");
+    addSoundTag(folder + "/sounds/win_ambient_tag.bin",  "win_ambient",  mf.winAmbientSoundTag,  "win ambient");
+    addSoundTag(folder + "/sounds/loss_ambient_tag.bin", "loss_ambient", mf.lossAmbientSoundTag, "loss ambient");
 
     if (tags.empty()) {
         fprintf(stderr, "No tag binaries found in %s\n", folder.c_str());
