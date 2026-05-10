@@ -620,7 +620,7 @@ static std::vector<uint8_t> assembleTilesFromData(const std::vector<uint8_t>& da
 }
 
 static bool extractSingleImage256FromData(const std::vector<uint8_t>& data, const std::string& outPath){
-    const size_t HDR=320, TEXHDR=52, BITMAP_REF_SIZE=128;
+    const size_t HDR=320, BITMAP_HEADER=48, BITMAP_REF_SIZE=128;
     if(data.size()<HDR+sizeof(Myth256Palette)) return false;
     int32_t bulkOff = readBE32s(data.data(),248);
     int32_t palOff = readBE32s(data.data(),68);
@@ -634,25 +634,98 @@ static bool extractSingleImage256FromData(const std::vector<uint8_t>& data, cons
     memcpy(&pal,data.data()+palAbs,sizeof(pal));
 
     int w=0, h=0;
-    long pixOff=-1;
+    long imgAbs=-1;
+    int32_t imgLen=0;
     size_t refBase = (size_t)bulkOff + (size_t)bitmapRefsOff;
     for(int bi=0; bi<bitmapCount; bi++){
         size_t ref = refBase + (size_t)bi * BITMAP_REF_SIZE;
         if(ref + BITMAP_REF_SIZE > data.size()) return false;
         int32_t imgDataOff = readBE32s(data.data(), ref + 64);
+        int32_t imgDataLen = readBE32s(data.data(), ref + 68);
         int candidateW = (int)readBE16s(data.data(), ref + 76);
         int candidateH = (int)readBE16s(data.data(), ref + 78);
-        long candidatePix = (long)bulkOff + (long)imgDataOff + (long)TEXHDR;
         if(candidateW<=0 || candidateW>4096 || candidateH<=0 || candidateH>4096) continue;
-        if(candidatePix<0 || candidatePix + (long)candidateW*candidateH > (long)data.size()) continue;
+        long candidateImg = (long)bulkOff + (long)imgDataOff;
+        if(imgDataLen <= 0 || candidateImg < 0 || candidateImg + imgDataLen > (long)data.size()) continue;
         w = candidateW;
         h = candidateH;
-        pixOff = candidatePix;
+        imgAbs = candidateImg;
+        imgLen = imgDataLen;
         break;
     }
-    if(pixOff<0 || pixOff+(long)w*h>(long)data.size()) return false;
+    if(imgAbs<0 || imgLen<=0) return false;
     std::vector<uint8_t> px((size_t)w*h);
-    memcpy(px.data(),data.data()+pixOff,(size_t)w*h);
+    bool decodedRows = false;
+    if(imgLen >= (int32_t)(BITMAP_HEADER + h * 4 + w * h)) {
+        std::vector<uint32_t> rowPtr((size_t)h + 1);
+        for(int y=0; y<h; y++)
+            rowPtr[(size_t)y] = readBE32(data.data(), (size_t)imgAbs + BITMAP_HEADER + (size_t)y * 4);
+        uint32_t firstRowOffset = (uint32_t)(BITMAP_HEADER + h * 4);
+        if(rowPtr[0] >= firstRowOffset) {
+            uint32_t virtualBase = rowPtr[0] - firstRowOffset;
+            rowPtr[(size_t)h] = virtualBase + (uint32_t)imgLen;
+            decodedRows = true;
+            for(int y=0; y<h && decodedRows; y++) {
+                if(rowPtr[(size_t)y] < virtualBase || rowPtr[(size_t)y + 1] < rowPtr[(size_t)y]) {
+                    decodedRows = false;
+                    break;
+                }
+                size_t rowStart = (size_t)(rowPtr[(size_t)y] - virtualBase);
+                size_t rowEnd = (size_t)(rowPtr[(size_t)y + 1] - virtualBase);
+                if(rowStart > rowEnd || rowEnd > (size_t)imgLen) {
+                    decodedRows = false;
+                    break;
+                }
+                const uint8_t* row = data.data() + (size_t)imgAbs + rowStart;
+                size_t rowLen = rowEnd - rowStart;
+                if(rowLen == (size_t)w) {
+                    memcpy(px.data() + (size_t)y * w, row, (size_t)w);
+                    continue;
+                }
+                if(rowLen == (size_t)w * 2) {
+                    uint8_t* dst = px.data() + (size_t)y * w;
+                    for(int x=0; x<w; x++)
+                        dst[x] = row[(size_t)x * 2 + 1];
+                    continue;
+                }
+                if(rowLen < 4) continue;
+                int spanCount = (int)readBE16s(row, 0);
+                int pixelCount = (int)readBE16s(row, 2);
+                size_t spanTableLen = 4 + (size_t)spanCount * 4;
+                if(spanCount < 0 || pixelCount < 0 || spanTableLen + (size_t)pixelCount > rowLen) {
+                    decodedRows = false;
+                    break;
+                }
+                int summedPixels = 0;
+                for(int si=0; si<spanCount; si++) {
+                    int x0 = (int)readBE16s(row, 4 + (size_t)si * 4);
+                    int x1 = (int)readBE16s(row, 6 + (size_t)si * 4);
+                    if(x0 < 0 || x1 < x0 || x1 > w) {
+                        decodedRows = false;
+                        break;
+                    }
+                    summedPixels += x1 - x0;
+                }
+                if(!decodedRows || summedPixels != pixelCount) {
+                    decodedRows = false;
+                    break;
+                }
+                const uint8_t* rowPixels = row + spanTableLen;
+                int pi = 0;
+                for(int si=0; si<spanCount; si++) {
+                    int x0 = (int)readBE16s(row, 4 + (size_t)si * 4);
+                    int x1 = (int)readBE16s(row, 6 + (size_t)si * 4);
+                    for(int x=x0; x<x1; x++)
+                        px[(size_t)y * w + x] = rowPixels[pi++];
+                }
+            }
+        }
+    }
+    if(!decodedRows) {
+        long pixOff = imgAbs + 52;
+        if(pixOff<0 || pixOff+(long)w*h>(long)data.size()) return false;
+        memcpy(px.data(),data.data()+pixOff,(size_t)w*h);
+    }
     return writeBMPMythPal(outPath.c_str(),w,h,pal,px);
 }
 
