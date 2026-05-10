@@ -142,7 +142,8 @@ static bool writePNG(const std::string& path, const std::vector<uint8_t>& rgba, 
 //   [64] imagedata_offset  (from bulk_offset)
 //   [68] imagedata_length
 //
-// Each image is preceded by a 52-byte bitmapinfo header:
+// Each image is preceded by a 48-byte bitmapinfo header plus one row pointer
+// per output row:
 //   [18] img_x  (int16 BE, width)
 //   [20] img_y  (int16 BE, height)
 //
@@ -248,98 +249,109 @@ static bool extractDot256Texture(const std::vector<uint8_t>& d,
     if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return false;
 
     size_t imgAbs = (size_t)(bulkOff + imgDataOff);
-    if (imgDataLen <= 52 || imgAbs + (size_t)imgDataLen > d.size()) return false;
+    if (imgDataLen <= 48 || imgAbs + (size_t)imgDataLen > d.size()) return false;
+    uint32_t collectionUserData = readBE32u(d.data(), 8);
+    uint16_t bitmapFlags = (uint16_t)readBE16s(d.data(), imgAbs + 6);
+    constexpr uint32_t COLLECTION_IS_COLOR_MAP = 0x00000100u;
+    constexpr uint16_t BITMAP_TRANSPARENCY_ENCODED_1BIT = 0x0004;
+    constexpr uint16_t BITMAP_TRANSPARENCY_ENCODED_4BIT = 0x0010;
+    constexpr uint16_t BITMAP_NO_ROW_ADDRESS_TABLE = 0x0020;
+    constexpr uint16_t BITMAP_WORD_ALIGNED_ENCODING = 0x0040;
+    constexpr uint16_t BITMAP_IS_OVERLAY = 0x0800;
+    bool isColorMap = (collectionUserData & COLLECTION_IS_COLOR_MAP) != 0;
+    bool isCompressed = (bitmapFlags & BITMAP_TRANSPARENCY_ENCODED_1BIT) != 0;
+    bool has4BitAlpha = (bitmapFlags & BITMAP_TRANSPARENCY_ENCODED_4BIT) != 0;
+    bool hasRowAddressTable = (bitmapFlags & BITMAP_NO_ROW_ADDRESS_TABLE) == 0;
+    bool wordAlignedRows = (bitmapFlags & BITMAP_WORD_ALIGNED_ENCODING) != 0;
+    bool isOverlay = (bitmapFlags & BITMAP_IS_OVERLAY) != 0;
 
     // Decode indexed pixels to RGBA using Myth palette (rgb_color: word r, g, b, flags each).
-    // Myth bitmap_data carries a per-row pointer table beginning at byte 48: the first
-    // row pointer is in the 52-byte header and the remaining h-1 pointers follow it.
-    // A row can either be raw pixels (length == width) or sprite-style transparent
-    // spans: span_count, pixel_count, span start/end pairs, then pixel_count indexes.
     std::vector<uint8_t> indexes((size_t)w * h, 0);
-    bool decodedRows = false;
-    if (h > 0 && imgDataLen >= 52 + (h - 1) * 4) {
-        std::vector<uint32_t> rowPtr((size_t)h + 1);
-        for (int y = 0; y < h; y++)
-            rowPtr[(size_t)y] = readBE32u(d.data(), imgAbs + 48 + (size_t)y * 4);
+    std::vector<uint8_t> alpha((size_t)w * h, 0);
+    auto alphaForIndex = [&](uint8_t idx) -> uint8_t {
+        const uint8_t* c = palData + (size_t)idx * 8;
+        if (isOverlay) return std::max(c[0], std::max(c[2], c[4]));
+        return (idx > 0 || isColorMap) ? 255 : 0;
+    };
+    auto decodeAlpha4 = [](uint8_t a4) -> uint8_t {
+        return (uint8_t)((15 - (a4 & 15)) * 17);
+    };
 
-        uint32_t firstRowOffset = 52u + (uint32_t)(h - 1) * 4u;
-        uint32_t virtualBase = rowPtr[0] - firstRowOffset;
-        rowPtr[(size_t)h] = virtualBase + (uint32_t)imgDataLen;
+    size_t bitmapDataStart = imgAbs + 52;
+    if (hasRowAddressTable) bitmapDataStart += (size_t)std::max(0, h - 1) * 4;
+    size_t bitmapDataEnd = imgAbs + (size_t)imgDataLen;
+    if (bitmapDataStart > bitmapDataEnd) return false;
+    const uint8_t* bitmapData = d.data() + bitmapDataStart;
+    size_t bitmapDataLen = bitmapDataEnd - bitmapDataStart;
 
-        decodedRows = true;
-        for (int y = 0; y < h && decodedRows; y++) {
-            if (rowPtr[(size_t)y] < virtualBase || rowPtr[(size_t)y + 1] < rowPtr[(size_t)y]) {
-                decodedRows = false;
-                break;
-            }
-            size_t rowStart = (size_t)(rowPtr[(size_t)y] - virtualBase);
-            size_t rowEnd = (size_t)(rowPtr[(size_t)y + 1] - virtualBase);
-            if (rowEnd > (size_t)imgDataLen || rowStart > rowEnd) {
-                decodedRows = false;
-                break;
-            }
-            const uint8_t* row = d.data() + imgAbs + rowStart;
-            size_t rowLen = rowEnd - rowStart;
+    if (isCompressed) {
+        size_t cursor = 0;
+        for (int y = 0; y < h; y++) {
+            if (cursor + 4 > bitmapDataLen) return false;
+            int spanCount = (int)readBE16s(bitmapData, cursor + 0);
+            int pixelCount = (int)readBE16s(bitmapData, cursor + 2);
+            if (spanCount < 0 || spanCount > w || pixelCount < 0 || pixelCount > w) return false;
+            size_t spanTable = cursor + 4;
+            size_t pixelStart = spanTable + (size_t)spanCount * 4;
+            size_t pixelUnit = has4BitAlpha ? 2 : 1;
+            size_t pixelEnd = pixelStart + (size_t)pixelCount * pixelUnit;
+            if (pixelEnd > bitmapDataLen) return false;
 
-            if (rowLen == (size_t)w) {
-                memcpy(indexes.data() + (size_t)y * w, row, (size_t)w);
-                continue;
-            }
-
-            if (rowLen < 4) {
-                continue;
-            }
-
-            int spanCount = (int)readBE16s(row, 0);
-            int pixelCount = (int)readBE16s(row, 2);
-            size_t spanTableLen = 4 + (size_t)spanCount * 4;
-            if (spanCount < 0 || pixelCount < 0 || spanTableLen + (size_t)pixelCount > rowLen) {
-                decodedRows = false;
-                break;
-            }
-
-            int summedPixels = 0;
-            for (int si = 0; si < spanCount; si++) {
-                int x0 = (int)readBE16s(row, 4 + (size_t)si * 4);
-                int x1 = (int)readBE16s(row, 6 + (size_t)si * 4);
-                if (x0 < 0 || x1 < x0 || x1 > w) {
-                    decodedRows = false;
-                    break;
-                }
-                summedPixels += x1 - x0;
-            }
-            if (!decodedRows || summedPixels != pixelCount) {
-                decodedRows = false;
-                break;
-            }
-
-            const uint8_t* pix = row + spanTableLen;
+            int col = 0;
             int pi = 0;
             for (int si = 0; si < spanCount; si++) {
-                int x0 = (int)readBE16s(row, 4 + (size_t)si * 4);
-                int x1 = (int)readBE16s(row, 6 + (size_t)si * 4);
-                for (int x = x0; x < x1; x++)
-                    indexes[(size_t)y * w + x] = pix[pi++];
+                int x0 = (int)readBE16s(bitmapData, spanTable + (size_t)si * 4);
+                int x1 = (int)readBE16s(bitmapData, spanTable + (size_t)si * 4 + 2);
+                if (x0 < col || x1 < x0 || x1 > w) return false;
+                for (int x = x0; x < x1; x++) {
+                    size_t dst = (size_t)y * w + x;
+                    if (has4BitAlpha) {
+                        uint8_t a4 = bitmapData[pixelStart + (size_t)pi * 2 + 0];
+                        uint8_t idx = bitmapData[pixelStart + (size_t)pi * 2 + 1];
+                        indexes[dst] = idx;
+                        alpha[dst] = decodeAlpha4(a4);
+                    } else {
+                        uint8_t idx = bitmapData[pixelStart + (size_t)pi];
+                        indexes[dst] = idx;
+                        alpha[dst] = alphaForIndex(idx);
+                    }
+                    pi++;
+                }
+                col = x1;
             }
+            cursor = pixelEnd;
+            if (wordAlignedRows && (cursor & 1)) cursor++;
+        }
+    } else if (has4BitAlpha) {
+        size_t need = (size_t)w * h * 2;
+        if (need > bitmapDataLen) return false;
+        for (int y = 0; y < h; y++) {
+            const uint8_t* row = bitmapData + (size_t)y * w * 2;
+            for (int x = 0; x < w; x++) {
+                size_t dst = (size_t)y * w + x;
+                uint8_t a4 = row[(size_t)x * 2 + 0];
+                indexes[dst] = row[(size_t)x * 2 + 1];
+                alpha[dst] = decodeAlpha4(a4);
+            }
+        }
+    } else {
+        size_t need = (size_t)w * h;
+        if (need > bitmapDataLen) return false;
+        memcpy(indexes.data(), bitmapData, need);
+        for (int i = 0; i < w * h; i++) {
+            alpha[(size_t)i] = alphaForIndex(indexes[(size_t)i]);
         }
     }
 
-    if (!decodedRows) {
-        size_t pixAbs = imgAbs + 52;
-        if (pixAbs + (size_t)w * h > d.size()) return false;
-        memcpy(indexes.data(), d.data() + pixAbs, (size_t)w * h);
-    }
-
-    // Index 0 is always the transparent void color in Myth II.
     std::vector<uint8_t> rgba((size_t)w * h * 4);
     for (int i = 0; i < w * h; i++) {
         uint8_t idx = indexes[(size_t)i];
         const uint8_t* c = palData + (size_t)idx * 8;
-        uint8_t alpha = (idx == 0) ? 0 : 255;
-        rgba[(size_t)i*4+0] = alpha ? c[0] : 0; // r — zero transparent pixels to avoid color bleed
-        rgba[(size_t)i*4+1] = alpha ? c[2] : 0; // g
-        rgba[(size_t)i*4+2] = alpha ? c[4] : 0; // b
-        rgba[(size_t)i*4+3] = alpha;
+        uint8_t a = alpha[(size_t)i];
+        rgba[(size_t)i*4+0] = a ? c[0] : 0; // r - zero transparent pixels to avoid color bleed
+        rgba[(size_t)i*4+1] = a ? c[2] : 0; // g
+        rgba[(size_t)i*4+2] = a ? c[4] : 0; // b
+        rgba[(size_t)i*4+3] = a;
     }
 
     if (outW) *outW = w;

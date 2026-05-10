@@ -128,26 +128,26 @@ image_abs = bulk_offset + image_data_offset
 
 ## Bitmap Data and Row Pointers
 
-Bitmap data begins with a 52-byte bitmap header. The image dimensions also
+Bitmap data begins with a 48-byte bitmap header. The image dimensions also
 appear in nearby header fields, but the extractor trusts the bitmap reference
 width/height.
 
-The row pointer table begins at byte 48 of bitmap data. The first row pointer
-is part of the 52-byte header; the remaining `height - 1` pointers immediately
-follow the header:
+The row pointer table begins at byte 48 of bitmap data and contains one
+32-bit pointer per row:
 
 ```
 row_pointer[0] at image_abs + 48
 row_pointer[1] at image_abs + 52
 ...
 row_pointer[h-1] at image_abs + 48 + (h-1) * 4
+pixel rows begin at image_abs + 48 + height * 4
 ```
 
 Because the first row pointer points past the row pointer table, the extractor
 computes a virtual base:
 
 ```
-first_row_offset = 52 + (height - 1) * 4
+first_row_offset = 48 + height * 4
 virtual_base = row_pointer[0] - first_row_offset
 row_start = row_pointer[y] - virtual_base
 row_end = row_pointer[y + 1] - virtual_base
@@ -159,13 +159,15 @@ For the last row, the synthetic end pointer is:
 row_pointer[height] = virtual_base + image_data_length
 ```
 
-If row-pointer decoding fails, the extractor falls back to treating bytes after
-the 52-byte header as tightly packed raw indexes. That fallback is useful for
-older/simple bitmap data, but sprite collections generally need row decoding.
+For compressed sprite bitmaps, the current exporter follows the `mythextract`
+behavior instead of slicing each row by the row pointer table: it uses the table
+only to find the start of the row data, then walks each row sequentially and
+honors `WORD_ALIGNED_ENCODING` padding. This avoids drift when a compressed row
+has an odd byte count.
 
 ## Row Encodings
 
-Rows can be encoded in either of two forms.
+Rows can be encoded in several forms.
 
 Raw row:
 
@@ -173,6 +175,17 @@ Raw row:
 row_length == width
 row bytes are direct palette indexes
 ```
+
+Word-index row:
+
+```
+row_length == width * 2
+each pixel is a 16-bit word; the low byte is the palette index
+```
+
+For bitmaps with the `TRANSPARENCY_ENCODED_4BIT` flag, the same two-byte pixel
+form is interpreted as `alpha, palette_index`. Alpha is decoded as
+`(15 - (alpha & 15)) * 17`.
 
 Span row:
 
@@ -182,7 +195,8 @@ Span row:
 [4:]  span table, span_count records of:
         [0:2] x_start  (int16, inclusive)
         [2:4] x_end    (int16, exclusive)
-      then pixel_count palette indexes
+      then pixel_count palette indexes, or alpha/index byte pairs when
+      TRANSPARENCY_ENCODED_4BIT is set
 ```
 
 The output row is initialized to palette index `0` (transparent). Spans copy
