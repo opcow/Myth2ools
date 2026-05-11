@@ -2520,6 +2520,9 @@ int main(int argc, char* argv[]) {
     bool editName = false;
     bool editStory = false;
     bool editSound = false;
+    bool editTerrain = false;
+    bool invert = false;
+    std::vector<std::string> editKeys;
     bool importWater = false;
     bool importWaterFlags = false;
     bool importWaterFlagsExplicit = false;
@@ -2530,7 +2533,9 @@ int main(int argc, char* argv[]) {
     float objHeightScale = 1.0f / 512.0f;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
-        if (a == "--edit") {
+        if (a == "--invert") {
+            invert = true;
+        } else if (a == "--edit") {
             edit = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 editListProvided = true;
@@ -2540,22 +2545,31 @@ int main(int argc, char* argv[]) {
                 while (pos < list.size()) {
                     size_t comma = list.find(',', pos);
                     std::string item = list.substr(pos, comma == std::string::npos ? comma : comma - pos);
-                    if (item == "screens" || item == "screen") {
+                    std::string key = item.substr(0, 4);
+                    if (key == "scre") {
                         hadScreens = true;
                         editPregame = editOverhead = editPostgame = true;
-                    } else if (item == "pre") {
+                        editKeys.push_back("scre");
+                    } else if (key == "preg") {
                         hadPre = true;
                         editPregame = true;
-                    } else if (item == "over") {
+                        editKeys.push_back("preg");
+                    } else if (key == "over") {
                         hadOver = true;
                         editOverhead = true;
-                    } else if (item == "post") {
+                        editKeys.push_back("over");
+                    } else if (key == "post") {
                         hadPost = true;
                         editPostgame = true;
-                    } else if (item == "name") editName = true;
-                    else if (item == "story") editStory = true;
-                    else if (item == "sound") editSound = true;
-                    else fprintf(stderr, "Warning: unknown --edit item: %s\n", item.c_str());
+                        editKeys.push_back("post");
+                    } else if (key == "name") { editName = true; editKeys.push_back("name"); }
+                    else if (key == "stor") { editStory = true; editKeys.push_back("stor"); }
+                    else if (key == "soun") { editSound = true; editKeys.push_back("soun"); }
+                    else if (key == "terr") { editTerrain = true; editKeys.push_back("terr"); }
+                    else {
+                        fprintf(stderr, "Error: unknown --edit item: %s\n", item.c_str());
+                        return 1;
+                    }
                     if (comma == std::string::npos) break;
                     pos = comma + 1;
                 }
@@ -2603,6 +2617,19 @@ int main(int argc, char* argv[]) {
         } else {
             fprintf(stderr, "Too many positional arguments\n");
             return 1;
+        }
+    }
+    if (invert && editListProvided) {
+        editPregame = editOverhead = editPostgame = editName = editStory = editSound = editTerrain = true;
+        for (const auto& k : editKeys) {
+            if (k == "scre") editPregame = editOverhead = editPostgame = false;
+            else if (k == "preg") editPregame = false;
+            else if (k == "over") editOverhead = false;
+            else if (k == "post") editPostgame = false;
+            else if (k == "name") editName = false;
+            else if (k == "stor") editStory = false;
+            else if (k == "soun") editSound = false;
+            else if (k == "terr") editTerrain = false;
         }
     }
     if (folder.empty()) {
@@ -2911,7 +2938,8 @@ int main(int argc, char* argv[]) {
         for (auto& t : tags) {
             if (t.groupTag == 0x6D657368u) {
                 bool hasExplicitMesh = !effectiveObjPath.empty() || !effectiveWaterObjPath.empty()
-                    || importWater || importWaterFlagsExplicit || importAnimation || zeroRuntimeCache;
+                    || importWater || importWaterFlagsExplicit || importAnimation || zeroRuntimeCache
+                    || editTerrain;
                 if (!editListProvided || hasExplicitMesh) {
                 if (!effectiveObjPath.empty()) {
                     if (!applyObjToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, effectiveObjPath, objHeightScale)) {
@@ -2929,7 +2957,7 @@ int main(int argc, char* argv[]) {
                         return 1;
                     }
                 }
-                if (effectiveWaterObjPath.empty() && (importWater || importWaterFlags)) {
+                if (effectiveWaterObjPath.empty() && (importWater || importWaterFlags || editTerrain)) {
                     std::string waterBmp = firstExistingPath({
                         folder + "/terrain/water.bmp",
                         folder + "/layers/03_water.bmp"
@@ -2960,7 +2988,7 @@ int main(int argc, char* argv[]) {
                         return 1;
                     }
                 }
-                if (importAnimation) {
+                if (importAnimation || editTerrain) {
                     std::string animationBmp = firstExistingPath({
                         folder + "/terrain/animation.bmp",
                         folder + "/layers/04_animation.bmp"
@@ -3018,7 +3046,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 } // if (!editListProvided || hasExplicitMesh)
-            } else if (t.groupTag == 0x2E323536u && t.subgroupTag == tagFromString(mf.landscapeTag) && !editListProvided) {
+            } else if (t.groupTag == 0x2E323536u && t.subgroupTag == tagFromString(mf.landscapeTag) && editTerrain) {
                 int bW = 0, bH = 0;
                 std::string bmpPath = firstExistingPath({
                     folder + "/terrain/terrain.bmp",
