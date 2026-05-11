@@ -1394,10 +1394,10 @@ static void usage(const char* p){
     fprintf(stderr,
         "Myth II Map Extractor\n\n"
         "Usage:\n"
-        "  %s <tags_folder> <meshtag> [output_folder] [--ora]\n"
-        "  %s <tags_folder> <meshtag> --out <output_folder> [--ora]\n\n"
-        "  tags_folder  folder containing Myth II files like small install, large install,\n"
-        "               international small install, etc.\n"
+        "  %s <tags_folder|plugin_file> <meshtag> [output_folder] [--ora]\n"
+        "  %s <tags_folder|plugin_file> <meshtag> --out <output_folder> [--ora]\n\n"
+        "  tags_folder|plugin_file\n"
+        "                     folder containing Myth II files, or a single .dng2 plugin file\n"
         "  meshtag      4-character mesh tag (e.g. 85gy, 85gi, 08li)\n"
         "  output_folder folder to write extracted files into (default: meshtag)\n"
         "  --ora        also emit layers/map_layers.ora from the extracted terrain layers\n",
@@ -1440,9 +1440,13 @@ int main(int argc, char* argv[]){
     if(outputFolder.empty()) outputFolder = meshTag;
 
     std::vector<TagEntry> tags;
-    for(const auto& it: fs::directory_iterator(folder)){
-        if(!it.is_regular_file()) continue;
-        scanTagFile(it.path().string(), tags);
+    if (fs::is_regular_file(folder)) {
+        scanTagFile(folder, tags);
+    } else {
+        for(const auto& it: fs::directory_iterator(folder)){
+            if(!it.is_regular_file()) continue;
+            scanTagFile(it.path().string(), tags);
+        }
     }
     if(tags.empty()){ fprintf(stderr,"No Myth II tag files found in %s\n",folder.c_str()); return 1; }
 
