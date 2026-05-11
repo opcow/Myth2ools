@@ -22,3 +22,4 @@ Doc/session_log.md
 .claude/
 !tools/import_animations.py
 *.dng2
+dir*.txt
