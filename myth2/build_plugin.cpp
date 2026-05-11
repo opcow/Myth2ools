@@ -880,12 +880,14 @@ static std::vector<uint8_t> buildCollection256FromFolder(const std::string& coll
     for (uint32_t i = 0; i < K; i++) {
         uint8_t* ins = bulk + INST_OFF + i * INST_REC;
         const CollInstance& ci = c.instances[i];
+        writeBE32To(ins + 0, 16);
+        writeBE16To(ins + 6, 0xFFFFu);
         writeBE16To(ins + 12, (uint16_t)ci.regX);
         writeBE16To(ins + 14, (uint16_t)ci.regY);
         writeBE16To(ins + 24, (uint16_t)ci.keyX);
         writeBE16To(ins + 26, (uint16_t)ci.keyY);
         writeBE16To(ins + 28, (uint16_t)ci.bitmapIndex);
-        writeBE16To(ins + 30, 0xFFFFu); // highres_bitmap_index = -1
+        writeBE16To(ins + 30, 0);
     }
 
     // === Sequence references (S × 128) and per-sequence data (variable).
@@ -908,12 +910,16 @@ static std::vector<uint8_t> buildCollection256FromFolder(const std::string& coll
         writeBE16To(sd + 8,  (uint16_t)cs.views);
         writeBE16To(sd + 10, (uint16_t)cs.framesPerView);
         writeBE16To(sd + 12, (uint16_t)cs.ticksPerFrame);
-        // key_frame, loop_frame, sound stuff, transfer mode = leave zero.
-        // Seq metric defaults that match what Myth writes for static screens:
-        if (cs.framesPerView > 0) {
-            // radius / height0 / height1 default to width-derived values; safest
-            // is zero (used only for sprite rendering, not screen UI).
-        }
+        writeBE16To(sd + 14, 0);
+        writeBE16To(sd + 16, 0);
+        writeBE16To(sd + 18, 0xFFFFu);
+        writeBE16To(sd + 20, 0xFFFFu);
+        writeBE16To(sd + 22, 0xFFFFu);
+        for (int i = 0; i < 6; i++) writeBE16To(sd + 24 + i * 2, 0xFFFFu);
+        writeBE32To(sd + 36, 4);
+        writeBE32To(sd + 40, 0xFFFFFFFFu);
+        writeBE32To(sd + 44, 0);
+        writeBE32To(sd + 48, 0);
 
         size_t framePos = seqCursor + 64;
         for (const auto& f : cs.frames) {
@@ -929,7 +935,9 @@ static std::vector<uint8_t> buildCollection256FromFolder(const std::string& coll
         seqCursor += thisSize;
     }
 
-    // AUX section is 32 zero bytes. Skip — already zeroed by std::vector init.
+    // AUX section (32 bytes). Write sentinel at +12 to match Myth defaults.
+    uint8_t* aux = bulk + AUX_OFF;
+    writeBE16To(aux + 12, 0xFFFFu);
 
     // === Bitmap references (N × 128).
     for (uint32_t i = 0; i < N; i++) {
@@ -952,6 +960,7 @@ static std::vector<uint8_t> buildCollection256FromFolder(const std::string& coll
         writeBE16To(img + 0, (uint16_t)w);
         writeBE16To(img + 2, (uint16_t)h);
         writeBE16To(img + 4, (uint16_t)w);             // bytes_per_row
+        writeBE16To(img + 6, 0x0002u);                 // flags
         writeBE16To(img + 8, 8);                       // bit depth
         writeBE16To(img + 28, (uint16_t)ceilLog2Int(w));
         writeBE16To(img + 30, (uint16_t)ceilLog2Int(h));
@@ -2513,6 +2522,7 @@ int main(int argc, char* argv[]) {
     bool editSound = false;
     bool importWater = false;
     bool importWaterFlags = false;
+    bool importWaterFlagsExplicit = false;
     bool importAnimation = false;
     bool zeroRuntimeCache = false;
     std::string objPath;
@@ -2556,6 +2566,7 @@ int main(int argc, char* argv[]) {
             importWater = true;
         } else if (a == "--water-flags") {
             importWaterFlags = true;
+            importWaterFlagsExplicit = true;
         } else if (a == "--animation") {
             importAnimation = true;
         } else if (a == "--zero-runtime-cache") {
@@ -2896,6 +2907,9 @@ int main(int argc, char* argv[]) {
     if (edit) {
         for (auto& t : tags) {
             if (t.groupTag == 0x6D657368u) {
+                bool hasExplicitMesh = !effectiveObjPath.empty() || !effectiveWaterObjPath.empty()
+                    || importWater || importWaterFlagsExplicit || importAnimation || zeroRuntimeCache;
+                if (!editListProvided || hasExplicitMesh) {
                 if (!effectiveObjPath.empty()) {
                     if (!applyObjToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, effectiveObjPath, objHeightScale)) {
                         fprintf(stderr, "OBJ import failed: %s\n", effectiveObjPath.c_str());
@@ -3000,6 +3014,7 @@ int main(int argc, char* argv[]) {
                         return 1;
                     }
                 }
+                } // if (!editListProvided || hasExplicitMesh)
             } else if (t.groupTag == 0x73746C69u && t.subgroupTag == tagFromString(mf.mapNameTag)) {
                 if (editName) {
                     std::string txtPath = firstExistingPath({
@@ -3013,7 +3028,7 @@ int main(int argc, char* argv[]) {
                         printf("Rebuilt map name stli from %s\n", txtPath.c_str());
                     }
                 }
-            } else if (t.groupTag == 0x2E323536u && t.subgroupTag == tagFromString(mf.landscapeTag)) {
+            } else if (t.groupTag == 0x2E323536u && t.subgroupTag == tagFromString(mf.landscapeTag) && !editListProvided) {
                 int bW = 0, bH = 0;
                 std::string bmpPath = firstExistingPath({
                     folder + "/terrain/terrain.bmp",
@@ -3038,36 +3053,30 @@ int main(int argc, char* argv[]) {
                         printf("Applied %s\n", shadowPath.c_str());
                     }
                 }
-            } else if (t.groupTag == 0x2E323536u) {
-                bool skipInject = false;
-                if (t.subgroupTag == tagFromString(mf.pregameTag)) skipInject = editPregame;
-                else if (t.subgroupTag == tagFromString(mf.overheadTag)) skipInject = editOverhead;
-                else if (t.subgroupTag == tagFromString(mf.postgameTag)) skipInject = editPostgame;
-                if (!skipInject) {
-                    std::string bmpPath;
-                    if (t.subgroupTag == tagFromString(mf.pregameTag)) {
-                        bmpPath = firstExistingPath({
-                            folder + "/screens/pregame.bmp",
-                            folder + "/layers/11_pregame.bmp"
-                        });
-                    } else if (t.subgroupTag == tagFromString(mf.overheadTag)) {
-                        bmpPath = firstExistingPath({
-                            folder + "/screens/overhead.bmp",
-                            folder + "/layers/10_overhead.bmp"
-                        });
-                    } else if (t.subgroupTag == tagFromString(mf.postgameTag)) {
-                        bmpPath = firstExistingPath({
-                            folder + "/screens/postgame.bmp",
-                            folder + "/layers/12_postgame.bmp"
-                        });
-                    }
-                    if (!bmpPath.empty() && fileExists(bmpPath)) {
-                        int bW = 0, bH = 0;
-                        auto bmpRaw = readFile(bmpPath);
-                        auto bmp = readBMP8(bmpPath, bW, bH);
-                        if (!bmp.empty() && injectSingleImage256(t.data, bmpRaw, bmp, bW, bH)) {
-                            printf("Applied %s\n", bmpPath.c_str());
-                        }
+            } else if (t.groupTag == 0x2E323536u && !editListProvided) {
+                std::string bmpPath;
+                if (t.subgroupTag == tagFromString(mf.pregameTag)) {
+                    bmpPath = firstExistingPath({
+                        folder + "/screens/pregame.bmp",
+                        folder + "/layers/11_pregame.bmp"
+                    });
+                } else if (t.subgroupTag == tagFromString(mf.overheadTag)) {
+                    bmpPath = firstExistingPath({
+                        folder + "/screens/overhead.bmp",
+                        folder + "/layers/10_overhead.bmp"
+                    });
+                } else if (t.subgroupTag == tagFromString(mf.postgameTag)) {
+                    bmpPath = firstExistingPath({
+                        folder + "/screens/postgame.bmp",
+                        folder + "/layers/12_postgame.bmp"
+                    });
+                }
+                if (!bmpPath.empty() && fileExists(bmpPath)) {
+                    int bW = 0, bH = 0;
+                    auto bmpRaw = readFile(bmpPath);
+                    auto bmp = readBMP8(bmpPath, bW, bH);
+                    if (!bmp.empty() && injectSingleImage256(t.data, bmpRaw, bmp, bW, bH)) {
+                        printf("Applied %s\n", bmpPath.c_str());
                     }
                 }
             }
