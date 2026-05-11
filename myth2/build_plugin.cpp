@@ -2868,7 +2868,10 @@ int main(int argc, char* argv[]) {
                         bestTime = t;
                         haveBest = true;
                         wavPath = entry.path().string();
-                        permName = fn.substr(0, fn.size() - 4);
+                        if (digEnd < fn.size() - 4 && fn[digEnd] == '_')
+                            permName = fn.substr(digEnd + 1, fn.size() - 4 - (digEnd + 1));
+                        else
+                            permName.clear();
                     }
                 }
             }
