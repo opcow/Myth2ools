@@ -2679,7 +2679,7 @@ int main(int argc, char* argv[]) {
                             const std::string& id, const std::string& label, bool editThis) {
         if (isNullTagString(id)) return;
 
-        bool useSrc = !edit || !editListProvided || editThis;
+        bool useSrc = edit && (!editListProvided || editThis);
         bool useBin = !edit || !editListProvided || !editThis;
 
         if (useSrc) {
@@ -2728,7 +2728,7 @@ int main(int argc, char* argv[]) {
     if (!isNullTagString(mf.mapNameTag)) {
         std::string nameTagPath = folder + "/strings/name_tag.bin";
 
-        bool useSrc = !edit || !editListProvided || editName;
+        bool useSrc = edit && (!editListProvided || editName);
         bool useBin = !edit || !editListProvided || !editName;
 
         if (useSrc) {
@@ -2776,7 +2776,7 @@ int main(int argc, char* argv[]) {
                           const std::string& id, const char* label){
         if (isNullTagString(id)) return;
 
-        if (!edit || !editListProvided || editStory) {
+        if (edit && (!editListProvided || editStory)) {
             std::string txt = readTextFile(txtPath);
             if (!txt.empty()) {
                 std::string encoded = textToStli(txt);
@@ -2817,7 +2817,7 @@ int main(int argc, char* argv[]) {
                            const std::string& id, const char* label){
         if (isNullTagString(id)) return;
 
-        if (!edit || !editListProvided || editSound) {
+        if (edit && (!editListProvided || editSound)) {
             // Find a usable WAV. Preference order:
             //   1. sounds/<prefix>.wav (explicit authoring path)
             //   2. newest sounds/<prefix>_<index>_*.wav (extract_map's exact
