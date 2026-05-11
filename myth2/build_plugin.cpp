@@ -2477,7 +2477,14 @@ static void usage(const char* p) {
         "  %s <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation] [--zero-runtime-cache]\n\n"
         "  folder   Extracted Myth II map folder from extract\n"
         "  output   Output plugin path (default: <folder>_plugin)\n"
-        "  --edit   Re-read edited assets from the folder before packing\n"
+        "  --edit [pre,over,post,screens,name,story,sound]  Re-read edited assets.\n"
+        "                                     Comma-separated list selects which items to\n"
+        "                                     rebuild from source (screens or pre/over/post\n"
+        "                                     for individual screen images, name from\n"
+        "                                     strings/name.txt, story from strings/*.txt,\n"
+        "                                     sound from sounds/*.wav); non-listed items\n"
+        "                                     use .bin files. Bare --edit uses source when\n"
+        "                                     available (current behavior).\n"
         "  --obj    Import terrain displacement from OBJ into raw/mesh_tag.bin during --edit\n"
         "  --water-obj Import wet-cell media_height from a water-surface OBJ during --edit\n"
         "  --water  Experimentally import terrain/water.bmp including media-height changes\n"
@@ -2497,6 +2504,13 @@ int main(int argc, char* argv[]) {
     std::string folder;
     std::string output;
     bool edit = false;
+    bool editListProvided = false;
+    bool editPregame = false;
+    bool editOverhead = false;
+    bool editPostgame = false;
+    bool editName = false;
+    bool editStory = false;
+    bool editSound = false;
     bool importWater = false;
     bool importWaterFlags = false;
     bool importAnimation = false;
@@ -2508,6 +2522,36 @@ int main(int argc, char* argv[]) {
         std::string a = argv[i];
         if (a == "--edit") {
             edit = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                editListProvided = true;
+                bool hadScreens = false, hadPre = false, hadOver = false, hadPost = false;
+                std::string list = argv[++i];
+                size_t pos = 0;
+                while (pos < list.size()) {
+                    size_t comma = list.find(',', pos);
+                    std::string item = list.substr(pos, comma == std::string::npos ? comma : comma - pos);
+                    if (item == "screens" || item == "screen") {
+                        hadScreens = true;
+                        editPregame = editOverhead = editPostgame = true;
+                    } else if (item == "pre") {
+                        hadPre = true;
+                        editPregame = true;
+                    } else if (item == "over") {
+                        hadOver = true;
+                        editOverhead = true;
+                    } else if (item == "post") {
+                        hadPost = true;
+                        editPostgame = true;
+                    } else if (item == "name") editName = true;
+                    else if (item == "story") editStory = true;
+                    else if (item == "sound") editSound = true;
+                    else fprintf(stderr, "Warning: unknown --edit item: %s\n", item.c_str());
+                    if (comma == std::string::npos) break;
+                    pos = comma + 1;
+                }
+                if (hadScreens && (hadPre || hadOver || hadPost))
+                    fprintf(stderr, "Warning: --edit 'screens' overrides individual 'pre'/'over'/'post'; applying all three\n");
+            }
         } else if (a == "--water") {
             importWater = true;
         } else if (a == "--water-flags") {
@@ -2632,37 +2676,38 @@ int main(int argc, char* argv[]) {
     };
 
     auto addScreenTag = [&](const std::string& tagPath, const std::initializer_list<std::string>& bmpPaths,
-                            const std::string& id, const std::string& label) {
+                            const std::string& id, const std::string& label, bool editThis) {
         if (isNullTagString(id)) return;
 
-        // Multi-sequence collection (pregame/postgame) — preferred path.
-        // If the per-bitmap collection folder is present, build the .256
-        // from collection.json + per-bitmap BMPs. The .bin is ignored.
-        std::string collDir = folder + "/screens/" + label + "_collection";
-        if (fileExists(collDir + "/collection.json")) {
-            std::vector<uint8_t> data = buildCollection256FromFolder(collDir, label);
-            if (!data.empty()) {
-                addGeneratedTag(collDir, std::move(data), 0x2E323536u, id, id + " " + label, 4);
-                printf("Generated %s .256 from %s\n", label.c_str(), collDir.c_str());
-                return;
+        bool useSrc = !edit || !editListProvided || editThis;
+        bool useBin = !edit || !editListProvided || !editThis;
+
+        if (useSrc) {
+            // Try collection (multi-sequence), then single BMP.
+            std::string collDir = folder + "/screens/" + label + "_collection";
+            if (fileExists(collDir + "/collection.json")) {
+                std::vector<uint8_t> data = buildCollection256FromFolder(collDir, label);
+                if (!data.empty()) {
+                    addGeneratedTag(collDir, std::move(data), 0x2E323536u, id, id + " " + label, 4);
+                    printf("Generated %s .256 from %s\n", label.c_str(), collDir.c_str());
+                    return;
+                }
+                fprintf(stderr, "Failed to build multi-sequence .256 from %s\n", collDir.c_str());
             }
-            fprintf(stderr, "Failed to build multi-sequence .256 from %s\n", collDir.c_str());
+            std::string bmpPath = firstExistingPath(bmpPaths);
+            if (!bmpPath.empty()) {
+                std::vector<uint8_t> data = buildSingleImage256FromBMP(bmpPath, label);
+                if (!data.empty()) {
+                    addGeneratedTag(bmpPath, std::move(data), 0x2E323536u, id, id + " " + label, 4);
+                    printf("Generated %s .256 from %s\n", label.c_str(), bmpPath.c_str());
+                    return;
+                }
+            }
         }
 
-        // Single-image fall-through (overhead, or hand-authored maps with no
-        // collection folder). .bin wins, then top-level BMP.
-        if (fileExists(tagPath)) {
+        if (useBin && fileExists(tagPath)) {
             addTag(tagPath, 0x2E323536u, id, id + " " + label, 4);
             return;
-        }
-        std::string bmpPath = firstExistingPath(bmpPaths);
-        if (!bmpPath.empty()) {
-            std::vector<uint8_t> data = buildSingleImage256FromBMP(bmpPath, label);
-            if (!data.empty()) {
-                addGeneratedTag(bmpPath, std::move(data), 0x2E323536u, id, id + " " + label, 4);
-                printf("Generated %s .256 from %s\n", label.c_str(), bmpPath.c_str());
-                return;
-            }
         }
         fprintf(stderr,
             "WARNING: %s screen (%s) couldn't be packed.\n"
@@ -2682,36 +2727,42 @@ int main(int argc, char* argv[]) {
            isNullTagString(mf.landscapeTag) ? "" : (mf.landscapeTag + " terrain"), 4);
     if (!isNullTagString(mf.mapNameTag)) {
         std::string nameTagPath = folder + "/strings/name_tag.bin";
-        std::string txtPath = firstExistingPath({
-            folder + "/strings/name.txt",
-            folder + "/layers/20_name.txt"
-        });
-        // .txt wins when present — encoding is the inverse of stliToText, so
-        // a fresh extract still round-trips byte-for-byte. This makes user
-        // edits to the .txt take effect without having to delete the .bin.
-        if (!txtPath.empty()) {
-            std::string txt = readTextFile(txtPath);
-            if (!txt.empty()) {
-                std::string stli = textToStli(txt);
-                addGeneratedTag(txtPath, std::vector<uint8_t>(stli.begin(), stli.end()),
-                                0x73746C69u, mf.mapNameTag, mf.mapNameTag, 1);
-                printf("Generated map name stli from %s\n", txtPath.c_str());
-            } else if (fileExists(nameTagPath)) {
-                addTag(nameTagPath, 0x73746C69u, mf.mapNameTag, mf.mapNameTag, 1);
+
+        bool useSrc = !edit || !editListProvided || editName;
+        bool useBin = !edit || !editListProvided || !editName;
+
+        if (useSrc) {
+            std::string txtPath = firstExistingPath({
+                folder + "/strings/name.txt",
+                folder + "/layers/20_name.txt"
+            });
+            if (!txtPath.empty()) {
+                std::string txt = readTextFile(txtPath);
+                if (!txt.empty()) {
+                    std::string stli = textToStli(txt);
+                    addGeneratedTag(txtPath, std::vector<uint8_t>(stli.begin(), stli.end()),
+                                    0x73746C69u, mf.mapNameTag, mf.mapNameTag, 1);
+                    printf("Generated map name stli from %s\n", txtPath.c_str());
+                    // source added, skip .bin fallback
+                    goto nameTagDone;
+                }
             }
-        } else if (fileExists(nameTagPath)) {
+        }
+
+        if (useBin && fileExists(nameTagPath)) {
             addTag(nameTagPath, 0x73746C69u, mf.mapNameTag, mf.mapNameTag, 1);
         }
+        nameTagDone: ;
     }
     addScreenTag(folder + "/screens/pregame_tag.bin",
                  {folder + "/screens/pregame.bmp", folder + "/layers/11_pregame.bmp"},
-                 mf.pregameTag, "pregame");
+                 mf.pregameTag, "pregame", editPregame);
     addScreenTag(folder + "/screens/overhead_tag.bin",
                  {folder + "/screens/overhead.bmp", folder + "/layers/10_overhead.bmp"},
-                 mf.overheadTag, "overhead");
+                 mf.overheadTag, "overhead", editOverhead);
     addScreenTag(folder + "/screens/postgame_tag.bin",
                  {folder + "/screens/postgame.bmp", folder + "/layers/12_postgame.bmp"},
-                 mf.postgameTag, "postgame");
+                 mf.postgameTag, "postgame", editPostgame);
 
     // Pregame/postgame storyline 'text' tags. Round-trip the raw .bin if it
     // exists; otherwise build from the editable .txt sibling using the same
@@ -2724,15 +2775,19 @@ int main(int argc, char* argv[]) {
     auto addTextTag = [&](const std::string& tagPath, const std::string& txtPath,
                           const std::string& id, const char* label){
         if (isNullTagString(id)) return;
-        std::string txt = readTextFile(txtPath);
-        if (!txt.empty()) {
-            std::string encoded = textToStli(txt);
-            addGeneratedTag(txtPath, std::vector<uint8_t>(encoded.begin(), encoded.end()),
-                            0x74657874u, id, std::string(label) + " " + id, 1);
-            printf("Generated %s text tag from %s\n", label, txtPath.c_str());
-            return;
+
+        if (!edit || !editListProvided || editStory) {
+            std::string txt = readTextFile(txtPath);
+            if (!txt.empty()) {
+                std::string encoded = textToStli(txt);
+                addGeneratedTag(txtPath, std::vector<uint8_t>(encoded.begin(), encoded.end()),
+                                0x74657874u, id, std::string(label) + " " + id, 1);
+                printf("Generated %s text tag from %s\n", label, txtPath.c_str());
+                return;
+            }
         }
-        if (fileExists(tagPath))
+
+        if ((!edit || !editListProvided || !editStory) && fileExists(tagPath))
             addTag(tagPath, 0x74657874u, id, std::string(label) + " " + id, 1);
     };
 
@@ -2761,61 +2816,65 @@ int main(int argc, char* argv[]) {
     auto addSoundTag = [&](const std::string& tagPath, const std::string& wavPrefix,
                            const std::string& id, const char* label){
         if (isNullTagString(id)) return;
-        // Find a usable WAV. Preference order:
-        //   1. sounds/<prefix>.wav (explicit authoring path)
-        //   2. newest sounds/<prefix>_<index>_*.wav (extract_map's exact
-        //      naming: an underscore-digits-underscore tail. Excludes
-        //      editor "- Copy.wav" siblings that don't match the pattern.)
-        std::string wavDir = folder + "/sounds";
-        std::string wavPath;
-        std::string permName = wavPrefix;
-        std::string simple = wavDir + "/" + wavPrefix + ".wav";
-        if (fileExists(simple)) {
-            wavPath = simple;
-        } else {
-            std::error_code ec;
-            std::filesystem::file_time_type bestTime{};
-            bool haveBest = false;
-            for (auto& entry : std::filesystem::directory_iterator(wavDir, ec)) {
-                if (ec || !entry.is_regular_file()) continue;
-                std::string fn = entry.path().filename().string();
-                if (fn.size() <= wavPrefix.size() + 5) continue;
-                if (fn.compare(0, wavPrefix.size() + 1, wavPrefix + "_") != 0) continue;
-                if (fn.size() < 4 || fn.compare(fn.size() - 4, 4, ".wav") != 0) continue;
-                // After "<prefix>_": require >=1 digit, then either '_' or end.
-                size_t k = wavPrefix.size() + 1;
-                if (k >= fn.size() || !std::isdigit((unsigned char)fn[k])) continue;
-                size_t digEnd = k;
-                while (digEnd < fn.size() && std::isdigit((unsigned char)fn[digEnd])) digEnd++;
-                if (digEnd >= fn.size() || (fn[digEnd] != '_' && digEnd != fn.size() - 4)) continue;
-                // Skip Windows / file-explorer duplicate markers.
-                if (fn.find(" - Copy") != std::string::npos) continue;
-                if (fn.find(" (Copy)") != std::string::npos) continue;
-                if (fn.find(" (1)")    != std::string::npos) continue;
-                if (fn.find(" (2)")    != std::string::npos) continue;
-                std::error_code tEc;
-                auto t = entry.last_write_time(tEc);
-                if (tEc) continue;
-                if (!haveBest || t > bestTime) {
-                    bestTime = t;
-                    haveBest = true;
-                    wavPath = entry.path().string();
-                    permName = fn.substr(0, fn.size() - 4);
+
+        if (!edit || !editListProvided || editSound) {
+            // Find a usable WAV. Preference order:
+            //   1. sounds/<prefix>.wav (explicit authoring path)
+            //   2. newest sounds/<prefix>_<index>_*.wav (extract_map's exact
+            //      naming: an underscore-digits-underscore tail. Excludes
+            //      editor "- Copy.wav" siblings that don't match the pattern.)
+            std::string wavDir = folder + "/sounds";
+            std::string wavPath;
+            std::string permName = wavPrefix;
+            std::string simple = wavDir + "/" + wavPrefix + ".wav";
+            if (fileExists(simple)) {
+                wavPath = simple;
+            } else {
+                std::error_code ec;
+                std::filesystem::file_time_type bestTime{};
+                bool haveBest = false;
+                for (auto& entry : std::filesystem::directory_iterator(wavDir, ec)) {
+                    if (ec || !entry.is_regular_file()) continue;
+                    std::string fn = entry.path().filename().string();
+                    if (fn.size() <= wavPrefix.size() + 5) continue;
+                    if (fn.compare(0, wavPrefix.size() + 1, wavPrefix + "_") != 0) continue;
+                    if (fn.size() < 4 || fn.compare(fn.size() - 4, 4, ".wav") != 0) continue;
+                    // After "<prefix>_": require >=1 digit, then either '_' or end.
+                    size_t k = wavPrefix.size() + 1;
+                    if (k >= fn.size() || !std::isdigit((unsigned char)fn[k])) continue;
+                    size_t digEnd = k;
+                    while (digEnd < fn.size() && std::isdigit((unsigned char)fn[digEnd])) digEnd++;
+                    if (digEnd >= fn.size() || (fn[digEnd] != '_' && digEnd != fn.size() - 4)) continue;
+                    // Skip Windows / file-explorer duplicate markers.
+                    if (fn.find(" - Copy") != std::string::npos) continue;
+                    if (fn.find(" (Copy)") != std::string::npos) continue;
+                    if (fn.find(" (1)")    != std::string::npos) continue;
+                    if (fn.find(" (2)")    != std::string::npos) continue;
+                    std::error_code tEc;
+                    auto t = entry.last_write_time(tEc);
+                    if (tEc) continue;
+                    if (!haveBest || t > bestTime) {
+                        bestTime = t;
+                        haveBest = true;
+                        wavPath = entry.path().string();
+                        permName = fn.substr(0, fn.size() - 4);
+                    }
                 }
             }
-        }
-        if (!wavPath.empty()) {
-            std::vector<uint8_t> data = buildSoundTagFromWAV(wavPath, permName);
-            if (!data.empty()) {
-                addGeneratedTag(wavPath, std::move(data), 0x736F756Eu, id,
-                                std::string(label) + " " + id, 1);
-                printf("Generated %s soun tag from %s\n", label, wavPath.c_str());
-                return;
+            if (!wavPath.empty()) {
+                std::vector<uint8_t> data = buildSoundTagFromWAV(wavPath, permName);
+                if (!data.empty()) {
+                    addGeneratedTag(wavPath, std::move(data), 0x736F756Eu, id,
+                                    std::string(label) + " " + id, 1);
+                    printf("Generated %s soun tag from %s\n", label, wavPath.c_str());
+                    return;
+                }
+                fprintf(stderr, "Failed to encode %s from %s; falling back to .bin\n",
+                        label, wavPath.c_str());
             }
-            fprintf(stderr, "Failed to encode %s from %s; falling back to .bin\n",
-                    label, wavPath.c_str());
         }
-        if (fileExists(tagPath)) {
+
+        if ((!edit || !editListProvided || !editSound) && fileExists(tagPath)) {
             addTag(tagPath, 0x736F756Eu, id, std::string(label) + " " + id, 1);
         }
     };
@@ -2942,15 +3001,17 @@ int main(int argc, char* argv[]) {
                     }
                 }
             } else if (t.groupTag == 0x73746C69u && t.subgroupTag == tagFromString(mf.mapNameTag)) {
-                std::string txtPath = firstExistingPath({
-                    folder + "/strings/name.txt",
-                    folder + "/layers/20_name.txt"
-                });
-                std::string txt = readTextFile(txtPath);
-                if (!txt.empty()) {
-                    std::string stli = textToStli(txt);
-                    t.data.assign(stli.begin(), stli.end());
-                    printf("Rebuilt map name stli from %s\n", txtPath.c_str());
+                if (editName) {
+                    std::string txtPath = firstExistingPath({
+                        folder + "/strings/name.txt",
+                        folder + "/layers/20_name.txt"
+                    });
+                    std::string txt = readTextFile(txtPath);
+                    if (!txt.empty()) {
+                        std::string stli = textToStli(txt);
+                        t.data.assign(stli.begin(), stli.end());
+                        printf("Rebuilt map name stli from %s\n", txtPath.c_str());
+                    }
                 }
             } else if (t.groupTag == 0x2E323536u && t.subgroupTag == tagFromString(mf.landscapeTag)) {
                 int bW = 0, bH = 0;
@@ -2978,29 +3039,35 @@ int main(int argc, char* argv[]) {
                     }
                 }
             } else if (t.groupTag == 0x2E323536u) {
-                std::string bmpPath;
-                if (t.subgroupTag == tagFromString(mf.pregameTag)) {
-                    bmpPath = firstExistingPath({
-                        folder + "/screens/pregame.bmp",
-                        folder + "/layers/11_pregame.bmp"
-                    });
-                } else if (t.subgroupTag == tagFromString(mf.overheadTag)) {
-                    bmpPath = firstExistingPath({
-                        folder + "/screens/overhead.bmp",
-                        folder + "/layers/10_overhead.bmp"
-                    });
-                } else if (t.subgroupTag == tagFromString(mf.postgameTag)) {
-                    bmpPath = firstExistingPath({
-                        folder + "/screens/postgame.bmp",
-                        folder + "/layers/12_postgame.bmp"
-                    });
-                }
-                if (!bmpPath.empty() && fileExists(bmpPath)) {
-                    int bW = 0, bH = 0;
-                    auto bmpRaw = readFile(bmpPath);
-                    auto bmp = readBMP8(bmpPath, bW, bH);
-                    if (!bmp.empty() && injectSingleImage256(t.data, bmpRaw, bmp, bW, bH)) {
-                        printf("Applied %s\n", bmpPath.c_str());
+                bool skipInject = false;
+                if (t.subgroupTag == tagFromString(mf.pregameTag)) skipInject = editPregame;
+                else if (t.subgroupTag == tagFromString(mf.overheadTag)) skipInject = editOverhead;
+                else if (t.subgroupTag == tagFromString(mf.postgameTag)) skipInject = editPostgame;
+                if (!skipInject) {
+                    std::string bmpPath;
+                    if (t.subgroupTag == tagFromString(mf.pregameTag)) {
+                        bmpPath = firstExistingPath({
+                            folder + "/screens/pregame.bmp",
+                            folder + "/layers/11_pregame.bmp"
+                        });
+                    } else if (t.subgroupTag == tagFromString(mf.overheadTag)) {
+                        bmpPath = firstExistingPath({
+                            folder + "/screens/overhead.bmp",
+                            folder + "/layers/10_overhead.bmp"
+                        });
+                    } else if (t.subgroupTag == tagFromString(mf.postgameTag)) {
+                        bmpPath = firstExistingPath({
+                            folder + "/screens/postgame.bmp",
+                            folder + "/layers/12_postgame.bmp"
+                        });
+                    }
+                    if (!bmpPath.empty() && fileExists(bmpPath)) {
+                        int bW = 0, bH = 0;
+                        auto bmpRaw = readFile(bmpPath);
+                        auto bmp = readBMP8(bmpPath, bW, bH);
+                        if (!bmp.empty() && injectSingleImage256(t.data, bmpRaw, bmp, bW, bH)) {
+                            printf("Applied %s\n", bmpPath.c_str());
+                        }
                     }
                 }
             }
