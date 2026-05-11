@@ -3018,19 +3018,6 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 } // if (!editListProvided || hasExplicitMesh)
-            } else if (t.groupTag == 0x73746C69u && t.subgroupTag == tagFromString(mf.mapNameTag)) {
-                if (editName) {
-                    std::string txtPath = firstExistingPath({
-                        folder + "/strings/name.txt",
-                        folder + "/layers/20_name.txt"
-                    });
-                    std::string txt = readTextFile(txtPath);
-                    if (!txt.empty()) {
-                        std::string stli = textToStli(txt);
-                        t.data.assign(stli.begin(), stli.end());
-                        printf("Rebuilt map name stli from %s\n", txtPath.c_str());
-                    }
-                }
             } else if (t.groupTag == 0x2E323536u && t.subgroupTag == tagFromString(mf.landscapeTag) && !editListProvided) {
                 int bW = 0, bH = 0;
                 std::string bmpPath = firstExistingPath({
