@@ -1050,6 +1050,7 @@ struct MeshRefs {
     int submeshW=0, submeshH=0;
     uint32_t meshOffset=0, meshSize=0;
     uint32_t dataOffset=0, dataSize=0;
+    uint32_t meshFlags=0;
     uint32_t mapDescStli=0;
     uint32_t postgameTag=0;
     uint32_t pregameTag=0;
@@ -1359,6 +1360,7 @@ static bool parseMeshRefs(const std::vector<uint8_t>& meshData, MeshRefs& m){
     m.meshSize     = readBE32(meshData.data(),16);
     m.dataOffset   = readBE32(meshData.data(),24);
     m.dataSize     = readBE32(meshData.data(),28);
+    m.meshFlags    = readBE32(meshData.data(),76);
     m.mapDescStli  = readBE32(meshData.data(),140);
     m.postgameTag  = readBE32(meshData.data(),144);
     m.pregameTag   = readBE32(meshData.data(),148);
@@ -1625,6 +1627,7 @@ int main(int argc, char* argv[]){
         fprintf(mf,"    \"win_ambient_sound\": %s,\n",isNullTag(refs.winAmbientSoundTag)?"null":("\""+tagToString(refs.winAmbientSoundTag)+"\"").c_str());
         fprintf(mf,"    \"loss_ambient_sound\": %s\n",isNullTag(refs.lossAmbientSoundTag)?"null":("\""+tagToString(refs.lossAmbientSoundTag)+"\"").c_str());
         fprintf(mf,"  },\n");
+        fprintf(mf,"  \"mesh_flags\": %u,\n",refs.meshFlags);
         fprintf(mf,"  \"mesh_layout\": {\n");
         fprintf(mf,"    \"mesh_offset\": %u,\n",refs.meshOffset);
         fprintf(mf,"    \"mesh_size\": %u,\n",refs.meshSize);
