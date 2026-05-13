@@ -655,8 +655,8 @@ static std::vector<uint8_t> buildSingleImage256FromBMP(const std::string& bmpPat
     writeBE16To(img + 8, 8);
     writeBE16To(img + 28, (uint16_t)ceilLog2Int(w));
     writeBE16To(img + 30, (uint16_t)ceilLog2Int(h));
-    writeBE16To(img + 32, (uint16_t)std::max(1, (w + 255) / 256));
-    writeBE16To(img + 34, (uint16_t)std::max(1, (h + 127) / 128));
+    writeBE16To(img + 32, (uint16_t)(1u << (uint32_t)ceilLog2Int(w)));
+    writeBE16To(img + 34, (uint16_t)(1u << (uint32_t)ceilLog2Int(h)));
     uint32_t firstRowOffset = BITMAP_HEADER + (uint32_t)h * 4u;
     for (int y = 0; y < h; y++) {
         writeBE32To(img + BITMAP_HEADER + (size_t)y * 4,
@@ -964,8 +964,8 @@ static std::vector<uint8_t> buildCollection256FromFolder(const std::string& coll
         writeBE16To(img + 8, 8);                       // bit depth
         writeBE16To(img + 28, (uint16_t)ceilLog2Int(w));
         writeBE16To(img + 30, (uint16_t)ceilLog2Int(h));
-        writeBE16To(img + 32, (uint16_t)std::max(1, (w + 255) / 256));
-        writeBE16To(img + 34, (uint16_t)std::max(1, (h + 127) / 128));
+        writeBE16To(img + 32, (uint16_t)(1u << (uint32_t)ceilLog2Int(w)));
+        writeBE16To(img + 34, (uint16_t)(1u << (uint32_t)ceilLog2Int(h)));
 
         uint32_t firstRow = BITMAP_HEADER + (uint32_t)h * 4u;
         for (int y = 0; y < h; y++) {
@@ -2486,7 +2486,7 @@ static void usage(const char* p) {
         "  %s <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation] [--zero-runtime-cache]\n\n"
         "  folder   Extracted Myth II map folder from extract\n"
         "  output   Output plugin path (default: <folder>_plugin)\n"
-        "  --edit [preg,over,post,scre,name,stor,soun,terr]  Re-read edited assets.\n"
+        "  --edit [preg,over,post,scre,name,stor,soun,terr,mesh,mark]  Re-read edited assets.\n"
         "                                     Comma-separated list selects which items to\n"
         "                                     rebuild from source (screens or pre/over/post\n"
         "                                     for individual screen images, name from\n"
@@ -2522,6 +2522,8 @@ int main(int argc, char* argv[]) {
     bool editStory = false;
     bool editSound = false;
     bool editTerrain = false;
+    bool editMesh = false;
+    bool editMark = false;
     bool invert = false;
     std::vector<std::string> editKeys;
     bool importWater = false;
@@ -2567,6 +2569,8 @@ int main(int argc, char* argv[]) {
                     else if (key == "stor") { editStory = true; editKeys.push_back("stor"); }
                     else if (key == "soun") { editSound = true; editKeys.push_back("soun"); }
                     else if (key == "terr") { editTerrain = true; editKeys.push_back("terr"); }
+                    else if (key == "mesh") { editMesh = true; editKeys.push_back("mesh"); }
+                    else if (key == "mark") { editMark = true; editKeys.push_back("mark"); }
                     else {
                         fprintf(stderr, "Error: unknown --edit item: %s\n", item.c_str());
                         return 1;
@@ -2621,7 +2625,7 @@ int main(int argc, char* argv[]) {
         }
     }
     if (invert && editListProvided) {
-        editPregame = editOverhead = editPostgame = editName = editStory = editSound = editTerrain = true;
+        editPregame = editOverhead = editPostgame = editName = editStory = editSound = editTerrain = editMesh = editMark = true;
         for (const auto& k : editKeys) {
             if (k == "scre") editPregame = editOverhead = editPostgame = false;
             else if (k == "preg") editPregame = false;
@@ -2631,6 +2635,8 @@ int main(int argc, char* argv[]) {
             else if (k == "stor") editStory = false;
             else if (k == "soun") editSound = false;
             else if (k == "terr") editTerrain = false;
+            else if (k == "mesh") editMesh = false;
+            else if (k == "mark") editMark = false;
         }
     }
     if (folder.empty()) {
@@ -2941,7 +2947,8 @@ int main(int argc, char* argv[]) {
                 bool hasExplicitMesh = !effectiveObjPath.empty() || !effectiveWaterObjPath.empty()
                     || importWater || importWaterFlagsExplicit || importAnimation || zeroRuntimeCache
                     || editTerrain;
-                if (!editListProvided || hasExplicitMesh) {
+                if (!editListProvided || hasExplicitMesh || editMesh) {
+                if (editMesh) {
                 if (!effectiveObjPath.empty()) {
                     if (!applyObjToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, effectiveObjPath, objHeightScale)) {
                         fprintf(stderr, "OBJ import failed: %s\n", effectiveObjPath.c_str());
@@ -2955,6 +2962,16 @@ int main(int argc, char* argv[]) {
                 if (fileExists(passBmp)) {
                     if (!applyPassabilityToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, passBmp)) {
                         fprintf(stderr, "Passability map import failed: %s\n", passBmp.c_str());
+                        return 1;
+                    }
+                }
+                std::string reflectionBmp = firstExistingPath({
+                    folder + "/terrain/reflection.bmp",
+                    folder + "/layers/06_reflection.bmp"
+                });
+                if (fileExists(reflectionBmp)) {
+                    if (!applyReflectionToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, reflectionBmp)) {
+                        fprintf(stderr, "Reflection map import failed: %s\n", reflectionBmp.c_str());
                         return 1;
                     }
                 }
@@ -2979,15 +2996,6 @@ int main(int argc, char* argv[]) {
                         return 1;
                     }
                 }
-                std::string reflectionBmp = firstExistingPath({
-                    folder + "/terrain/reflection.bmp",
-                    folder + "/layers/06_reflection.bmp"
-                });
-                if (fileExists(reflectionBmp)) {
-                    if (!applyReflectionToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, reflectionBmp)) {
-                        fprintf(stderr, "Reflection map import failed: %s\n", reflectionBmp.c_str());
-                        return 1;
-                    }
                 }
                 if (importAnimation || editTerrain) {
                     std::string animationBmp = firstExistingPath({
@@ -3004,6 +3012,7 @@ int main(int argc, char* argv[]) {
                 std::string unitPlacementPath = firstExistingPath({
                     folder + "/assets/sprites/units_edited.json"
                 });
+                if (editMark) {
                 if (fileExists(unitPlacementPath)) {
                     if (!applyUnitPlacementEdits(t.data, unitPlacementPath)) {
                         fprintf(stderr, "Unit placement import failed: %s\n", unitPlacementPath.c_str());
@@ -3030,6 +3039,7 @@ int main(int argc, char* argv[]) {
                                 markerImport.label, markerPath.c_str());
                         return 1;
                     }
+                }
                 }
                 std::string actionPath = firstExistingPath({
                     folder + "/assets/actions/actions.json"
@@ -3072,7 +3082,7 @@ int main(int argc, char* argv[]) {
                         printf("Applied %s\n", shadowPath.c_str());
                     }
                 }
-            } else if (t.groupTag == 0x2E323536u && !editListProvided) {
+            } else if (t.groupTag == 0x2E323536u && !edit) {
                 std::string bmpPath;
                 if (t.subgroupTag == tagFromString(mf.pregameTag)) {
                     bmpPath = firstExistingPath({
