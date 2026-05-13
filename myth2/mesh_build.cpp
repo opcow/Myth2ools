@@ -375,8 +375,7 @@ static int usage(const char* p) {
     fprintf(stderr,
         "Myth II Mesh Builder - reconstruct mesh_tag.bin from extracted assets\n\n"
         "Usage:\n"
-        "  %s <folder> [--output <path>] [--compare <original_bin>]\n"
-        "             [--use-original <bin>]  copy unit_types + instances from original\n",
+        "  %s <folder> [--output <path>] [--compare <original_bin>]\n",
         p);
     return 1;
 }
@@ -389,35 +388,11 @@ int main(int argc, char* argv[]) {
 
     std::string outputPath = folder + "/raw/mesh_tag.bin";
     std::string comparePath;
-    std::string useOriginalPath;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--output" && i+1 < argc) outputPath = argv[++i];
         else if (a == "--compare" && i+1 < argc) comparePath = argv[++i];
-        else if (a == "--use-original") {
-            if (i+1 < argc) useOriginalPath = argv[++i];
-            else { fprintf(stderr, "Error: --use-original requires a path argument\n"); return 1; }
-        }
     }
-
-    // Auto-detect original if not specified
-    if (useOriginalPath.empty()) {
-        std::string parentDir = folder;
-        size_t slash = parentDir.find_last_of("/\\");
-        if (slash != std::string::npos) parentDir = parentDir.substr(0, slash);
-        std::string candidates[] = {
-            folder + "/raw/original_mesh_tag.bin",
-            folder + "/raw/mesh_tag.bin.old",
-            folder + "/original_mesh_tag.bin",
-            parentDir + "/original_mesh_tag.bin",
-            "original_mesh_tag.bin",
-        };
-        for (const auto& c : candidates) {
-            if (fileExists(c)) { useOriginalPath = c; break; }
-        }
-    }
-    if (!useOriginalPath.empty())
-        printf("Using original: %s\n", useOriginalPath.c_str());
 
     // ---- Read manifest ----
     std::string manifest = readTextFile(folder + "/manifest.json");
@@ -437,6 +412,7 @@ int main(int argc, char* argv[]) {
 
     std::string landTag = jsonStringAt(manifest, 0, "landscape_256", "85gi");
     std::string mediaTag = jsonStringAt(manifest, 0, "media_tag", "wate");
+    uint32_t meshFlags = (uint32_t)jsonInt(manifest, "mesh_flags", 0);
 
     int cellW = subW * 32;
     int cellH = subH * 32;
@@ -853,108 +829,6 @@ int main(int argc, char* argv[]) {
     }
     printf("Instance section: %zu bytes (%d instances)\n", instanceSize, (int)instances.size());
 
-    // ---- Optionally override unit types + instances from original binary ----
-    if (!useOriginalPath.empty()) {
-        auto orig = readFile(useOriginalPath);
-        if (orig.empty()) {
-            fprintf(stderr, "Cannot read --use-original file: %s\n", useOriginalPath.c_str());
-            return 1;
-        }
-        // Read header fields from original
-        uint32_t origUTC = readBE32u(orig.data(), 0x24);
-        uint32_t origUTO = readBE32u(orig.data(), 0x28);
-        uint32_t origUTS = readBE32u(orig.data(), 0x2C);
-        uint32_t origOIC = readBE32u(orig.data(), 0x34);
-        uint32_t origOIO = readBE32u(orig.data(), 0x38);
-        uint32_t origOIS = readBE32u(orig.data(), 0x3C);
-
-        // Header offsets are data-relative (relative to file offset 1024).
-        // Convert to file-absolute for reading from the binary file.
-        size_t fileUTOff = 1024 + (size_t)origUTO;
-        size_t fileIOff = 1024 + (size_t)origOIO;
-
-        if (fileUTOff + origUTS > orig.size() || fileIOff + origOIS > orig.size()) {
-            fprintf(stderr, "Invalid section offsets in original\n");
-            return 1;
-        }
-
-        // Copy unit type section
-        unitTypes.clear();
-        unitTypeData.assign(orig.begin() + fileUTOff, orig.begin() + fileUTOff + origUTS);
-        for (uint32_t i = 0; i < origUTC; i++) {
-            UnitTypeDef utd;
-            utd.markerType = readBE16u(unitTypeData.data(), i * 32);
-            utd.typeTag = readBE32u(unitTypeData.data(), i * 32 + 4);
-            utd.palIdx = (int)i;
-            utd.instanceCount = readBE16u(unitTypeData.data(), i * 32 + 28);
-            utd.uniqueIdx = (int)i;
-            unitTypes.push_back(utd);
-        }
-
-        // Copy instance section
-        instanceData.assign(orig.begin() + fileIOff, orig.begin() + fileIOff + origOIS);
-        instances.clear();
-
-        // Rebuild instances list metadata and cell-linked list
-        // First pass: find base cell offset from instance world coords
-        double minX = std::numeric_limits<double>::max();
-        double minZ = std::numeric_limits<double>::max();
-        for (uint32_t i = 0; i < origOIC; i++) {
-            size_t off = i * 64;
-            int32_t xw = (int32_t)readBE32u(instanceData.data(), off + 8);
-            int32_t zw = (int32_t)readBE32u(instanceData.data(), off + 16);
-            double cx = (double)(xw >> 16);
-            double cz = (double)(zw >> 16);
-            if (cx < minX) minX = cx;
-            if (cz < minZ) minZ = cz;
-        }
-        int baseX = (int)minX;
-        int baseZ = (int)minZ;
-        if (baseX < 0) baseX = 0;
-        if (baseZ < 0) baseZ = 0;
-
-        // Clear all firstObjectIndex in cell grid
-        for (int cy = 0; cy < cellH; cy++)
-            for (int cx = 0; cx < cellW; cx++)
-                writeBE16(cellData.data(), (size_t)(cy * cellW + cx) * 12 + 6, 0xFFFF);
-
-        // Build per-cell linked list from instance positions
-        std::vector<std::vector<int>> cellInsts((size_t)totalCells);
-        for (uint32_t i = 0; i < origOIC; i++) {
-            size_t off = i * 64;
-            int32_t xw = (int32_t)readBE32u(instanceData.data(), off + 8);
-            int32_t zw = (int32_t)readBE32u(instanceData.data(), off + 16);
-            int cx = (xw >> 16) - baseX;
-            int cz = (zw >> 16) - baseZ;
-            if (cx < 0) cx = 0;
-            if (cz < 0) cz = 0;
-            if (cx >= cellW) cx = cellW - 1;
-            if (cz >= cellH) cz = cellH - 1;
-            cellInsts[(size_t)cz * cellW + cx].push_back((int)i);
-        }
-
-        for (int cy = 0; cy < cellH; cy++) {
-            for (int cx = 0; cx < cellW; cx++) {
-                auto& list = cellInsts[(size_t)cy * cellW + cx];
-                if (list.empty()) continue;
-                std::sort(list.begin(), list.end());
-                for (int ii = 0; ii < (int)list.size(); ii++) {
-                    int idx = list[(size_t)ii];
-                    uint16_t nextIdx = (ii + 1 < (int)list.size()) ? (uint16_t)list[(size_t)ii + 1] : 0xFFFF;
-                    writeBE16(instanceData.data(), (size_t)idx * 64 + 60, nextIdx);
-                }
-                writeBE16(cellData.data(), (size_t)(cy * cellW + cx) * 12 + 6, (uint16_t)list[0]);
-            }
-        }
-
-        unitTypeSize = origUTS;
-        instanceSize = origOIS;
-        // Pad instances vector so header count stays correct
-        instances.clear();
-        instances.resize((size_t)origOIC);
-        printf("Overrode with original: %d unit types, %d instances\n", (int)origUTC, (int)origOIC);
-    }
-
     // ---- Build action buffer ----
     std::string actionsContent = readTextFile(folder + "/assets/actions/actions.json");
     std::vector<ActionEntry> actions;
@@ -1070,10 +944,9 @@ int main(int argc, char* argv[]) {
     size_t dataSize = actionOff + actionBufSize;
 
     std::vector<uint8_t> meshData;
-    if (useOriginalPath.empty()) {
-        // From scratch: zero buffer, write every known header field at correct offsets.
-        // From Python headers: mesh_header starts at file offset 0 in raw mesh_tag.bin.
-        meshData.assign(1024 + dataSize, 0);
+    // From scratch: zero buffer, write every known header field at correct offsets.
+    // From Python headers: mesh_header starts at file offset 0 in raw mesh_tag.bin.
+    meshData.assign(1024 + dataSize, 0);
 
         // [0-3]   landscape_collection_tag (4s)
         memcpy(meshData.data() + 0, landTag.c_str(), 4);
@@ -1107,7 +980,8 @@ int main(int argc, char* argv[]) {
 
         // [68-71] mesh_lighting_tag: 0 (none)
         // [72-75] connector_tag: 0 (none)
-        // [76-79] flags: 0 (none set)
+        // [76-79] flags: from manifest (SINGLE_PLAYER_MAP=0x10000, etc.)
+        writeBE32(meshData.data(), 76, meshFlags);
         // [80-83] particle_system_tag: 0 (none)
 
         // [84-87] team_count: 0
@@ -1174,14 +1048,6 @@ int main(int argc, char* argv[]) {
         // [1008-1011] editor_data_cookie: 0
         // [1012-1015] editor_data_size: 0
         // [1016-1019] editor_data_offset: 0
-    } else {
-        // Start from original, overwrite sections we regenerate
-        meshData = readFile(useOriginalPath);
-        if (meshData.empty()) {
-            fprintf(stderr, "Cannot read: %s\n", useOriginalPath.c_str());
-            return 1;
-        }
-    }
 
     // Cell grid at data-relative offset 0 (file offset 1024)
     if (1024 + cellDataSize > meshData.size()) {
