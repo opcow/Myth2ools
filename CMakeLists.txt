@@ -28,7 +28,7 @@ add_executable(proj_dump myth2/proj_dump.cpp)
 add_executable(build_plugin myth2/build_plugin.cpp)
 add_executable(export_map_actions myth2/export_map_actions.cpp)
 add_executable(export_map_objects myth2/export_map_objects.cpp)
-add_executable(mesh_build myth2/mesh_build.cpp)
+add_executable(build_mesh myth2/build_mesh.cpp)
 add_executable(mesh_verify myth2/mesh_verify.cpp)
 
 set(RELEASE_TARGETS
@@ -55,7 +55,7 @@ set(RELEASE_TARGETS
     build_plugin
     export_map_actions
     export_map_objects
-    mesh_build
+    build_mesh
 )
 
 # Enable warnings
@@ -83,7 +83,7 @@ if (MSVC)
     target_compile_options(build_plugin PRIVATE /W3)
     target_compile_options(export_map_actions PRIVATE /W3)
     target_compile_options(export_map_objects PRIVATE /W3)
-    target_compile_options(mesh_build PRIVATE /W3)
+    target_compile_options(build_mesh PRIVATE /W3)
     target_compile_options(mesh_verify PRIVATE /W3)
 else()
     target_compile_options(myth_extract PRIVATE -Wall -Wextra)
@@ -109,7 +109,7 @@ else()
     target_compile_options(build_plugin PRIVATE -Wall -Wextra)
     target_compile_options(export_map_actions PRIVATE -Wall -Wextra)
     target_compile_options(export_map_objects PRIVATE -Wall -Wextra)
-    target_compile_options(mesh_build PRIVATE -Wall -Wextra)
+    target_compile_options(build_mesh PRIVATE -Wall -Wextra)
     target_compile_options(mesh_verify PRIVATE -Wall -Wextra)
 endif()
 
