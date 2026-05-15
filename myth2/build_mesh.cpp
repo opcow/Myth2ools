@@ -243,6 +243,7 @@ int main(int argc, char* argv[]) {
     std::string landTag = jsonStr(manifest, "landscape_256");
     if (landTag.empty()) landTag = "85gi";
     std::string lightingTag = jsonStr(manifest, "mesh_lighting_tag");
+    std::string connectorTag = jsonStr(manifest, "connector_tag");
     std::string nextMeshTag = jsonStr(manifest, "next_mesh");
     std::string nextMeshAlternateTag = jsonStr(manifest, "next_mesh_alternate");
     int edgeNorth = jsonInt(manifest, "north", 32);
@@ -309,6 +310,8 @@ int main(int argc, char* argv[]) {
     std::string meshMetadataJson = readText(folder + "/mesh_metadata.json");
     uint32_t supportUnitTypeCount = (uint32_t)jsonInt(meshMetadataJson, "unit_type_count", 0);
     uint32_t supportUnitTypeSize = (uint32_t)jsonInt(meshMetadataJson, "unit_type_size", 0);
+    uint32_t supportHeaderSize = (uint32_t)jsonInt(meshMetadataJson, "header_size", 0);
+    uint32_t supportMeshSize = (uint32_t)jsonInt(meshMetadataJson, "mesh_size", 0);
     uint32_t supportMarkerCount = (uint32_t)jsonInt(meshMetadataJson, "marker_count", 0);
     uint32_t supportMarkerSize = (uint32_t)jsonInt(meshMetadataJson, "marker_size", 0);
     uint32_t supportActionOffset = (uint32_t)jsonInt(meshMetadataJson, "action_offset", 0);
@@ -321,11 +324,16 @@ int main(int argc, char* argv[]) {
     uint32_t supportTrailingSizeA = (uint32_t)jsonInt(meshMetadataJson, "trailing_size_a", 0);
     uint32_t supportTrailingOffsetB = (uint32_t)jsonInt(meshMetadataJson, "trailing_offset_b", 0);
     uint32_t supportTrailingSizeB = (uint32_t)jsonInt(meshMetadataJson, "trailing_size_b", 0);
+    std::vector<uint8_t> supportHeader = readFile(folder + "/mesh_support/header.bin");
+    std::vector<uint8_t> supportCellGrid = readFile(folder + "/mesh_support/cell_grid.bin");
     std::vector<uint8_t> supportUnitTypes = readFile(folder + "/mesh_support/unit_types.bin");
     std::vector<uint8_t> supportInstances = readFile(folder + "/mesh_support/source_instances.bin");
     std::vector<uint8_t> supportTail = readFile(folder + "/mesh_support/post_action_tail.bin");
     std::vector<uint8_t> supportAppendix = readFile(folder + "/mesh_support/post_data_appendix.bin");
     std::vector<uint8_t> sourceMesh = readFile(folder + "/raw/mesh_tag.bin");
+    const uint8_t* sourceHeader = nullptr;
+    if (supportHeaderSize == 1024 && supportHeader.size() >= 1024) sourceHeader = supportHeader.data();
+    else if (sourceMesh.size() >= 1024) sourceHeader = sourceMesh.data();
     std::vector<SourceInstanceRecord> sourceInstances;
     std::vector<SourceUnitTypeRecord> sourceUnitTypeRecords;
     if (supportUnitTypeSize != 0 && supportUnitTypeSize == supportUnitTypes.size() &&
@@ -380,8 +388,8 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
-        if (lightingTag.size() != 4) {
-            uint32_t rawLightingTag = r32(sourceMesh.data(), 0x44);
+        if (lightingTag.size() != 4 && sourceHeader) {
+            uint32_t rawLightingTag = r32(sourceHeader, 0x44);
             if (rawLightingTag != 0xFFFFFFFFu && rawLightingTag != 0u) {
                 lightingTag.assign({
                     (char)((rawLightingTag >> 24) & 0xFF),
@@ -391,8 +399,19 @@ int main(int argc, char* argv[]) {
                 });
             }
         }
-        if (nextMeshTag.size() != 4) {
-            uint32_t rawNextMeshTag = r32(sourceMesh.data(), 0x9C);
+        if (connectorTag.size() != 4 && sourceHeader) {
+            uint32_t rawConnectorTag = r32(sourceHeader, 0x48);
+            if (rawConnectorTag != 0xFFFFFFFFu && rawConnectorTag != 0u) {
+                connectorTag.assign({
+                    (char)((rawConnectorTag >> 24) & 0xFF),
+                    (char)((rawConnectorTag >> 16) & 0xFF),
+                    (char)((rawConnectorTag >> 8) & 0xFF),
+                    (char)(rawConnectorTag & 0xFF)
+                });
+            }
+        }
+        if (nextMeshTag.size() != 4 && sourceHeader) {
+            uint32_t rawNextMeshTag = r32(sourceHeader, 0x9C);
             if (rawNextMeshTag != 0xFFFFFFFFu && rawNextMeshTag != 0u) {
                 nextMeshTag.assign({
                     (char)((rawNextMeshTag >> 24) & 0xFF),
@@ -402,8 +421,8 @@ int main(int argc, char* argv[]) {
                 });
             }
         }
-        if (nextMeshAlternateTag.size() != 4) {
-            uint32_t rawNextMeshAlternateTag = r32(sourceMesh.data(), 0xA0);
+        if (nextMeshAlternateTag.size() != 4 && sourceHeader) {
+            uint32_t rawNextMeshAlternateTag = r32(sourceHeader, 0xA0);
             if (rawNextMeshAlternateTag != 0xFFFFFFFFu && rawNextMeshAlternateTag != 0u) {
                 nextMeshAlternateTag.assign({
                     (char)((rawNextMeshAlternateTag >> 24) & 0xFF),
@@ -413,36 +432,38 @@ int main(int argc, char* argv[]) {
                 });
             }
         }
-        edgeNorth = r16(sourceMesh.data(), 116);
-        edgeEast  = r16(sourceMesh.data(), 118);
-        edgeSouth = r16(sourceMesh.data(), 120);
-        edgeWest  = r16(sourceMesh.data(), 122);
-        if (!haveWindTag) {
-            windTagRef = r32(sourceMesh.data(), 0xE0);
+        if (sourceHeader) {
+            edgeNorth = r16(sourceHeader, 116);
+            edgeEast  = r16(sourceHeader, 118);
+            edgeSouth = r16(sourceHeader, 120);
+            edgeWest  = r16(sourceHeader, 122);
+        }
+        if (!haveWindTag && sourceHeader) {
+            windTagRef = r32(sourceHeader, 0xE0);
             haveWindTag = true;
         }
         for (int i = 0; i < 3; i++) {
-            if (!haveScreenTagRefs[i]) {
-                screenTagRefs[i] = r32(sourceMesh.data(), 0xE4 + (size_t)i * 4);
+            if (!haveScreenTagRefs[i] && sourceHeader) {
+                screenTagRefs[i] = r32(sourceHeader, 0xE4 + (size_t)i * 4);
                 haveScreenTagRefs[i] = true;
             }
         }
-        if (!haveWinAmbientRef) {
-            winAmbientRef = r32(sourceMesh.data(), 0x104);
+        if (!haveWinAmbientRef && sourceHeader) {
+            winAmbientRef = r32(sourceHeader, 0x104);
             haveWinAmbientRef = true;
         }
-        if (!haveLossAmbientRef) {
-            lossAmbientRef = r32(sourceMesh.data(), 0x108);
+        if (!haveLossAmbientRef && sourceHeader) {
+            lossAmbientRef = r32(sourceHeader, 0x108);
             haveLossAmbientRef = true;
         }
-        if (!haveHintsRef) {
-            hintsRef = r32(sourceMesh.data(), 0x1EC);
+        if (!haveHintsRef && sourceHeader) {
+            hintsRef = r32(sourceHeader, 0x1EC);
             haveHintsRef = true;
         }
-        if (jsonStr(manifest, "fog_color_raw_hex").empty()) {
-            memcpy(fogColorRaw, sourceMesh.data() + 0x1F0, 8);
+        if (jsonStr(manifest, "fog_color_raw_hex").empty() && sourceHeader) {
+            memcpy(fogColorRaw, sourceHeader + 0x1F0, 8);
         }
-        fogDensity = r32(sourceMesh.data(), 0x1F8);
+        if (sourceHeader) fogDensity = r32(sourceHeader, 0x1F8);
     }
 
     uint32_t sourceDataSize = 0;
@@ -515,6 +536,9 @@ int main(int argc, char* argv[]) {
     int cellW = subW * 32, cellH = subH * 32;
     int totalCells = cellW * cellH;
     size_t cellDataSize = (size_t)totalCells * 12;
+    bool haveSupportCellGrid = !supportCellGrid.empty() &&
+                               supportMeshSize == supportCellGrid.size() &&
+                               supportCellGrid.size() == cellDataSize;
 
     printf("Mesh: %s, %dx%d cells\n", meshTag.c_str(), cellW, cellH);
 
@@ -700,8 +724,9 @@ int main(int argc, char* argv[]) {
     // [68-71] mesh_lighting_tag — preserve from manifest or source mesh when available.
     if (lightingTag.size() == 4) memcpy(out.data() + 68, lightingTag.c_str(), 4);
     else w32(out.data(), 68, 0xFFFFFFFFu);
-    // [72-75] connector_tag — -1 (none, no connector data)
-    w32(out.data(), 72, 0xFFFFFFFFu);
+    // [72-75] connector_tag
+    if (connectorTag.size() == 4) memcpy(out.data() + 72, connectorTag.c_str(), 4);
+    else w32(out.data(), 72, 0xFFFFFFFFu);
     // [76-79] flags — from manifest, default: SINGLE_PLAYER_MAP
     uint32_t mf = (uint32_t)jsonInt(manifest, "mesh_flags", 0);
     w32(out.data(), 76, mf);
@@ -813,13 +838,12 @@ int main(int argc, char* argv[]) {
         else w32(out.data(), 276, (uint32_t)dataSize);
         w32(out.data(), 280, sourceTrailingSizeA);
     }
-    // [284-287] connector_count — 0
-    // [288-291] connectors_offset — preserve source tail layout when available.
-    if (!sourceTail.empty() && sourceTrailingSizeB != 0) w32(out.data(), 288, remapSourceTailOffset(sourceTrailingOffsetB));
-    else w32(out.data(), 288, (uint32_t)dataSize);
-    // [292-295] connectors_size
-    if (!sourceTail.empty()) w32(out.data(), 292, sourceTrailingSizeB);
-    // [296-299] runtime — 0
+    // [284-299] Myth II connector/trailing descriptor block.
+    // We do not understand this block well enough yet, so preserve it from the
+    // exported source header when available. This is needed for fence connectors.
+    if (sourceHeader) {
+        memcpy(out.data() + 284, sourceHeader + 284, 16);
+    }
 
     // [300-491] cutscene file paths — 0
     // [492-495] hints_string_list_tag
@@ -847,7 +871,9 @@ int main(int argc, char* argv[]) {
             w32(out.data(), (size_t)*to, 0xFFFFFFFFu);
     }
     // ---- Write cell grid (build_plugin fills with OBJ heights) ----
-    if (sourceMesh.size() >= 1024 + cellDataSize) {
+    if (haveSupportCellGrid) {
+        memcpy(out.data() + 1024, supportCellGrid.data(), cellDataSize);
+    } else if (sourceMesh.size() >= 1024 + cellDataSize) {
         memcpy(out.data() + 1024, sourceMesh.data() + 1024, cellDataSize);
     } else {
         // Cell grid is already zero from the out.assign() call

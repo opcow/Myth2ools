@@ -1065,6 +1065,7 @@ struct MeshRefs {
     uint32_t landscapeTag=0;
     uint32_t mediaTag=0;
     uint32_t meshLightingTag=0;
+    uint32_t connectorTag=0;
     int submeshW=0, submeshH=0;
     uint32_t meshOffset=0, meshSize=0;
     uint32_t dataOffset=0, dataSize=0;
@@ -1392,6 +1393,7 @@ static bool parseMeshRefs(const std::vector<uint8_t>& meshData, MeshRefs& m){
     m.dataOffset   = readBE32(meshData.data(),24);
     m.dataSize     = readBE32(meshData.data(),28);
     m.meshLightingTag = readBE32(meshData.data(),68);
+    m.connectorTag = readBE32(meshData.data(),72);
     m.meshFlags    = readBE32(meshData.data(),76);
     m.mapDescStli  = readBE32(meshData.data(),140);
     m.postgameTag  = readBE32(meshData.data(),144);
@@ -1523,12 +1525,19 @@ int main(int argc, char* argv[]){
     {
         makeDirs(base + "/mesh_support");
 
+        if(meshData.size() >= 1024){
+            std::vector<uint8_t> headerBytes(meshData.begin(), meshData.begin() + 1024);
+            writeFile(base + "/mesh_support/header.bin", headerBytes);
+        }
+
         uint32_t unitTypeCount = readBE32(meshData.data(), 36);
         uint32_t unitTypeOffset = readBE32(meshData.data(), 40);
         uint32_t unitTypeSize = readBE32(meshData.data(), 44);
         uint32_t markerCount = readBE32(meshData.data(), 52);
         uint32_t markerOffset = readBE32(meshData.data(), 56);
         uint32_t markerSize = readBE32(meshData.data(), 60);
+        uint32_t meshOffset = readBE32(meshData.data(), 12);
+        uint32_t meshSize = readBE32(meshData.data(), 16);
         uint32_t actionCount = readBE32(meshData.data(), 128);
         uint32_t actionOffset = readBE32(meshData.data(), 132);
         uint32_t actionSize = readBE32(meshData.data(), 136);
@@ -1546,6 +1555,13 @@ int main(int argc, char* argv[]){
             std::vector<uint8_t> unitTypeBytes(meshData.begin() + (ptrdiff_t)unitTypeBase,
                                                meshData.begin() + (ptrdiff_t)unitTypeBase + unitTypeSize);
             writeFile(base + "/mesh_support/unit_types.bin", unitTypeBytes);
+        }
+
+        size_t meshBase = 1024 + (size_t)meshOffset;
+        if(meshBase + (size_t)meshSize <= meshData.size()){
+            std::vector<uint8_t> cellGridBytes(meshData.begin() + (ptrdiff_t)meshBase,
+                                               meshData.begin() + (ptrdiff_t)meshBase + meshSize);
+            writeFile(base + "/mesh_support/cell_grid.bin", cellGridBytes);
         }
 
         size_t markerBase = 1024 + (size_t)markerOffset;
@@ -1571,6 +1587,9 @@ int main(int argc, char* argv[]){
         FILE* mm=fopen((base+"/mesh_metadata.json").c_str(),"wb");
         if(mm){
             fprintf(mm,"{\n");
+            fprintf(mm,"  \"header_size\": 1024,\n");
+            fprintf(mm,"  \"mesh_offset\": %u,\n", meshOffset);
+            fprintf(mm,"  \"mesh_size\": %u,\n", meshSize);
             fprintf(mm,"  \"unit_type_count\": %u,\n", unitTypeCount);
             fprintf(mm,"  \"unit_type_offset\": %u,\n", unitTypeOffset);
             fprintf(mm,"  \"unit_type_size\": %u,\n", unitTypeSize);
@@ -1773,6 +1792,7 @@ int main(int argc, char* argv[]){
         fprintf(mf,"    \"landscape_256\": %s,\n",tagRefToJson(refs.landscapeTag).c_str());
         fprintf(mf,"    \"media_tag\": %s,\n",tagRefToJson(refs.mediaTag).c_str());
         fprintf(mf,"    \"mesh_lighting_tag\": %s,\n",tagRefToJson(refs.meshLightingTag).c_str());
+        fprintf(mf,"    \"connector_tag\": %s,\n",tagRefToJson(refs.connectorTag).c_str());
         fprintf(mf,"    \"map_name_stli\": %s,\n",tagRefToJson(refs.mapDescStli).c_str());
         fprintf(mf,"    \"pregame_256\": %s,\n",tagRefToJson(refs.pregameTag).c_str());
         fprintf(mf,"    \"overhead_256\": %s,\n",tagRefToJson(refs.overheadTag).c_str());
