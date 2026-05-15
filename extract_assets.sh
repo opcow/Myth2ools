@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
     cat <<'EOF'
 Usage:
-  extract_assets.sh <tags_folder> <meshtag> [output_folder] [--ora] [--overwrite] [--animation-frame first|none|all]
+  extract_assets.sh <tags_folder|plugin_file> <meshtag> [output_folder] [--ora] [--overwrite] [--animation-frame first|none|all]
 
 Runs extract_map, export_mesh, export_water_mesh, export_map_objects, and export_map_actions.
 EOF
@@ -18,6 +18,11 @@ fi
 tags_folder=$1
 mesh_tag=$2
 shift 2
+
+if [[ ! -e "$tags_folder" ]]; then
+    echo "Input tag source not found: $tags_folder" >&2
+    exit 1
+fi
 
 out_folder=$mesh_tag
 if [[ $# -gt 0 && $1 != --* ]]; then
@@ -103,6 +108,10 @@ fi
 
 echo "Extracting map assets..."
 "$bin_dir/extract_map" "$tags_folder" "$mesh_tag" --out "$out_folder" "${extract_args[@]}"
+if [[ ! -f "$out_folder/manifest.json" ]]; then
+    echo "extract_map did not produce $out_folder/manifest.json" >&2
+    exit 1
+fi
 
 echo "Exporting terrain mesh..."
 "$bin_dir/export_mesh" "$out_folder"

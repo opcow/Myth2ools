@@ -22,12 +22,17 @@ set "SCRIPT_DIR=%~dp0"
 set "CURRENT_DIR=%CD%\"
 set "BIN_DIR="
 
-call :try_bin_dir "%SCRIPT_DIR%"
-call :try_bin_dir "%CURRENT_DIR%"
+if not exist "%TAGS_FOLDER%" (
+    echo Input tag source not found: "%TAGS_FOLDER%"
+    exit /b 1
+)
+
 call :try_bin_dir "%SCRIPT_DIR%build\Release\"
 call :try_bin_dir "%SCRIPT_DIR%build\Debug\"
 call :try_bin_dir "%CURRENT_DIR%build\Release\"
 call :try_bin_dir "%CURRENT_DIR%build\Debug\"
+call :try_bin_dir "%SCRIPT_DIR%"
+call :try_bin_dir "%CURRENT_DIR%"
 call :try_bin_dir "%SCRIPT_DIR%..\build\Release\"
 call :try_bin_dir "%SCRIPT_DIR%..\build\Debug\"
 
@@ -62,6 +67,10 @@ goto usage
 echo Extracting map assets...
 "%BIN_DIR%extract_map.exe" "%TAGS_FOLDER%" "%MESH_TAG%" --out "%OUT_FOLDER%" %EXTRACT_ARGS%
 if errorlevel 1 exit /b 1
+if not exist "%OUT_FOLDER%\manifest.json" (
+    echo extract_map did not produce "%OUT_FOLDER%\manifest.json"
+    exit /b 1
+)
 
 echo Exporting terrain mesh...
 "%BIN_DIR%export_mesh.exe" "%OUT_FOLDER%"
@@ -84,7 +93,7 @@ exit /b 0
 
 :usage
 echo Usage:
-echo   extract_assets.bat ^<tags_folder^> ^<meshtag^> [output_folder] [--ora] [--overwrite] [--animation-frame first^|none^|all]
+echo   extract_assets.bat ^<tags_folder^|plugin_file^> ^<meshtag^> [output_folder] [--ora] [--overwrite] [--animation-frame first^|none^|all]
 echo.
 echo Runs extract_map, export_mesh, export_water_mesh, export_map_objects, and export_map_actions.
 exit /b 1
