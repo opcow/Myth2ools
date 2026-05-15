@@ -184,7 +184,7 @@ that points to the generated `water_mask.png` texture.
 ### `export_map_objects`
 
 ```bash
-export_map_objects <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite] [--animation-frame first|none|all]
+export_map_objects <tags_folder|plugin_file> <out_folder> [terrain.obj] [--world-space] [--overwrite] [--animation-frame first|none|all]
 ```
 
 Exports placed map objects and supporting assets from an extracted Myth II mesh
