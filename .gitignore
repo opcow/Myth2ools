@@ -24,3 +24,7 @@ Doc/session_log.md
 !tools/import_animations.py
 *.dng2
 dir*.txt
+refresh.ps1
+refresh.bat
+myth2/fill_mesh_tag.cpp
+myth2/fill_mesh_tag.h
