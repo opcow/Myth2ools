@@ -45,8 +45,8 @@ And place units, monsters, and sounds. (Models and other assets are export only 
 ### `extract_map`
 
 ```bash
-extract_map <tags_folder> <meshtag> [output_folder] [--ora]
-extract_map <tags_folder> <meshtag> --out <output_folder> [--ora]
+extract_map <tags_folder> <meshtag> [output_folder] [--ora] [--debug-blobs]
+extract_map <tags_folder> <meshtag> --out <output_folder> [--ora] [--debug-blobs]
 ```
 
 First-pass Myth II map extractor. It scans the supplied Myth II tags folder,
@@ -54,7 +54,6 @@ finds the requested `mesh` tag and its referenced assets, and writes to
 `output_folder`, or to `<meshtag>/` when no output folder is supplied:
 
 - `raw/mesh_tag.bin`
-- `terrain/terrain_tag.bin`
 - `terrain/terrain.bmp`
 - `terrain/shadow.bmp`
 - `terrain/water.bmp`
@@ -62,11 +61,17 @@ finds the requested `mesh` tag and its referenced assets, and writes to
 - `terrain/reflection.bmp`
 - `terrain/animation.bmp`
 - `terrain/passability.bmp`
-- `screens/overhead.bmp` / `pregame.bmp` / `postgame.bmp` when present
+- `screens/overhead_collection/`, `screens/pregame_collection/`, and
+  `screens/postgame_collection/` when present
 - `strings/name.txt`
 - `layers/` transparent PNG reference layers plus `layers/manifest.txt`
 - `manifest.json`
 - `layers/map_layers.ora` when `--ora` is used
+- raw source tag blobs plus legacy single-screen BMPs such as `terrain/*.bin`,
+  `screens/*_tag.bin`, `screens/*.bmp`,
+  `sounds/*_tag.bin`, `strings/*_tag.bin`, plus
+  `mesh_support/unit_types.bin` and `mesh_support/source_instances.bin`, only
+  when `--debug-blobs` is used
 
 `terrain/passability.bmp`, `terrain/water.bmp`, `terrain/water_mask.bmp`,
 `terrain/reflection.bmp`, and `terrain/animation.bmp` are written as 4-bit
@@ -90,6 +95,9 @@ containing the terrain-side layer stack:
 The loose files in `layers/` are PNGs so overlay/reference layers can carry
 transparency in regular image editors. `build_plugin` reimports from the
 canonical files under `terrain/`, `screens/`, and `strings/`.
+
+`--debug-blobs` is for forensic/roundtrip work. It restores retired binary tag
+exports that are no longer needed for normal rebuilds.
 
 ### `build_plugin`
 
@@ -119,9 +127,9 @@ packs the mesh plus any extracted terrain, name, and screen tags.
   - `terrain/passability.bmp`
   - `terrain/water.bmp`
   - `terrain/animation.bmp`
-  - `screens/overhead.bmp`
-  - `screens/pregame.bmp`
-  - `screens/postgame.bmp`
+  - `screens/overhead_collection/`
+  - `screens/pregame_collection/`
+  - `screens/postgame_collection/`
   - `strings/name.txt`
   - `assets/sprites/units_edited.json`
 - `terrain/terrain.bmp` and `terrain/shadow.bmp` are reinjected into the terrain
@@ -137,14 +145,10 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 - `terrain/animation.bmp` marks cells with the animated-media bit as a 4-bit indexed mask: index `0` = off, nonzero = animated.
 - In normal engine behavior, the animated-media bit is derived from wet topology: a vertex is marked animated only when the four cells meeting there are all fully wet.
 - Because the engine recomputes that bit from topology, `terrain/animation.bmp` is best treated as a diagnostic/reference layer rather than a stable standalone authoring control.
-- `screens/pregame.bmp`, `screens/overhead.bmp`, and `screens/postgame.bmp`
-  are reinjected into existing `.256` tags when present. `overhead.bmp` can
-  also be rebuilt into a simple single-image `.256` tag if its `_tag.bin` is
-  missing. Pregame and postgame screens are multi-sequence slideshow bundles,
-  so `extract_map` also writes `screens/<name>_collection/` with every bitmap
-  and a `collection.json` sequence map. If a screen `_tag.bin` is missing,
-  `build_plugin` can rebuild that full collection from the folder; the single
-  BMP preview alone is not enough.
+- `screens/<name>_collection/` is the canonical screen authoring format.
+  `build_plugin` can rebuild the full `.256` screen tags from those collection
+  folders when the `_tag.bin` files are absent. Legacy single-screen BMPs are
+  now debug-only output and are no longer needed for normal rebuilds.
 - `strings/name.txt` is rebuilt into the map-name `stli` when present.
   If `strings/name_tag.bin` is missing, `build_plugin` can generate this tag
   directly from `strings/name.txt`.
