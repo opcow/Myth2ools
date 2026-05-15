@@ -562,8 +562,11 @@ static bool readUnitTypes(const std::vector<uint8_t>& d, const MeshHeader& h,
 struct ObjectInstance {
     int16_t  markerType=0;  // instance's own type: 6 = _marker_model (placed 3D scenery)
     uint16_t paletteIdx=0;  // index into marker palette table
+    uint16_t identifier=0;
     int32_t posX=0, posY=0, posZ=0;  // world_distance, /512 gives cell coordinate
     uint16_t yaw=0;  // 0..65535 = 0..360 degrees
+    uint16_t pitch=0;
+    uint16_t roll=0;
     uint8_t userData[16]={};  // marker-type-specific data at [36:52]
     uint8_t permutationIndex=0;  // user_data[1]: 0-based permutation/variant index
 };
@@ -577,10 +580,13 @@ static bool readInstances(const std::vector<uint8_t>& d, const MeshHeader& h,
         ObjectInstance inst;
         inst.markerType = readBE16s(d.data(), off+4);   // marker type
         inst.paletteIdx = readBE16u(d.data(), off+6);   // palette_index
+        inst.identifier = readBE16u(d.data(), off+8);    // marker identifier
         inst.posX       = readBE32s(d.data(), off+12);  // position.x
         inst.posY       = readBE32s(d.data(), off+16);  // position.y
         inst.posZ       = readBE32s(d.data(), off+20);  // position.z (height)
         inst.yaw        = readBE16u(d.data(), off+32);  // yaw angle
+        inst.pitch      = readBE16u(d.data(), off+34);  // pitch angle / marker-type state
+        inst.roll       = readBE16u(d.data(), off+52);  // roll angle
         memcpy(inst.userData, d.data()+off+36, 16);     // user_data[16]
         inst.permutationIndex = inst.userData[1];        // 0-based permutation index
         out.push_back(inst);
@@ -1664,12 +1670,12 @@ static bool exportUnitPlaceholders(const std::string& outFolder,
                  ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
                  ", \"facing_deg\": %.4f, \"sequence\": %d"
                  ", \"view\": %d, \"textured\": %s"
-                 ", \"pal_idx\": %d, \"marker_idx\": %zu}",
+                 ", \"pal_idx\": %d, \"marker_idx\": %zu, \"identifier\": %u}",
                  cellX, cellY, cellZ, facingDeg,
                  textured ? def->sequenceIndex : -1,
                  textured ? viewIndex : -1,
                  textured ? "true" : "false",
-                 (int)inst.paletteIdx, ii);
+                 (int)inst.paletteIdx, ii, (unsigned)inst.identifier);
         json += jbuf;
         unitCount++;
     }
@@ -1795,8 +1801,9 @@ static bool exportSoundPlaceholders(const std::string& outFolder,
         snprintf(jbuf, sizeof(jbuf),
                  ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
                  ", \"obj_x\": %.4f, \"obj_y\": %.4f, \"obj_z\": %.4f"
-                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu",
-                 cellX, cellY, cellZ, wx, wz, wy, facingDeg, (int)inst.paletteIdx, ii);
+                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu, \"identifier\": %u",
+                 cellX, cellY, cellZ, wx, wz, wy, facingDeg, (int)inst.paletteIdx, ii,
+                 (unsigned)inst.identifier);
         json += jbuf;
         json += ", \"audio\": [";
         for (size_t ai = 0; ai < exIt->second.size(); ai++) {
@@ -2036,12 +2043,14 @@ static bool exportSceneryPlaceholders(const std::string& outFolder,
         char jbuf[256];
         snprintf(jbuf, sizeof(jbuf),
                  ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
-                 ", \"facing_deg\": %.4f, \"sequence\": %d"
-                 ", \"textured\": %s, \"pal_idx\": %d, \"marker_idx\": %zu}",
+                  ", \"facing_deg\": %.4f, \"sequence\": %d"
+                 ", \"textured\": %s, \"pal_idx\": %d, \"marker_idx\": %zu, \"identifier\": %u"
+                 ", \"pitch_raw\": %u, \"roll_raw\": %u}",
                  cellX, cellY, cellZ, facingDeg,
                  textured ? def->sequenceIndex : -1,
                  textured ? "true" : "false",
-                 (int)inst.paletteIdx, ii);
+                 (int)inst.paletteIdx, ii, (unsigned)inst.identifier,
+                 (unsigned)inst.pitch, (unsigned)inst.roll);
         json += jbuf;
         sceneryCount++;
     }
@@ -2152,8 +2161,9 @@ static bool exportProjectilePlaceholders(const std::string& outFolder,
         char jbuf[256];
         snprintf(jbuf, sizeof(jbuf),
                  ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
-                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu}",
-                 cellX, cellY, cellZ, facingDeg, (int)inst.paletteIdx, ii);
+                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu, \"identifier\": %u}",
+                 cellX, cellY, cellZ, facingDeg, (int)inst.paletteIdx, ii,
+                 (unsigned)inst.identifier);
         json += jbuf;
         projectileCount++;
     }
@@ -2180,10 +2190,11 @@ static void usage(const char* p) {
     fprintf(stderr,
         "Myth II Map Object Exporter\n\n"
         "Usage:\n"
-        "  %s <tags_folder> <out_folder> [terrain.obj] [--world-space] [--overwrite]\n"
+        "  %s <tags_folder|plugin_file> <out_folder> [terrain.obj] [--world-space] [--overwrite]\n"
         "     [--animation-frame first|none|all]\n\n"
         "Arguments:\n"
-        "  tags_folder    folder containing Myth II tag files (e.g. 'small install')\n"
+        "  tags_folder|plugin_file\n"
+        "               folder containing Myth II tag files, or a single plugin/tag file\n"
         "  out_folder     extracted map folder (e.g. out/le3e, must contain raw/mesh_tag.bin)\n"
         "  terrain.obj    terrain OBJ to inline into map_combined.obj\n"
         "                 (auto-detected from assets/terrain/displacement.obj if present)\n"
@@ -2322,12 +2333,16 @@ int main(int argc, char* argv[]) {
 
     // Scan tag files
     std::vector<TagEntry> tags;
-    if (!fs::is_directory(tagsFolder)) {
-        fprintf(stderr,"Not a directory: %s\n", tagsFolder.c_str()); return 1;
-    }
-    for (const auto& it: fs::directory_iterator(tagsFolder)) {
-        if (!it.is_regular_file()) continue;
-        scanTagFile(it.path().string(), tags);
+    if (fs::is_regular_file(tagsFolder)) {
+        scanTagFile(tagsFolder, tags);
+    } else if (fs::is_directory(tagsFolder)) {
+        for (const auto& it: fs::directory_iterator(tagsFolder)) {
+            if (!it.is_regular_file()) continue;
+            scanTagFile(it.path().string(), tags);
+        }
+    } else {
+        fprintf(stderr,"Not a directory or file: %s\n", tagsFolder.c_str());
+        return 1;
     }
     if (tags.empty()) {
         fprintf(stderr,"No Myth II tag files found in %s\n", tagsFolder.c_str()); return 1;
@@ -2561,14 +2576,17 @@ int main(int argc, char* argv[]) {
 
         json += "    {\"tag\": ";
         appendJsonString(json, tagStr);
-        char buf[200];
+        char buf[256];
         snprintf(buf,sizeof(buf),
                  ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
                  ", \"facing_deg\": %.4f"
                  ", \"permutation\": %d"
-                 ", \"pal_idx\": %d, \"marker_idx\": %zu}",
+                 ", \"pal_idx\": %d, \"marker_idx\": %zu, \"identifier\": %u"
+                 ", \"pitch_raw\": %u, \"roll_raw\": %u}",
                  cellX, cellY, cellZ, facingDeg,
-                 (int)inst.permutationIndex, (int)inst.paletteIdx, ii);
+                 (int)inst.permutationIndex, (int)inst.paletteIdx, ii,
+                 (unsigned)inst.identifier,
+                 (unsigned)inst.pitch, (unsigned)inst.roll);
         json += buf;
 
         // Accumulate for combined OBJ if geom was loaded
@@ -2694,9 +2712,12 @@ int main(int argc, char* argv[]) {
         char buf[256];
         snprintf(buf, sizeof(buf),
                  ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
-                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu"
+                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu, \"identifier\": %u"
+                 ", \"pitch_raw\": %u, \"roll_raw\": %u"
                  ", \"ticks_per_frame\": %d, \"frames\": [",
                  cellX, cellY, cellZ, facingDeg, (int)inst.paletteIdx, ii,
+                 (unsigned)inst.identifier,
+                 (unsigned)inst.pitch, (unsigned)inst.roll,
                  (int)anim.ticksPerFrame);
         json += buf;
 
@@ -2706,9 +2727,12 @@ int main(int argc, char* argv[]) {
         appendJsonString(animationsJson, animStr);
         snprintf(buf, sizeof(buf),
                  ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
-                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu"
+                 ", \"facing_deg\": %.4f, \"pal_idx\": %d, \"marker_idx\": %zu, \"identifier\": %u"
+                 ", \"pitch_raw\": %u, \"roll_raw\": %u"
                  ", \"frame_duration_ticks\": %d, \"frames\": [",
                  cellX, cellY, cellZ, facingDeg, (int)inst.paletteIdx, ii,
+                 (unsigned)inst.identifier,
+                 (unsigned)inst.pitch, (unsigned)inst.roll,
                  (int)anim.ticksPerFrame);
         animationsJson += buf;
 

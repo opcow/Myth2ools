@@ -60,6 +60,12 @@ static bool isNullTag(uint32_t t) {
     return t==0 || t==0xFFFFFFFFu;
 }
 
+static std::string tagRefToJson(uint32_t t){
+    if(t == 0xFFFFFFFFu) return "null";
+    if(t == 0u) return "0";
+    return "\"" + tagToString(t) + "\"";
+}
+
 static std::vector<uint8_t> readFile(const std::string& path){
     FILE* f=fopen(path.c_str(),"rb");
     if(!f) return {};
@@ -88,6 +94,17 @@ static bool writeText(const std::string& path, const std::string& text){
     bool ok=(fwrite(text.data(),1,text.size(),f)==text.size());
     fclose(f);
     return ok;
+}
+
+static std::string toHex(const uint8_t* data, size_t len){
+    static const char* HEX = "0123456789ABCDEF";
+    std::string s;
+    s.resize(len * 2);
+    for(size_t i=0; i<len; i++){
+        s[i * 2 + 0] = HEX[data[i] >> 4];
+        s[i * 2 + 1] = HEX[data[i] & 0x0F];
+    }
+    return s;
 }
 
 static void appendLE16(std::vector<uint8_t>& out, uint16_t v){
@@ -1047,6 +1064,7 @@ static bool extractCollection256FromData(const std::vector<uint8_t>& data,
 struct MeshRefs {
     uint32_t landscapeTag=0;
     uint32_t mediaTag=0;
+    uint32_t meshLightingTag=0;
     int submeshW=0, submeshH=0;
     uint32_t meshOffset=0, meshSize=0;
     uint32_t dataOffset=0, dataSize=0;
@@ -1055,7 +1073,7 @@ struct MeshRefs {
     uint32_t postgameTag=0;
     uint32_t pregameTag=0;
     uint32_t overheadTag=0;
-    uint32_t globalAmbientSoundTag=0;
+    uint32_t actionSectionSignature=0;
     uint32_t narrationSoundTag=0;
     uint32_t winAmbientSoundTag=0;
     uint32_t lossAmbientSoundTag=0;
@@ -1063,6 +1081,19 @@ struct MeshRefs {
     uint32_t storylineTag2=0;
     uint32_t storylineTag3=0;
     uint32_t storylineTag4=0;
+    uint16_t edgeBufferNorth=0;
+    uint16_t edgeBufferEast=0;
+    uint16_t edgeBufferSouth=0;
+    uint16_t edgeBufferWest=0;
+    uint32_t nextMeshTag=0;
+    uint32_t nextMeshAlternateTag=0;
+    uint32_t windTag=0;
+    uint32_t screenCollectionTag0=0;
+    uint32_t screenCollectionTag1=0;
+    uint32_t screenCollectionTag2=0;
+    uint32_t hintsStringListTag=0;
+    uint8_t fogColorRaw[8] = {};
+    uint32_t fogDensity=0;
 };
 
 static const uint8_t TERRAIN_TYPE_COLORS[16][3] = {
@@ -1360,12 +1391,15 @@ static bool parseMeshRefs(const std::vector<uint8_t>& meshData, MeshRefs& m){
     m.meshSize     = readBE32(meshData.data(),16);
     m.dataOffset   = readBE32(meshData.data(),24);
     m.dataSize     = readBE32(meshData.data(),28);
+    m.meshLightingTag = readBE32(meshData.data(),68);
     m.meshFlags    = readBE32(meshData.data(),76);
     m.mapDescStli  = readBE32(meshData.data(),140);
     m.postgameTag  = readBE32(meshData.data(),144);
     m.pregameTag   = readBE32(meshData.data(),148);
     m.overheadTag  = readBE32(meshData.data(),152);
-    m.globalAmbientSoundTag = readBE32(meshData.data(),0x7C);
+    m.nextMeshTag  = readBE32(meshData.data(),156);
+    m.nextMeshAlternateTag = readBE32(meshData.data(),160);
+    m.actionSectionSignature = readBE32(meshData.data(),0x7C);
     m.narrationSoundTag     = readBE32(meshData.data(),0x100);
     m.winAmbientSoundTag    = readBE32(meshData.data(),0x104);
     m.lossAmbientSoundTag   = readBE32(meshData.data(),0x108);
@@ -1373,6 +1407,17 @@ static bool parseMeshRefs(const std::vector<uint8_t>& meshData, MeshRefs& m){
     m.storylineTag2         = readBE32(meshData.data(),0xB4);
     m.storylineTag3         = readBE32(meshData.data(),0xB8);
     m.storylineTag4         = readBE32(meshData.data(),0xBC);
+    m.edgeBufferNorth = (uint16_t)readBE16s(meshData.data(),116);
+    m.edgeBufferEast  = (uint16_t)readBE16s(meshData.data(),118);
+    m.edgeBufferSouth = (uint16_t)readBE16s(meshData.data(),120);
+    m.edgeBufferWest  = (uint16_t)readBE16s(meshData.data(),122);
+    m.windTag         = readBE32(meshData.data(),0xE0);
+    m.screenCollectionTag0 = readBE32(meshData.data(),0xE4);
+    m.screenCollectionTag1 = readBE32(meshData.data(),0xE8);
+    m.screenCollectionTag2 = readBE32(meshData.data(),0xEC);
+    m.hintsStringListTag = readBE32(meshData.data(),0x1EC);
+    memcpy(m.fogColorRaw, meshData.data() + 0x1F0, 8);
+    m.fogDensity      = readBE32(meshData.data(),0x1F8);
     return true;
 }
 
@@ -1474,6 +1519,118 @@ int main(int argc, char* argv[]){
     makeDirs(base);
 
     writeFile(base+"/raw/mesh_tag.bin", meshData);
+
+    {
+        makeDirs(base + "/mesh_support");
+
+        uint32_t unitTypeCount = readBE32(meshData.data(), 36);
+        uint32_t unitTypeOffset = readBE32(meshData.data(), 40);
+        uint32_t unitTypeSize = readBE32(meshData.data(), 44);
+        uint32_t markerCount = readBE32(meshData.data(), 52);
+        uint32_t markerOffset = readBE32(meshData.data(), 56);
+        uint32_t markerSize = readBE32(meshData.data(), 60);
+        uint32_t actionCount = readBE32(meshData.data(), 128);
+        uint32_t actionOffset = readBE32(meshData.data(), 132);
+        uint32_t actionSize = readBE32(meshData.data(), 136);
+        uint32_t mediaCoverageOffset = readBE32(meshData.data(), 192);
+        uint32_t mediaCoverageSize = readBE32(meshData.data(), 196);
+        uint32_t meshLodOffset = readBE32(meshData.data(), 204);
+        uint32_t meshLodSize = readBE32(meshData.data(), 208);
+        uint32_t trailingOffsetA = readBE32(meshData.data(), 276);
+        uint32_t trailingSizeA = readBE32(meshData.data(), 280);
+        uint32_t trailingOffsetB = readBE32(meshData.data(), 288);
+        uint32_t trailingSizeB = readBE32(meshData.data(), 292);
+
+        size_t unitTypeBase = 1024 + (size_t)unitTypeOffset;
+        if(unitTypeBase + (size_t)unitTypeSize <= meshData.size()){
+            std::vector<uint8_t> unitTypeBytes(meshData.begin() + (ptrdiff_t)unitTypeBase,
+                                               meshData.begin() + (ptrdiff_t)unitTypeBase + unitTypeSize);
+            writeFile(base + "/mesh_support/unit_types.bin", unitTypeBytes);
+        }
+
+        size_t markerBase = 1024 + (size_t)markerOffset;
+        if(markerBase + (size_t)markerSize <= meshData.size()){
+            std::vector<uint8_t> markerBytes(meshData.begin() + (ptrdiff_t)markerBase,
+                                             meshData.begin() + (ptrdiff_t)markerBase + markerSize);
+            writeFile(base + "/mesh_support/source_instances.bin", markerBytes);
+        }
+
+        uint32_t dataSize = readBE32(meshData.data(), 28);
+        size_t dataEnd = 1024 + (size_t)dataSize;
+        size_t actionEnd = 1024 + (size_t)actionOffset + (size_t)actionSize;
+        if(dataEnd <= meshData.size() && actionEnd <= dataEnd && actionEnd < dataEnd){
+            std::vector<uint8_t> tailBytes(meshData.begin() + (ptrdiff_t)actionEnd,
+                                           meshData.begin() + (ptrdiff_t)dataEnd);
+            writeFile(base + "/mesh_support/post_action_tail.bin", tailBytes);
+        }
+        if(dataEnd < meshData.size()){
+            std::vector<uint8_t> appendixBytes(meshData.begin() + (ptrdiff_t)dataEnd, meshData.end());
+            writeFile(base + "/mesh_support/post_data_appendix.bin", appendixBytes);
+        }
+
+        FILE* mm=fopen((base+"/mesh_metadata.json").c_str(),"wb");
+        if(mm){
+            fprintf(mm,"{\n");
+            fprintf(mm,"  \"unit_type_count\": %u,\n", unitTypeCount);
+            fprintf(mm,"  \"unit_type_offset\": %u,\n", unitTypeOffset);
+            fprintf(mm,"  \"unit_type_size\": %u,\n", unitTypeSize);
+            fprintf(mm,"  \"marker_count\": %u,\n", markerCount);
+            fprintf(mm,"  \"marker_offset\": %u,\n", markerOffset);
+            fprintf(mm,"  \"marker_size\": %u,\n", markerSize);
+            fprintf(mm,"  \"action_count\": %u,\n", actionCount);
+            fprintf(mm,"  \"action_offset\": %u,\n", actionOffset);
+            fprintf(mm,"  \"action_size\": %u,\n", actionSize);
+            fprintf(mm,"  \"media_coverage_offset\": %u,\n", mediaCoverageOffset);
+            fprintf(mm,"  \"media_coverage_size\": %u,\n", mediaCoverageSize);
+            fprintf(mm,"  \"mesh_lod_offset\": %u,\n", meshLodOffset);
+            fprintf(mm,"  \"mesh_lod_size\": %u,\n", meshLodSize);
+            fprintf(mm,"  \"trailing_offset_a\": %u,\n", trailingOffsetA);
+            fprintf(mm,"  \"trailing_size_a\": %u,\n", trailingSizeA);
+            fprintf(mm,"  \"trailing_offset_b\": %u,\n", trailingOffsetB);
+            fprintf(mm,"  \"trailing_size_b\": %u,\n", trailingSizeB);
+            fprintf(mm,"  \"post_action_tail_size\": %u,\n", (unsigned)((dataEnd > actionEnd) ? (dataEnd - actionEnd) : 0));
+            fprintf(mm,"  \"post_data_appendix_size\": %u\n", (unsigned)((meshData.size() > dataEnd) ? (meshData.size() - dataEnd) : 0));
+            fprintf(mm,"}\n");
+            fclose(mm);
+        }
+    }
+
+    {
+        std::string teamMarkersJson;
+        teamMarkersJson += "{\n  \"team_markers\": [\n";
+        uint32_t markerCount = readBE32(meshData.data(), 52);
+        uint32_t markerOffset = readBE32(meshData.data(), 56);
+        size_t markerBase = 1024 + (size_t)markerOffset;
+        bool firstTeamMarker = true;
+        if(markerBase + (size_t)markerCount * 64 <= meshData.size()){
+            for(uint32_t i=0; i<markerCount; i++){
+                size_t off = markerBase + (size_t)i * 64;
+                int16_t markerType = readBE16s(meshData.data(), off + 4);
+                if(markerType != 0) continue;
+                if(!firstTeamMarker) teamMarkersJson += ",\n";
+                firstTeamMarker = false;
+                int32_t posX = readBE32s(meshData.data(), off + 12);
+                int32_t posY = readBE32s(meshData.data(), off + 16);
+                int32_t posZ = readBE32s(meshData.data(), off + 20);
+                uint16_t yaw = (uint16_t)readBE16s(meshData.data(), off + 32);
+                uint16_t pitch = (uint16_t)readBE16s(meshData.data(), off + 34);
+                uint16_t roll = (uint16_t)readBE16s(meshData.data(), off + 52);
+                teamMarkersJson += "    { ";
+                teamMarkersJson += "\"marker_idx\": " + std::to_string(i);
+                teamMarkersJson += ", \"palette_idx\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 6));
+                teamMarkersJson += ", \"identifier\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 8));
+                teamMarkersJson += ", \"x\": " + std::to_string((double)posX / 512.0);
+                teamMarkersJson += ", \"y\": " + std::to_string((double)posY / 512.0);
+                teamMarkersJson += ", \"z\": " + std::to_string((double)posZ / 512.0);
+                teamMarkersJson += ", \"yaw_raw\": " + std::to_string(yaw);
+                teamMarkersJson += ", \"pitch_raw\": " + std::to_string(pitch);
+                teamMarkersJson += ", \"roll_raw\": " + std::to_string(roll);
+                teamMarkersJson += ", \"raw_hex\": \"" + toHex(meshData.data() + off, 64) + "\" }";
+            }
+        }
+        teamMarkersJson += "\n  ]\n}\n";
+        writeText(base + "/team_markers.json", teamMarkersJson);
+    }
 
     printf("Submesh dimensions: %d x %d\n",refs.submeshW,refs.submeshH);
     printf("Landscape tag:      %s\n",tagToString(refs.landscapeTag).c_str());
@@ -1613,21 +1770,34 @@ int main(int argc, char* argv[]){
         fprintf(mf,"  \"mesh_source\": \"%s\",\n",meshEntry->sourceFile.c_str());
         fprintf(mf,"  \"submesh_dimensions\": { \"width\": %d, \"height\": %d },\n",refs.submeshW,refs.submeshH);
         fprintf(mf,"  \"referenced_tags\": {\n");
-        fprintf(mf,"    \"landscape_256\": %s,\n",isNullTag(refs.landscapeTag)?"null":("\""+tagToString(refs.landscapeTag)+"\"").c_str());
-        fprintf(mf,"    \"media_tag\": %s,\n",isNullTag(refs.mediaTag)?"null":("\""+tagToString(refs.mediaTag)+"\"").c_str());
-        fprintf(mf,"    \"map_name_stli\": %s,\n",isNullTag(refs.mapDescStli)?"null":("\""+tagToString(refs.mapDescStli)+"\"").c_str());
-        fprintf(mf,"    \"pregame_256\": %s,\n",isNullTag(refs.pregameTag)?"null":("\""+tagToString(refs.pregameTag)+"\"").c_str());
-        fprintf(mf,"    \"overhead_256\": %s,\n",isNullTag(refs.overheadTag)?"null":("\""+tagToString(refs.overheadTag)+"\"").c_str());
-        fprintf(mf,"    \"postgame_256\": %s,\n",isNullTag(refs.postgameTag)?"null":("\""+tagToString(refs.postgameTag)+"\"").c_str());
-        fprintf(mf,"    \"pregame_storyline_text\": %s,\n",isNullTag(refs.pregameStorylineTag)?"null":("\""+tagToString(refs.pregameStorylineTag)+"\"").c_str());
-        fprintf(mf,"    \"storyline_2_text\": %s,\n",isNullTag(refs.storylineTag2)?"null":("\""+tagToString(refs.storylineTag2)+"\"").c_str());
-        fprintf(mf,"    \"storyline_3_text\": %s,\n",isNullTag(refs.storylineTag3)?"null":("\""+tagToString(refs.storylineTag3)+"\"").c_str());
-        fprintf(mf,"    \"storyline_4_text\": %s,\n",isNullTag(refs.storylineTag4)?"null":("\""+tagToString(refs.storylineTag4)+"\"").c_str());
-        fprintf(mf,"    \"narration_sound\": %s,\n",isNullTag(refs.narrationSoundTag)?"null":("\""+tagToString(refs.narrationSoundTag)+"\"").c_str());
-        fprintf(mf,"    \"win_ambient_sound\": %s,\n",isNullTag(refs.winAmbientSoundTag)?"null":("\""+tagToString(refs.winAmbientSoundTag)+"\"").c_str());
-        fprintf(mf,"    \"loss_ambient_sound\": %s\n",isNullTag(refs.lossAmbientSoundTag)?"null":("\""+tagToString(refs.lossAmbientSoundTag)+"\"").c_str());
+        fprintf(mf,"    \"landscape_256\": %s,\n",tagRefToJson(refs.landscapeTag).c_str());
+        fprintf(mf,"    \"media_tag\": %s,\n",tagRefToJson(refs.mediaTag).c_str());
+        fprintf(mf,"    \"mesh_lighting_tag\": %s,\n",tagRefToJson(refs.meshLightingTag).c_str());
+        fprintf(mf,"    \"map_name_stli\": %s,\n",tagRefToJson(refs.mapDescStli).c_str());
+        fprintf(mf,"    \"pregame_256\": %s,\n",tagRefToJson(refs.pregameTag).c_str());
+        fprintf(mf,"    \"overhead_256\": %s,\n",tagRefToJson(refs.overheadTag).c_str());
+        fprintf(mf,"    \"postgame_256\": %s,\n",tagRefToJson(refs.postgameTag).c_str());
+        fprintf(mf,"    \"next_mesh\": %s,\n",tagRefToJson(refs.nextMeshTag).c_str());
+        fprintf(mf,"    \"next_mesh_alternate\": %s,\n",tagRefToJson(refs.nextMeshAlternateTag).c_str());
+        fprintf(mf,"    \"wind_tag\": %s,\n",tagRefToJson(refs.windTag).c_str());
+        fprintf(mf,"    \"screen_collection_tags\": [%s, %s, %s],\n",
+                tagRefToJson(refs.screenCollectionTag0).c_str(),
+                tagRefToJson(refs.screenCollectionTag1).c_str(),
+                tagRefToJson(refs.screenCollectionTag2).c_str());
+        fprintf(mf,"    \"hints_string_list_tag\": %s,\n",tagRefToJson(refs.hintsStringListTag).c_str());
+        fprintf(mf,"    \"pregame_storyline_text\": %s,\n",tagRefToJson(refs.pregameStorylineTag).c_str());
+        fprintf(mf,"    \"storyline_2_text\": %s,\n",tagRefToJson(refs.storylineTag2).c_str());
+        fprintf(mf,"    \"storyline_3_text\": %s,\n",tagRefToJson(refs.storylineTag3).c_str());
+        fprintf(mf,"    \"storyline_4_text\": %s,\n",tagRefToJson(refs.storylineTag4).c_str());
+        fprintf(mf,"    \"narration_sound\": %s,\n",tagRefToJson(refs.narrationSoundTag).c_str());
+        fprintf(mf,"    \"win_ambient_sound\": %s,\n",tagRefToJson(refs.winAmbientSoundTag).c_str());
+        fprintf(mf,"    \"loss_ambient_sound\": %s\n",tagRefToJson(refs.lossAmbientSoundTag).c_str());
         fprintf(mf,"  },\n");
         fprintf(mf,"  \"mesh_flags\": %u,\n",refs.meshFlags);
+        fprintf(mf,"  \"edge_of_mesh_buffer_zones\": { \"north\": %u, \"east\": %u, \"south\": %u, \"west\": %u },\n",
+                refs.edgeBufferNorth, refs.edgeBufferEast, refs.edgeBufferSouth, refs.edgeBufferWest);
+        fprintf(mf,"  \"fog_color_raw_hex\": \"%s\",\n",toHex(refs.fogColorRaw, 8).c_str());
+        fprintf(mf,"  \"fog_density\": %u,\n",refs.fogDensity);
         fprintf(mf,"  \"mesh_layout\": {\n");
         fprintf(mf,"    \"mesh_offset\": %u,\n",refs.meshOffset);
         fprintf(mf,"    \"mesh_size\": %u,\n",refs.meshSize);

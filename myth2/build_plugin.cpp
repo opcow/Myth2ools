@@ -11,6 +11,8 @@
 // Usage:
 //   build_plugin <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation]
 
+#define _CRT_SECURE_NO_WARNINGS
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1856,6 +1858,10 @@ struct MarkerPlacementEdit {
     double z = 0.0;
     double facingDeg = 0.0;
     bool hasFacing = false;
+    int pitchRaw = 0;
+    int rollRaw = 0;
+    bool hasPitch = false;
+    bool hasRoll = false;
 };
 
 static bool jsonNumberNear(const std::string& obj, const std::string& key, double& out) {
@@ -2112,12 +2118,13 @@ static bool applyMapActionsFromJson(std::vector<uint8_t>& meshData, const std::s
     meshData.insert(meshData.begin() + (ptrdiff_t)oldStart, buffer.begin(), buffer.end());
     int64_t delta = (int64_t)buffer.size() - (int64_t)oldSize;
     writeBE32To(meshData.data() + 0x80, (uint32_t)actions.size());
+    writeBE32To(meshData.data() + 0x7C, 0x616D6473u); // 'amds' action section signature
     writeBE32To(meshData.data() + 0x88, (uint32_t)buffer.size());
     writeBE32To(meshData.data() + 0x1C, (uint32_t)((int64_t)readBE32s(meshData.data(), 0x1C) + delta));
 
     auto bumpSectionOffset = [&](size_t fieldOff) {
         uint32_t offset = (uint32_t)readBE32s(meshData.data(), fieldOff);
-        if (offset > oldOffset) {
+        if (offset >= oldOffset) {
             writeBE32To(meshData.data() + fieldOff, (uint32_t)((int64_t)offset + delta));
         }
     };
@@ -2125,6 +2132,13 @@ static bool applyMapActionsFromJson(std::vector<uint8_t>& meshData, const std::s
     bumpSectionOffset(0xCC);  // mesh_LOD_data_offset
     bumpSectionOffset(0x114); // connectors_offset
     bumpSectionOffset(0x120); // Myth II trailing section offset / connector-size field
+
+    printf("Action rebuild offsets: oldOff=%u oldSize=%u delta=%lld mediaCovOff=%u lodOff=%u connOff=%u field120=%u\n",
+           oldOffset, oldSize, (long long)delta,
+           (uint32_t)readBE32s(meshData.data(), 0xC0),
+           (uint32_t)readBE32s(meshData.data(), 0xCC),
+           (uint32_t)readBE32s(meshData.data(), 0x114),
+           (uint32_t)readBE32s(meshData.data(), 0x120));
 
     printf("Rebuilt map actions: %zu actions, %zu bytes from %s\n",
            actions.size(), buffer.size(), path.c_str());
@@ -2201,6 +2215,8 @@ static std::vector<MarkerPlacementEdit> readMarkerPlacementEdits(const std::stri
             jsonNumberNear(obj, "y", e.y) &&
             jsonNumberNear(obj, "z", e.z)) {
             e.hasFacing = jsonNumberNear(obj, "facing_deg", e.facingDeg);
+            e.hasPitch = jsonIntNear(obj, "pitch_raw", e.pitchRaw);
+            e.hasRoll = jsonIntNear(obj, "roll_raw", e.rollRaw);
             edits.push_back(e);
         }
     }
@@ -2240,6 +2256,8 @@ static bool applyMarkerPlacementEdits(std::vector<uint8_t>& meshData, const std:
         writeBE32To(meshData.data() + off + 16, (uint32_t)(int32_t)std::lround(e.y * WORLD_ONE));
         writeBE32To(meshData.data() + off + 20, (uint32_t)(int32_t)std::lround(e.z * WORLD_ONE));
         if (e.hasFacing) writeBE16To(meshData.data() + off + 32, yawFromDegrees(e.facingDeg));
+        if (e.hasPitch) writeBE16To(meshData.data() + off + 34, (uint16_t)e.pitchRaw);
+        if (e.hasRoll) writeBE16To(meshData.data() + off + 52, (uint16_t)e.rollRaw);
         changed++;
     }
     printf("Applied %s marker placement edits: %d markers from %s\n", label, changed, path.c_str());
@@ -2944,60 +2962,68 @@ int main(int argc, char* argv[]) {
     if (edit) {
         for (auto& t : tags) {
             if (t.groupTag == 0x6D657368u) {
+                bool shouldEditMesh = !editListProvided || editMesh;
+                bool shouldEditTerrain = !editListProvided || editTerrain;
+                bool shouldEditMarkers = !editListProvided || editMark;
                 bool hasExplicitMesh = !effectiveObjPath.empty() || !effectiveWaterObjPath.empty()
                     || importWater || importWaterFlagsExplicit || importAnimation || zeroRuntimeCache
                     || editTerrain;
-                if (!editListProvided || hasExplicitMesh || editMesh) {
-                if (editMesh) {
-                if (!effectiveObjPath.empty()) {
-                    if (!applyObjToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, effectiveObjPath, objHeightScale)) {
-                        fprintf(stderr, "OBJ import failed: %s\n", effectiveObjPath.c_str());
-                        return 1;
+
+                if (shouldEditMesh || hasExplicitMesh) {
+                    if (!effectiveObjPath.empty()) {
+                        if (!applyObjToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, effectiveObjPath, objHeightScale)) {
+                            fprintf(stderr, "OBJ import failed: %s\n", effectiveObjPath.c_str());
+                            return 1;
+                        }
                     }
-                }
-                std::string passBmp = firstExistingPath({
-                    folder + "/terrain/passability.bmp",
-                    folder + "/layers/02_passability.bmp"
-                });
-                if (fileExists(passBmp)) {
-                    if (!applyPassabilityToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, passBmp)) {
-                        fprintf(stderr, "Passability map import failed: %s\n", passBmp.c_str());
-                        return 1;
-                    }
-                }
-                std::string reflectionBmp = firstExistingPath({
-                    folder + "/terrain/reflection.bmp",
-                    folder + "/layers/06_reflection.bmp"
-                });
-                if (fileExists(reflectionBmp)) {
-                    if (!applyReflectionToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, reflectionBmp)) {
-                        fprintf(stderr, "Reflection map import failed: %s\n", reflectionBmp.c_str());
-                        return 1;
-                    }
-                }
-                if (effectiveWaterObjPath.empty() && (importWater || importWaterFlags || editTerrain)) {
-                    std::string waterBmp = firstExistingPath({
-                        folder + "/terrain/water.bmp",
-                        folder + "/layers/03_water.bmp"
+
+                    std::string passBmp = firstExistingPath({
+                        folder + "/terrain/passability.bmp",
+                        folder + "/layers/02_passability.bmp"
                     });
-                    if (fileExists(waterBmp)) {
-                        bool ok = importWater
-                            ? applyWaterToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, waterBmp)
-                            : applyWaterFlagsToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, waterBmp);
-                        if (!ok) {
-                            fprintf(stderr, "Water map import failed: %s\n", waterBmp.c_str());
+                    if (fileExists(passBmp)) {
+                        if (!applyPassabilityToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, passBmp)) {
+                            fprintf(stderr, "Passability map import failed: %s\n", passBmp.c_str());
+                            return 1;
+                        }
+                    }
+
+                    std::string reflectionBmp = firstExistingPath({
+                        folder + "/terrain/reflection.bmp",
+                        folder + "/layers/06_reflection.bmp"
+                    });
+                    if (fileExists(reflectionBmp)) {
+                        if (!applyReflectionToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, reflectionBmp)) {
+                            fprintf(stderr, "Reflection map import failed: %s\n", reflectionBmp.c_str());
+                            return 1;
+                        }
+                    }
+
+                    if (effectiveWaterObjPath.empty() && (importWater || importWaterFlags || shouldEditTerrain)) {
+                        std::string waterBmp = firstExistingPath({
+                            folder + "/terrain/water.bmp",
+                            folder + "/layers/03_water.bmp"
+                        });
+                        if (fileExists(waterBmp)) {
+                            bool ok = importWater
+                                ? applyWaterToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, waterBmp)
+                                : applyWaterFlagsToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, waterBmp);
+                            if (!ok) {
+                                fprintf(stderr, "Water map import failed: %s\n", waterBmp.c_str());
+                                return 1;
+                            }
+                        }
+                    }
+
+                    if (!effectiveWaterObjPath.empty()) {
+                        if (!applyWaterObjToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, effectiveWaterObjPath, objHeightScale)) {
+                            fprintf(stderr, "Water OBJ import failed: %s\n", effectiveWaterObjPath.c_str());
                             return 1;
                         }
                     }
                 }
-                if (!effectiveWaterObjPath.empty()) {
-                    if (!applyWaterObjToMyth2Mesh(t.data, mf.submeshWidth, mf.submeshHeight, effectiveWaterObjPath, objHeightScale)) {
-                        fprintf(stderr, "Water OBJ import failed: %s\n", effectiveWaterObjPath.c_str());
-                        return 1;
-                    }
-                }
-                }
-                if (importAnimation || editTerrain) {
+
+                if (importAnimation || shouldEditTerrain) {
                     std::string animationBmp = firstExistingPath({
                         folder + "/terrain/animation.bmp",
                         folder + "/layers/04_animation.bmp"
@@ -3009,42 +3035,45 @@ int main(int argc, char* argv[]) {
                         }
                     }
                 }
+
                 std::string unitPlacementPath = firstExistingPath({
                     folder + "/assets/sprites/units_edited.json"
                 });
-                if (editMark) {
-                if (fileExists(unitPlacementPath)) {
-                    if (!applyUnitPlacementEdits(t.data, unitPlacementPath)) {
-                        fprintf(stderr, "Unit placement import failed: %s\n", unitPlacementPath.c_str());
-                        return 1;
+
+                if (shouldEditMarkers) {
+                    if (fileExists(unitPlacementPath)) {
+                        if (!applyUnitPlacementEdits(t.data, unitPlacementPath)) {
+                            fprintf(stderr, "Unit placement import failed: %s\n", unitPlacementPath.c_str());
+                            return 1;
+                        }
+                    }
+                    struct MarkerJsonImport {
+                        const char* path;
+                        int markerType;
+                        const char* label;
+                    };
+                    const MarkerJsonImport markerImports[] = {
+                        {"/assets/sprites/scenery.json", 1, "sprite scenery"},
+                        {"/assets/sounds/sounds.json", 5, "sound"},
+                        {"/assets/models/projectiles.json", 9, "projectile"},
+                        {"/placement.json", 6, "direct model"},
+                        {"/assets/models/animations.json", 11, "model animation"},
+                    };
+                    for (const auto& markerImport : markerImports) {
+                        std::string markerPath = folder + markerImport.path;
+                        if (!fileExists(markerPath)) continue;
+                        if (!applyMarkerPlacementEdits(t.data, markerPath, markerImport.markerType, markerImport.label)) {
+                            fprintf(stderr, "%s marker placement import failed: %s\n",
+                                    markerImport.label, markerPath.c_str());
+                            return 1;
+                        }
                     }
                 }
-                struct MarkerJsonImport {
-                    const char* path;
-                    int markerType;
-                    const char* label;
-                };
-                const MarkerJsonImport markerImports[] = {
-                    {"/assets/sprites/scenery.json", 1, "sprite scenery"},
-                    {"/assets/sounds/sounds.json", 5, "sound"},
-                    {"/assets/models/projectiles.json", 9, "projectile"},
-                    {"/placement.json", 6, "direct model"},
-                    {"/assets/models/animations.json", 11, "model animation"},
-                };
-                for (const auto& markerImport : markerImports) {
-                    std::string markerPath = folder + markerImport.path;
-                    if (!fileExists(markerPath)) continue;
-                    if (!applyMarkerPlacementEdits(t.data, markerPath, markerImport.markerType, markerImport.label)) {
-                        fprintf(stderr, "%s marker placement import failed: %s\n",
-                                markerImport.label, markerPath.c_str());
-                        return 1;
-                    }
-                }
-                }
+
                 std::string actionPath = firstExistingPath({
                     folder + "/assets/actions/actions.json"
                 });
-                if (fileExists(actionPath)) {
+                if ((!editListProvided || editMesh) && fileExists(actionPath)) {
                     if (!applyMapActionsFromJson(t.data, actionPath)) {
                         fprintf(stderr, "Map action import failed: %s\n", actionPath.c_str());
                         return 1;
@@ -3056,8 +3085,7 @@ int main(int argc, char* argv[]) {
                         return 1;
                     }
                 }
-                } // if (!editListProvided || hasExplicitMesh)
-            } else if (t.groupTag == 0x2E323536u && t.subgroupTag == tagFromString(mf.landscapeTag) && editTerrain) {
+            } else if (t.groupTag == 0x2E323536u && t.subgroupTag == tagFromString(mf.landscapeTag) && (!editListProvided || editTerrain)) {
                 int bW = 0, bH = 0;
                 std::string bmpPath = firstExistingPath({
                     folder + "/terrain/terrain.bmp",
