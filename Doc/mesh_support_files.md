@@ -9,18 +9,16 @@ This is the current bridge between a pure rebuild and the older "patch an extrac
 For an extracted map folder like `out/le3e/`, these files are emitted:
 
 - `mesh_support/header.bin`
-  - Raw 1024-byte mesh header.
-  - Used for preserved header fields we do not fully synthesize yet, including the connector/trailing descriptor block.
+  - Debug-only raw 1024-byte mesh header.
+  - No longer required for normal rebuilds.
 
 - `mesh_support/cell_grid.bin`
-  - Raw cell grid (`cellW * cellH * 12` bytes).
-  - Each cell contains:
-    - physical height
-    - packed normal word
-    - flags
-    - first object index
-    - media height
-    - render height
+  - Debug-only raw cell grid (`cellW * cellH * 12` bytes).
+  - No longer required for normal rebuilds.
+
+- `mesh_support/cell_grid.json`
+  - Readable export of the same cell grid.
+  - Each cell includes decoded fields plus `raw_hex` for exact roundtrip safety.
 
 - `mesh_support/unit_types.bin`
   - Raw 32-byte marker palette / unit type records.
@@ -68,6 +66,7 @@ For an extracted map folder like `out/le3e/`, these files are emitted:
 - `trailing_size_a`
 - `trailing_offset_b`
 - `trailing_size_b`
+- `connector_trailing_descriptor_raw_hex`
 - `post_action_tail_size`
 - `post_data_appendix_size`
 
@@ -82,8 +81,14 @@ When these files are present and size-valid, `build_mesh` uses them as the sourc
 - post-action preserved sections
 - appendix bytes
 
+The mesh header is now synthesized primarily from `manifest.json` and
+`mesh_metadata.json`. The remaining opaque header bytes we still preserve are
+carried through `connector_trailing_descriptor_raw_hex` instead of requiring
+`mesh_support/header.bin`.
+
 When both are present, `build_mesh` prefers:
 
+- `cell_grid.json` over `cell_grid.bin`
 - `unit_types.json` over `unit_types.bin`
 - `source_instances.json` over `source_instances.bin`
 

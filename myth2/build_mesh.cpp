@@ -189,6 +189,10 @@ struct SourceUnitTypeRecord {
     std::vector<uint8_t> raw;
 };
 
+struct SourceCellRecord {
+    std::vector<uint8_t> raw;
+};
+
 static void loadFixedRecords(const std::vector<uint8_t>& bytes, size_t stride, std::vector<SourceInstanceRecord>& out) {
     out.clear();
     if (stride == 0 || bytes.empty() || (bytes.size() % stride) != 0) return;
@@ -276,6 +280,42 @@ static void loadSourceInstancesFromJson(const std::string& json, std::vector<Sou
         std::vector<uint8_t> raw = decodeHex(jsonStr(obj, "raw_hex"));
         if (raw.size() == 64) {
             SourceInstanceRecord rec;
+            rec.raw = std::move(raw);
+            out.push_back(std::move(rec));
+        }
+        pos = cb + 1;
+    }
+}
+
+static void loadCellGridFromJson(const std::string& json, std::vector<SourceCellRecord>& out) {
+    out.clear();
+    if (json.empty()) return;
+    size_t arrStart = json.find("\"cells\"");
+    if (arrStart != std::string::npos) arrStart = json.find('[', arrStart);
+    if (arrStart == std::string::npos) return;
+    int arrDepth = 1;
+    size_t arrEnd = arrStart + 1;
+    while (arrEnd < json.size() && arrDepth > 0) {
+        if (json[arrEnd] == '[') arrDepth++;
+        else if (json[arrEnd] == ']') arrDepth--;
+        if (arrDepth > 0) arrEnd++;
+    }
+    size_t pos = arrStart;
+    while (true) {
+        size_t ob = json.find('{', pos);
+        if (ob == std::string::npos || ob > arrEnd) break;
+        int objDepth = 1;
+        size_t cb = ob + 1;
+        while (cb < json.size() && objDepth > 0) {
+            if (json[cb] == '{') objDepth++;
+            else if (json[cb] == '}') objDepth--;
+            if (objDepth > 0) cb++;
+        }
+        if (objDepth != 0) break;
+        std::string obj = json.substr(ob, cb - ob + 1);
+        std::vector<uint8_t> raw = decodeHex(jsonStr(obj, "raw_hex"));
+        if (raw.size() == 12) {
+            SourceCellRecord rec;
             rec.raw = std::move(raw);
             out.push_back(std::move(rec));
         }
@@ -382,7 +422,6 @@ int main(int argc, char* argv[]) {
     std::string meshMetadataJson = readText(folder + "/mesh_metadata.json");
     uint32_t supportUnitTypeCount = (uint32_t)jsonInt(meshMetadataJson, "unit_type_count", 0);
     uint32_t supportUnitTypeSize = (uint32_t)jsonInt(meshMetadataJson, "unit_type_size", 0);
-    uint32_t supportHeaderSize = (uint32_t)jsonInt(meshMetadataJson, "header_size", 0);
     uint32_t supportMeshSize = (uint32_t)jsonInt(meshMetadataJson, "mesh_size", 0);
     uint32_t supportMarkerCount = (uint32_t)jsonInt(meshMetadataJson, "marker_count", 0);
     uint32_t supportMarkerSize = (uint32_t)jsonInt(meshMetadataJson, "marker_size", 0);
@@ -398,7 +437,11 @@ int main(int argc, char* argv[]) {
     uint32_t supportTrailingSizeB = (uint32_t)jsonInt(meshMetadataJson, "trailing_size_b", 0);
     uint32_t supportTailSize = (uint32_t)jsonInt(meshMetadataJson, "post_action_tail_size", 0);
     uint32_t supportAppendixSize = (uint32_t)jsonInt(meshMetadataJson, "post_data_appendix_size", 0);
+    std::vector<uint8_t> connectorDescriptorRaw =
+        decodeHex(jsonStr(meshMetadataJson, "connector_trailing_descriptor_raw_hex"));
+    bool haveConnectorDescriptor = connectorDescriptorRaw.size() == 16;
     std::vector<uint8_t> supportHeader = readFile(folder + "/mesh_support/header.bin");
+    std::string supportCellGridJson = readText(folder + "/mesh_support/cell_grid.json");
     std::vector<uint8_t> supportCellGrid = readFile(folder + "/mesh_support/cell_grid.bin");
     std::string supportUnitTypesJson = readText(folder + "/mesh_support/unit_types.json");
     std::vector<uint8_t> supportUnitTypes = readFile(folder + "/mesh_support/unit_types.bin");
@@ -406,7 +449,6 @@ int main(int argc, char* argv[]) {
     std::vector<uint8_t> supportInstances = readFile(folder + "/mesh_support/source_instances.bin");
     std::vector<uint8_t> supportTail = readFile(folder + "/mesh_support/post_action_tail.bin");
     std::vector<uint8_t> supportAppendix = readFile(folder + "/mesh_support/post_data_appendix.bin");
-    bool haveSupportHeader = supportHeaderSize == 1024 && supportHeader.size() >= 1024;
     bool haveSupportUnitTypesBin = supportUnitTypeSize != 0 && supportUnitTypeSize == supportUnitTypes.size() &&
                                    supportUnitTypeCount != 0 && (supportUnitTypeSize % 32) == 0 &&
                                    supportUnitTypeCount == (supportUnitTypeSize / 32);
@@ -418,13 +460,14 @@ int main(int argc, char* argv[]) {
     bool haveSupportTail = supportTail.size() == supportTailSize;
     bool haveSupportAppendix = supportAppendix.size() == supportAppendixSize;
     bool haveSupportCellGrid = false;
+    bool haveSupportCellGridBin = false;
     std::vector<uint8_t> sourceMesh;
-    bool needSourceMesh = !haveSupportHeader || (!haveSupportUnitTypesBin && supportUnitTypesJson.empty()) ||
+    bool needSourceMesh = (!haveSupportUnitTypesBin && supportUnitTypesJson.empty()) ||
                           (!haveSupportInstancesBin && supportInstancesJson.empty()) ||
                           preservedMarkers.empty() || !haveSupportTail || !haveSupportAppendix;
     if (needSourceMesh) sourceMesh = readFile(folder + "/raw/mesh_tag.bin");
     const uint8_t* sourceHeader = nullptr;
-    if (haveSupportHeader) sourceHeader = supportHeader.data();
+    if (supportHeader.size() >= 1024) sourceHeader = supportHeader.data();
     else if (sourceMesh.size() >= 1024) sourceHeader = sourceMesh.data();
     std::vector<SourceInstanceRecord> sourceInstances;
     std::vector<SourceUnitTypeRecord> sourceUnitTypeRecords;
@@ -632,9 +675,16 @@ int main(int argc, char* argv[]) {
     int cellW = subW * 32, cellH = subH * 32;
     int totalCells = cellW * cellH;
     size_t cellDataSize = (size_t)totalCells * 12;
-    haveSupportCellGrid = !supportCellGrid.empty() &&
-                          supportMeshSize == supportCellGrid.size() &&
-                          supportCellGrid.size() == cellDataSize;
+    haveSupportCellGridBin = !supportCellGrid.empty() &&
+                             supportMeshSize == supportCellGrid.size() &&
+                             supportCellGrid.size() == cellDataSize;
+    std::vector<SourceCellRecord> sourceCellRecords;
+    loadCellGridFromJson(supportCellGridJson, sourceCellRecords);
+    if (!sourceCellRecords.empty() && sourceCellRecords.size() == (size_t)totalCells) {
+        haveSupportCellGrid = true;
+    } else if (haveSupportCellGridBin) {
+        haveSupportCellGrid = true;
+    }
     if (!haveSupportCellGrid && sourceMesh.empty()) {
         sourceMesh = readFile(folder + "/raw/mesh_tag.bin");
     }
@@ -942,6 +992,8 @@ int main(int argc, char* argv[]) {
     // exported source header when available. This is needed for fence connectors.
     if (sourceHeader) {
         memcpy(out.data() + 284, sourceHeader + 284, 16);
+    } else if (haveConnectorDescriptor) {
+        memcpy(out.data() + 284, connectorDescriptorRaw.data(), 16);
     }
 
     // [300-491] cutscene file paths — 0
@@ -970,7 +1022,12 @@ int main(int argc, char* argv[]) {
             w32(out.data(), (size_t)*to, 0xFFFFFFFFu);
     }
     // ---- Write cell grid (build_plugin fills with OBJ heights) ----
-    if (haveSupportCellGrid) {
+    if (!sourceCellRecords.empty() && sourceCellRecords.size() == (size_t)totalCells) {
+        uint8_t* dst = out.data() + 1024;
+        for (size_t i = 0; i < sourceCellRecords.size(); i++) {
+            memcpy(dst + i * 12, sourceCellRecords[i].raw.data(), 12);
+        }
+    } else if (haveSupportCellGridBin) {
         memcpy(out.data() + 1024, supportCellGrid.data(), cellDataSize);
     } else if (sourceMesh.size() >= 1024 + cellDataSize) {
         memcpy(out.data() + 1024, sourceMesh.data() + 1024, cellDataSize);

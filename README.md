@@ -70,7 +70,8 @@ finds the requested `mesh` tag and its referenced assets, and writes to
 - raw source tag blobs plus legacy single-screen BMPs such as `terrain/*.bin`,
   `screens/*_tag.bin`, `screens/*.bmp`,
   `sounds/*_tag.bin`, `strings/*_tag.bin`, plus
-  `mesh_support/unit_types.bin` and `mesh_support/source_instances.bin`, only
+  `mesh_support/header.bin`, `mesh_support/cell_grid.bin`,
+  `mesh_support/unit_types.bin`, and `mesh_support/source_instances.bin`, only
   when `--debug-blobs` is used
 
 `terrain/passability.bmp`, `terrain/water.bmp`, `terrain/water_mask.bmp`,

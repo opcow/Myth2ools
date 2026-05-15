@@ -1546,7 +1546,7 @@ int main(int argc, char* argv[]){
         removeDirIfExists(base + "/mesh_support/raw");
         removeDirIfExists(base + "/mesh_support/layers");
 
-        if(meshData.size() >= 1024){
+        if(emitDebugBlobs && meshData.size() >= 1024){
             std::vector<uint8_t> headerBytes(meshData.begin(), meshData.begin() + 1024);
             writeFile(base + "/mesh_support/header.bin", headerBytes);
         }
@@ -1605,9 +1605,37 @@ int main(int argc, char* argv[]){
 
         size_t meshBase = 1024 + (size_t)meshOffset;
         if(meshBase + (size_t)meshSize <= meshData.size()){
-            std::vector<uint8_t> cellGridBytes(meshData.begin() + (ptrdiff_t)meshBase,
-                                               meshData.begin() + (ptrdiff_t)meshBase + meshSize);
-            writeFile(base + "/mesh_support/cell_grid.bin", cellGridBytes);
+            if(emitDebugBlobs){
+                std::vector<uint8_t> cellGridBytes(meshData.begin() + (ptrdiff_t)meshBase,
+                                                   meshData.begin() + (ptrdiff_t)meshBase + meshSize);
+                writeFile(base + "/mesh_support/cell_grid.bin", cellGridBytes);
+            }
+
+            std::string cellGridJson;
+            cellGridJson += "{\n  \"cells\": [\n";
+            bool firstCell = true;
+            uint32_t entryCount = meshSize / 12;
+            uint32_t cellWidth = (uint32_t)refs.submeshW * 32u;
+            for(uint32_t i = 0; i < entryCount; i++){
+                size_t off = meshBase + (size_t)i * 12;
+                if(!firstCell) cellGridJson += ",\n";
+                firstCell = false;
+                uint32_t row = cellWidth ? (i / cellWidth) : 0;
+                uint32_t col = cellWidth ? (i % cellWidth) : i;
+                cellGridJson += "    { ";
+                cellGridJson += "\"index\": " + std::to_string(i);
+                cellGridJson += ", \"row\": " + std::to_string(row);
+                cellGridJson += ", \"col\": " + std::to_string(col);
+                cellGridJson += ", \"physical_height\": " + std::to_string(readBE16s(meshData.data(), off + 0));
+                cellGridJson += ", \"normal_word\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 2));
+                cellGridJson += ", \"flags\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 4));
+                cellGridJson += ", \"first_object_index\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 6));
+                cellGridJson += ", \"media_height\": " + std::to_string(readBE16s(meshData.data(), off + 8));
+                cellGridJson += ", \"render_height\": " + std::to_string(readBE16s(meshData.data(), off + 10));
+                cellGridJson += ", \"raw_hex\": \"" + toHex(meshData.data() + off, 12) + "\" }";
+            }
+            cellGridJson += "\n  ]\n}\n";
+            writeText(base + "/mesh_support/cell_grid.json", cellGridJson);
         }
 
         size_t markerBase = 1024 + (size_t)markerOffset;
@@ -1679,6 +1707,8 @@ int main(int argc, char* argv[]){
             fprintf(mm,"  \"trailing_size_a\": %u,\n", trailingSizeA);
             fprintf(mm,"  \"trailing_offset_b\": %u,\n", trailingOffsetB);
             fprintf(mm,"  \"trailing_size_b\": %u,\n", trailingSizeB);
+            fprintf(mm,"  \"connector_trailing_descriptor_raw_hex\": \"%s\",\n",
+                    (meshData.size() >= 1024 + 300) ? toHex(meshData.data() + 284, 16).c_str() : "");
             fprintf(mm,"  \"post_action_tail_size\": %u,\n", (unsigned)((dataEnd > actionEnd) ? (dataEnd - actionEnd) : 0));
             fprintf(mm,"  \"post_data_appendix_size\": %u\n", (unsigned)((meshData.size() > dataEnd) ? (meshData.size() - dataEnd) : 0));
             fprintf(mm,"}\n");
@@ -1870,6 +1900,8 @@ int main(int argc, char* argv[]){
         removeIfExists(base + "/strings/storyline_2_tag.bin");
         removeIfExists(base + "/strings/storyline_3_tag.bin");
         removeIfExists(base + "/strings/storyline_4_tag.bin");
+        removeIfExists(base + "/mesh_support/header.bin");
+        removeIfExists(base + "/mesh_support/cell_grid.bin");
         removeIfExists(base + "/mesh_support/unit_types.bin");
         removeIfExists(base + "/mesh_support/source_instances.bin");
         removeDirIfExists(base + "/mesh_support/terrain");
