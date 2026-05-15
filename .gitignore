@@ -28,3 +28,4 @@ refresh.ps1
 refresh.bat
 myth2/fill_mesh_tag.cpp
 myth2/fill_mesh_tag.h
+dist/
