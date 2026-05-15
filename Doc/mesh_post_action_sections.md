@@ -112,7 +112,7 @@ Confirmed against Vengeance's `mesh_definition_byte_swapping_data[]` table and v
 | 0x70 | 2 | ceiling_height | |
 | 0x72 | 2 | unused | |
 | 0x74-0x7B | 8 | edge_of_mesh_buffer_zones (rectangle2d) | |
-| 0x7C | 4 | global_ambient_sound_tag | -1 or tag |
+| 0x7C | 4 | action_section_signature | usually `amds`; stock docs also mention `amdu` |
 | **0x80** | 4 | **map_action_count** | 239 |
 | **0x84** | 4 | **map_actions_offset** | 525792 |
 | **0x88** | 4 | **map_action_buffer_size** | 33132 |
