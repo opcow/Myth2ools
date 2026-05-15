@@ -25,8 +25,16 @@ For an extracted map folder like `out/le3e/`, these files are emitted:
 - `mesh_support/unit_types.bin`
   - Raw 32-byte marker palette / unit type records.
 
+- `mesh_support/unit_types.json`
+  - Readable export of the same unit type records.
+  - Includes decoded fields plus `raw_hex` for exact roundtrip safety.
+
 - `mesh_support/source_instances.bin`
   - Raw 64-byte marker instance records.
+
+- `mesh_support/source_instances.json`
+  - Readable export of the same marker instance records.
+  - Includes decoded placement/orientation fields plus `raw_hex` for exact roundtrip safety.
 
 - `mesh_support/post_action_tail.bin`
   - Bytes between the end of the action buffer and `1024 + data_size`.
@@ -73,6 +81,11 @@ When these files are present and size-valid, `build_mesh` uses them as the sourc
 - instance templates
 - post-action preserved sections
 - appendix bytes
+
+When both are present, `build_mesh` prefers:
+
+- `unit_types.json` over `unit_types.bin`
+- `source_instances.json` over `source_instances.bin`
 
 `raw/mesh_tag.bin` is now only a fallback when one or more support artifacts are missing.
 

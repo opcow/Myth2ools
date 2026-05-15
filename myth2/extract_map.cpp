@@ -96,6 +96,16 @@ static bool writeText(const std::string& path, const std::string& text){
     return ok;
 }
 
+static void removeIfExists(const std::string& path){
+    std::error_code ec;
+    fs::remove(path, ec);
+}
+
+static void removeDirIfExists(const std::string& path){
+    std::error_code ec;
+    fs::remove_all(path, ec);
+}
+
 static std::string toHex(const uint8_t* data, size_t len){
     static const char* HEX = "0123456789ABCDEF";
     std::string s;
@@ -1443,13 +1453,16 @@ static void usage(const char* p){
     fprintf(stderr,
         "Myth II Map Extractor\n\n"
         "Usage:\n"
-        "  %s <tags_folder|plugin_file> <meshtag> [output_folder] [--ora]\n"
-        "  %s <tags_folder|plugin_file> <meshtag> --out <output_folder> [--ora]\n\n"
+        "  %s <tags_folder|plugin_file> <meshtag> [output_folder] [--ora] [--debug-blobs]\n"
+        "  %s <tags_folder|plugin_file> <meshtag> --out <output_folder> [--ora] [--debug-blobs]\n\n"
         "  tags_folder|plugin_file\n"
         "                     folder containing Myth II files, or a single .dng2 plugin file\n"
         "  meshtag      4-character mesh tag (e.g. 85gy, 85gi, 08li)\n"
         "  output_folder folder to write extracted files into (default: meshtag)\n"
-        "  --ora        also emit layers/map_layers.ora from the extracted terrain layers\n",
+        "  --ora          also emit layers/map_layers.ora from the extracted terrain layers\n"
+        "  --debug-blobs  also emit debug-only mesh_support/*.bin files that are no longer\n"
+        "                 needed for normal rebuilds (currently unit_types.bin and\n"
+        "                 source_instances.bin)\n",
         p,p);
 }
 
@@ -1459,9 +1472,11 @@ int main(int argc, char* argv[]){
     std::string meshTag=argv[2];
     std::string outputFolder;
     bool emitOra = false;
+    bool emitDebugBlobs = false;
     for(int i=3;i<argc;i++){
         std::string a = argv[i];
         if(a == "--ora") emitOra = true;
+        else if(a == "--debug-blobs") emitDebugBlobs = true;
         else if(a == "--out") {
             if(i+1>=argc){
                 fprintf(stderr,"Missing output folder after %s\n",a.c_str());
@@ -1523,7 +1538,13 @@ int main(int argc, char* argv[]){
     writeFile(base+"/raw/mesh_tag.bin", meshData);
 
     {
-        makeDirs(base + "/mesh_support");
+        makeDir(base + "/mesh_support");
+        removeDirIfExists(base + "/mesh_support/terrain");
+        removeDirIfExists(base + "/mesh_support/screens");
+        removeDirIfExists(base + "/mesh_support/sounds");
+        removeDirIfExists(base + "/mesh_support/strings");
+        removeDirIfExists(base + "/mesh_support/raw");
+        removeDirIfExists(base + "/mesh_support/layers");
 
         if(meshData.size() >= 1024){
             std::vector<uint8_t> headerBytes(meshData.begin(), meshData.begin() + 1024);
@@ -1552,9 +1573,34 @@ int main(int argc, char* argv[]){
 
         size_t unitTypeBase = 1024 + (size_t)unitTypeOffset;
         if(unitTypeBase + (size_t)unitTypeSize <= meshData.size()){
-            std::vector<uint8_t> unitTypeBytes(meshData.begin() + (ptrdiff_t)unitTypeBase,
-                                               meshData.begin() + (ptrdiff_t)unitTypeBase + unitTypeSize);
-            writeFile(base + "/mesh_support/unit_types.bin", unitTypeBytes);
+            if(emitDebugBlobs){
+                std::vector<uint8_t> unitTypeBytes(meshData.begin() + (ptrdiff_t)unitTypeBase,
+                                                   meshData.begin() + (ptrdiff_t)unitTypeBase + unitTypeSize);
+                writeFile(base + "/mesh_support/unit_types.bin", unitTypeBytes);
+            }
+
+            std::string unitTypesJson;
+            unitTypesJson += "{\n  \"unit_types\": [\n";
+            bool firstUnitType = true;
+            uint32_t entryCount = unitTypeSize / 32;
+            for(uint32_t i = 0; i < entryCount; i++){
+                size_t off = unitTypeBase + (size_t)i * 32;
+                if(!firstUnitType) unitTypesJson += ",\n";
+                firstUnitType = false;
+                uint32_t markerTag = readBE32(meshData.data(), off + 4);
+                unitTypesJson += "    { ";
+                unitTypesJson += "\"index\": " + std::to_string(i);
+                unitTypesJson += ", \"marker_type\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 0));
+                unitTypesJson += ", \"flags\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 2));
+                unitTypesJson += ", \"marker_tag\": " + tagRefToJson(markerTag);
+                unitTypesJson += ", \"team_index\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 8));
+                unitTypesJson += ", \"netgame_flags\": " + std::to_string(readBE32(meshData.data(), off + 12));
+                unitTypesJson += ", \"instance_count\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 28));
+                unitTypesJson += ", \"type_relative_index\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 30));
+                unitTypesJson += ", \"raw_hex\": \"" + toHex(meshData.data() + off, 32) + "\" }";
+            }
+            unitTypesJson += "\n  ]\n}\n";
+            writeText(base + "/mesh_support/unit_types.json", unitTypesJson);
         }
 
         size_t meshBase = 1024 + (size_t)meshOffset;
@@ -1566,9 +1612,35 @@ int main(int argc, char* argv[]){
 
         size_t markerBase = 1024 + (size_t)markerOffset;
         if(markerBase + (size_t)markerSize <= meshData.size()){
-            std::vector<uint8_t> markerBytes(meshData.begin() + (ptrdiff_t)markerBase,
-                                             meshData.begin() + (ptrdiff_t)markerBase + markerSize);
-            writeFile(base + "/mesh_support/source_instances.bin", markerBytes);
+            if(emitDebugBlobs){
+                std::vector<uint8_t> markerBytes(meshData.begin() + (ptrdiff_t)markerBase,
+                                                 meshData.begin() + (ptrdiff_t)markerBase + markerSize);
+                writeFile(base + "/mesh_support/source_instances.bin", markerBytes);
+            }
+
+            std::string sourceInstancesJson;
+            sourceInstancesJson += "{\n  \"source_instances\": [\n";
+            bool firstSourceInstance = true;
+            uint32_t entryCount = markerSize / 64;
+            for(uint32_t i = 0; i < entryCount; i++){
+                size_t off = markerBase + (size_t)i * 64;
+                if(!firstSourceInstance) sourceInstancesJson += ",\n";
+                firstSourceInstance = false;
+                sourceInstancesJson += "    { ";
+                sourceInstancesJson += "\"index\": " + std::to_string(i);
+                sourceInstancesJson += ", \"marker_type\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 4));
+                sourceInstancesJson += ", \"palette_index\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 6));
+                sourceInstancesJson += ", \"identifier\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 8));
+                sourceInstancesJson += ", \"x\": " + std::to_string((double)readBE32s(meshData.data(), off + 12) / 512.0);
+                sourceInstancesJson += ", \"y\": " + std::to_string((double)readBE32s(meshData.data(), off + 16) / 512.0);
+                sourceInstancesJson += ", \"z\": " + std::to_string((double)readBE32s(meshData.data(), off + 20) / 512.0);
+                sourceInstancesJson += ", \"yaw_raw\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 32));
+                sourceInstancesJson += ", \"pitch_raw\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 34));
+                sourceInstancesJson += ", \"roll_raw\": " + std::to_string((uint16_t)readBE16s(meshData.data(), off + 52));
+                sourceInstancesJson += ", \"raw_hex\": \"" + toHex(meshData.data() + off, 64) + "\" }";
+            }
+            sourceInstancesJson += "\n  ]\n}\n";
+            writeText(base + "/mesh_support/source_instances.json", sourceInstancesJson);
         }
 
         uint32_t dataSize = readBE32(meshData.data(), 28);
@@ -1671,7 +1743,7 @@ int main(int argc, char* argv[]){
         if(stli){
             std::vector<uint8_t> raw;
             if(readTagData(*stli,raw)){
-                writeFile(base+"/strings/name_tag.bin",raw);
+                if(emitDebugBlobs) writeFile(base+"/strings/name_tag.bin",raw);
                 std::string txt=stliToText(raw);
                 writeText(base+"/strings/name.txt",txt);
                 printf("Extracted name stli from %s\n",stli->sourceFile.c_str());
@@ -1683,7 +1755,7 @@ int main(int argc, char* argv[]){
     if(terrain){
         std::vector<uint8_t> terrData;
         if(readTagData(*terrain,terrData)){
-            writeFile(base+"/terrain/terrain_tag.bin",terrData);
+            if(emitDebugBlobs) writeFile(base+"/terrain/terrain_tag.bin",terrData);
             std::vector<SecEntry> secs;
             Myth256Palette pal;
             if(readDot256FromData(terrData,refs.submeshW,refs.submeshH,secs,pal)){
@@ -1703,8 +1775,8 @@ int main(int argc, char* argv[]){
         if(!e) return;
         std::vector<uint8_t> data;
         if(!readTagData(*e,data)) return;
-        writeFile(outBin,data);
-        if(extractSingleImage256FromData(data,outBmp))
+        if(emitDebugBlobs) writeFile(outBin,data);
+        if(emitDebugBlobs && extractSingleImage256FromData(data,outBmp))
             printf("Extracted %s from %s\n",label,e->sourceFile.c_str());
         extractCollection256FromData(data, base + "/screens/" + std::string(label) + "_collection", label);
     };
@@ -1720,7 +1792,7 @@ int main(int argc, char* argv[]){
         if(!e) return;
         std::vector<uint8_t> data;
         if(!readTagData(*e, data) || data.empty()) return;
-        writeFile(outBin, data);
+        if(emitDebugBlobs) writeFile(outBin, data);
         int wavs = extractSoundTagWavs(data, wavDir, wavStem);
         printf("Extracted %s sound (%s) from %s -> %d wav(s)\n",
                label, tagToString(id).c_str(), e->sourceFile.c_str(), wavs);
@@ -1753,7 +1825,7 @@ int main(int argc, char* argv[]){
         if(!e) return;
         std::vector<uint8_t> data;
         if(!readTagData(*e, data) || data.empty()) return;
-        writeFile(outBin, data);
+        if(emitDebugBlobs) writeFile(outBin, data);
         // text tags are CR-separated narration text — same shape as stli, so
         // stliToText already filters non-printables and converts CR→LF.
         std::string txt = stliToText(data);
@@ -1780,6 +1852,32 @@ int main(int argc, char* argv[]){
     if(emitOra){
         if(writeORA(base)) printf("Wrote layered OpenRaster: %s\n", (base + "/layers/map_layers.ora").c_str());
         else fprintf(stderr, "Warning: failed to write %s\n", (base + "/layers/map_layers.ora").c_str());
+    }
+
+    if(!emitDebugBlobs){
+        removeIfExists(base + "/terrain/terrain_tag.bin");
+        removeIfExists(base + "/screens/overhead.bmp");
+        removeIfExists(base + "/screens/pregame.bmp");
+        removeIfExists(base + "/screens/postgame.bmp");
+        removeIfExists(base + "/screens/overhead_tag.bin");
+        removeIfExists(base + "/screens/pregame_tag.bin");
+        removeIfExists(base + "/screens/postgame_tag.bin");
+        removeIfExists(base + "/sounds/narration_tag.bin");
+        removeIfExists(base + "/sounds/win_ambient_tag.bin");
+        removeIfExists(base + "/sounds/loss_ambient_tag.bin");
+        removeIfExists(base + "/strings/name_tag.bin");
+        removeIfExists(base + "/strings/pregame_storyline_tag.bin");
+        removeIfExists(base + "/strings/storyline_2_tag.bin");
+        removeIfExists(base + "/strings/storyline_3_tag.bin");
+        removeIfExists(base + "/strings/storyline_4_tag.bin");
+        removeIfExists(base + "/mesh_support/unit_types.bin");
+        removeIfExists(base + "/mesh_support/source_instances.bin");
+        removeDirIfExists(base + "/mesh_support/terrain");
+        removeDirIfExists(base + "/mesh_support/screens");
+        removeDirIfExists(base + "/mesh_support/sounds");
+        removeDirIfExists(base + "/mesh_support/strings");
+        removeDirIfExists(base + "/mesh_support/raw");
+        removeDirIfExists(base + "/mesh_support/layers");
     }
 
     FILE* mf=fopen((base+"/manifest.json").c_str(),"wb");

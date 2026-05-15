@@ -211,6 +211,78 @@ static void loadFixedRecords(const std::vector<uint8_t>& bytes, size_t stride, s
     }
 }
 
+static void loadUnitTypeRecordsFromJson(const std::string& json, std::vector<SourceUnitTypeRecord>& out) {
+    out.clear();
+    if (json.empty()) return;
+    size_t arrStart = json.find("\"unit_types\"");
+    if (arrStart != std::string::npos) arrStart = json.find('[', arrStart);
+    if (arrStart == std::string::npos) return;
+    int arrDepth = 1;
+    size_t arrEnd = arrStart + 1;
+    while (arrEnd < json.size() && arrDepth > 0) {
+        if (json[arrEnd] == '[') arrDepth++;
+        else if (json[arrEnd] == ']') arrDepth--;
+        if (arrDepth > 0) arrEnd++;
+    }
+    size_t pos = arrStart;
+    while (true) {
+        size_t ob = json.find('{', pos);
+        if (ob == std::string::npos || ob > arrEnd) break;
+        int objDepth = 1;
+        size_t cb = ob + 1;
+        while (cb < json.size() && objDepth > 0) {
+            if (json[cb] == '{') objDepth++;
+            else if (json[cb] == '}') objDepth--;
+            if (objDepth > 0) cb++;
+        }
+        if (objDepth != 0) break;
+        std::string obj = json.substr(ob, cb - ob + 1);
+        std::vector<uint8_t> raw = decodeHex(jsonStr(obj, "raw_hex"));
+        if (raw.size() == 32) {
+            SourceUnitTypeRecord rec;
+            rec.raw = std::move(raw);
+            out.push_back(std::move(rec));
+        }
+        pos = cb + 1;
+    }
+}
+
+static void loadSourceInstancesFromJson(const std::string& json, std::vector<SourceInstanceRecord>& out) {
+    out.clear();
+    if (json.empty()) return;
+    size_t arrStart = json.find("\"source_instances\"");
+    if (arrStart != std::string::npos) arrStart = json.find('[', arrStart);
+    if (arrStart == std::string::npos) return;
+    int arrDepth = 1;
+    size_t arrEnd = arrStart + 1;
+    while (arrEnd < json.size() && arrDepth > 0) {
+        if (json[arrEnd] == '[') arrDepth++;
+        else if (json[arrEnd] == ']') arrDepth--;
+        if (arrDepth > 0) arrEnd++;
+    }
+    size_t pos = arrStart;
+    while (true) {
+        size_t ob = json.find('{', pos);
+        if (ob == std::string::npos || ob > arrEnd) break;
+        int objDepth = 1;
+        size_t cb = ob + 1;
+        while (cb < json.size() && objDepth > 0) {
+            if (json[cb] == '{') objDepth++;
+            else if (json[cb] == '}') objDepth--;
+            if (objDepth > 0) cb++;
+        }
+        if (objDepth != 0) break;
+        std::string obj = json.substr(ob, cb - ob + 1);
+        std::vector<uint8_t> raw = decodeHex(jsonStr(obj, "raw_hex"));
+        if (raw.size() == 64) {
+            SourceInstanceRecord rec;
+            rec.raw = std::move(raw);
+            out.push_back(std::move(rec));
+        }
+        pos = cb + 1;
+    }
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: build_mesh <folder> [--output <path>]\n");
@@ -328,22 +400,27 @@ int main(int argc, char* argv[]) {
     uint32_t supportAppendixSize = (uint32_t)jsonInt(meshMetadataJson, "post_data_appendix_size", 0);
     std::vector<uint8_t> supportHeader = readFile(folder + "/mesh_support/header.bin");
     std::vector<uint8_t> supportCellGrid = readFile(folder + "/mesh_support/cell_grid.bin");
+    std::string supportUnitTypesJson = readText(folder + "/mesh_support/unit_types.json");
     std::vector<uint8_t> supportUnitTypes = readFile(folder + "/mesh_support/unit_types.bin");
+    std::string supportInstancesJson = readText(folder + "/mesh_support/source_instances.json");
     std::vector<uint8_t> supportInstances = readFile(folder + "/mesh_support/source_instances.bin");
     std::vector<uint8_t> supportTail = readFile(folder + "/mesh_support/post_action_tail.bin");
     std::vector<uint8_t> supportAppendix = readFile(folder + "/mesh_support/post_data_appendix.bin");
     bool haveSupportHeader = supportHeaderSize == 1024 && supportHeader.size() >= 1024;
-    bool haveSupportUnitTypes = supportUnitTypeSize != 0 && supportUnitTypeSize == supportUnitTypes.size() &&
-                                supportUnitTypeCount != 0 && (supportUnitTypeSize % 32) == 0 &&
-                                supportUnitTypeCount == (supportUnitTypeSize / 32);
-    bool haveSupportInstances = supportMarkerSize != 0 && supportMarkerSize == supportInstances.size() &&
-                                supportMarkerCount != 0 && (supportMarkerSize % 64) == 0 &&
-                                supportMarkerCount == (supportMarkerSize / 64);
+    bool haveSupportUnitTypesBin = supportUnitTypeSize != 0 && supportUnitTypeSize == supportUnitTypes.size() &&
+                                   supportUnitTypeCount != 0 && (supportUnitTypeSize % 32) == 0 &&
+                                   supportUnitTypeCount == (supportUnitTypeSize / 32);
+    bool haveSupportUnitTypes = false;
+    bool haveSupportInstancesBin = supportMarkerSize != 0 && supportMarkerSize == supportInstances.size() &&
+                                   supportMarkerCount != 0 && (supportMarkerSize % 64) == 0 &&
+                                   supportMarkerCount == (supportMarkerSize / 64);
+    bool haveSupportInstances = false;
     bool haveSupportTail = supportTail.size() == supportTailSize;
     bool haveSupportAppendix = supportAppendix.size() == supportAppendixSize;
     bool haveSupportCellGrid = false;
     std::vector<uint8_t> sourceMesh;
-    bool needSourceMesh = !haveSupportHeader || !haveSupportUnitTypes || !haveSupportInstances ||
+    bool needSourceMesh = !haveSupportHeader || (!haveSupportUnitTypesBin && supportUnitTypesJson.empty()) ||
+                          (!haveSupportInstancesBin && supportInstancesJson.empty()) ||
                           preservedMarkers.empty() || !haveSupportTail || !haveSupportAppendix;
     if (needSourceMesh) sourceMesh = readFile(folder + "/raw/mesh_tag.bin");
     const uint8_t* sourceHeader = nullptr;
@@ -351,11 +428,19 @@ int main(int argc, char* argv[]) {
     else if (sourceMesh.size() >= 1024) sourceHeader = sourceMesh.data();
     std::vector<SourceInstanceRecord> sourceInstances;
     std::vector<SourceUnitTypeRecord> sourceUnitTypeRecords;
-    if (haveSupportUnitTypes) {
+    loadUnitTypeRecordsFromJson(supportUnitTypesJson, sourceUnitTypeRecords);
+    if (!sourceUnitTypeRecords.empty() && sourceUnitTypeRecords.size() == supportUnitTypeCount) {
+        haveSupportUnitTypes = true;
+    } else if (haveSupportUnitTypesBin) {
         loadFixedRecords(supportUnitTypes, 32, sourceUnitTypeRecords);
+        haveSupportUnitTypes = !sourceUnitTypeRecords.empty();
     }
-    if (haveSupportInstances) {
+    loadSourceInstancesFromJson(supportInstancesJson, sourceInstances);
+    if (!sourceInstances.empty() && sourceInstances.size() == supportMarkerCount) {
+        haveSupportInstances = true;
+    } else if (haveSupportInstancesBin) {
         loadFixedRecords(supportInstances, 64, sourceInstances);
+        haveSupportInstances = !sourceInstances.empty();
     }
     if (sourceMesh.size() >= 1024) {
         uint32_t sourceMarkerCountAll = r32(sourceMesh.data(), 0x34);
