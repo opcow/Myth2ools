@@ -2133,13 +2133,6 @@ static bool applyMapActionsFromJson(std::vector<uint8_t>& meshData, const std::s
     bumpSectionOffset(0x114); // connectors_offset
     bumpSectionOffset(0x120); // Myth II trailing section offset / connector-size field
 
-    printf("Action rebuild offsets: oldOff=%u oldSize=%u delta=%lld mediaCovOff=%u lodOff=%u connOff=%u field120=%u\n",
-           oldOffset, oldSize, (long long)delta,
-           (uint32_t)readBE32s(meshData.data(), 0xC0),
-           (uint32_t)readBE32s(meshData.data(), 0xCC),
-           (uint32_t)readBE32s(meshData.data(), 0x114),
-           (uint32_t)readBE32s(meshData.data(), 0x120));
-
     printf("Rebuilt map actions: %zu actions, %zu bytes from %s\n",
            actions.size(), buffer.size(), path.c_str());
     return true;

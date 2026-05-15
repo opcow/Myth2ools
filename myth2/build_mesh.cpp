@@ -324,26 +324,37 @@ int main(int argc, char* argv[]) {
     uint32_t supportTrailingSizeA = (uint32_t)jsonInt(meshMetadataJson, "trailing_size_a", 0);
     uint32_t supportTrailingOffsetB = (uint32_t)jsonInt(meshMetadataJson, "trailing_offset_b", 0);
     uint32_t supportTrailingSizeB = (uint32_t)jsonInt(meshMetadataJson, "trailing_size_b", 0);
+    uint32_t supportTailSize = (uint32_t)jsonInt(meshMetadataJson, "post_action_tail_size", 0);
+    uint32_t supportAppendixSize = (uint32_t)jsonInt(meshMetadataJson, "post_data_appendix_size", 0);
     std::vector<uint8_t> supportHeader = readFile(folder + "/mesh_support/header.bin");
     std::vector<uint8_t> supportCellGrid = readFile(folder + "/mesh_support/cell_grid.bin");
     std::vector<uint8_t> supportUnitTypes = readFile(folder + "/mesh_support/unit_types.bin");
     std::vector<uint8_t> supportInstances = readFile(folder + "/mesh_support/source_instances.bin");
     std::vector<uint8_t> supportTail = readFile(folder + "/mesh_support/post_action_tail.bin");
     std::vector<uint8_t> supportAppendix = readFile(folder + "/mesh_support/post_data_appendix.bin");
-    std::vector<uint8_t> sourceMesh = readFile(folder + "/raw/mesh_tag.bin");
+    bool haveSupportHeader = supportHeaderSize == 1024 && supportHeader.size() >= 1024;
+    bool haveSupportUnitTypes = supportUnitTypeSize != 0 && supportUnitTypeSize == supportUnitTypes.size() &&
+                                supportUnitTypeCount != 0 && (supportUnitTypeSize % 32) == 0 &&
+                                supportUnitTypeCount == (supportUnitTypeSize / 32);
+    bool haveSupportInstances = supportMarkerSize != 0 && supportMarkerSize == supportInstances.size() &&
+                                supportMarkerCount != 0 && (supportMarkerSize % 64) == 0 &&
+                                supportMarkerCount == (supportMarkerSize / 64);
+    bool haveSupportTail = supportTail.size() == supportTailSize;
+    bool haveSupportAppendix = supportAppendix.size() == supportAppendixSize;
+    bool haveSupportCellGrid = false;
+    std::vector<uint8_t> sourceMesh;
+    bool needSourceMesh = !haveSupportHeader || !haveSupportUnitTypes || !haveSupportInstances ||
+                          preservedMarkers.empty() || !haveSupportTail || !haveSupportAppendix;
+    if (needSourceMesh) sourceMesh = readFile(folder + "/raw/mesh_tag.bin");
     const uint8_t* sourceHeader = nullptr;
-    if (supportHeaderSize == 1024 && supportHeader.size() >= 1024) sourceHeader = supportHeader.data();
+    if (haveSupportHeader) sourceHeader = supportHeader.data();
     else if (sourceMesh.size() >= 1024) sourceHeader = sourceMesh.data();
     std::vector<SourceInstanceRecord> sourceInstances;
     std::vector<SourceUnitTypeRecord> sourceUnitTypeRecords;
-    if (supportUnitTypeSize != 0 && supportUnitTypeSize == supportUnitTypes.size() &&
-        supportUnitTypeCount != 0 && (supportUnitTypeSize % 32) == 0 &&
-        supportUnitTypeCount == (supportUnitTypeSize / 32)) {
+    if (haveSupportUnitTypes) {
         loadFixedRecords(supportUnitTypes, 32, sourceUnitTypeRecords);
     }
-    if (supportMarkerSize != 0 && supportMarkerSize == supportInstances.size() &&
-        supportMarkerCount != 0 && (supportMarkerSize % 64) == 0 &&
-        supportMarkerCount == (supportMarkerSize / 64)) {
+    if (haveSupportInstances) {
         loadFixedRecords(supportInstances, 64, sourceInstances);
     }
     if (sourceMesh.size() >= 1024) {
@@ -536,9 +547,12 @@ int main(int argc, char* argv[]) {
     int cellW = subW * 32, cellH = subH * 32;
     int totalCells = cellW * cellH;
     size_t cellDataSize = (size_t)totalCells * 12;
-    bool haveSupportCellGrid = !supportCellGrid.empty() &&
-                               supportMeshSize == supportCellGrid.size() &&
-                               supportCellGrid.size() == cellDataSize;
+    haveSupportCellGrid = !supportCellGrid.empty() &&
+                          supportMeshSize == supportCellGrid.size() &&
+                          supportCellGrid.size() == cellDataSize;
+    if (!haveSupportCellGrid && sourceMesh.empty()) {
+        sourceMesh = readFile(folder + "/raw/mesh_tag.bin");
+    }
 
     printf("Mesh: %s, %dx%d cells\n", meshTag.c_str(), cellW, cellH);
 
