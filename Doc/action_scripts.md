@@ -4,6 +4,8 @@ Reverse-engineered format of the action/script data embedded in `mesh_tag.bin`. 
 
 Decoder reference: [`myth2/export_map_actions.cpp`](../myth2/export_map_actions.cpp).
 
+Corpus/practical companion: [`action_corpus.md`](action_corpus.md).
+
 ## Storage layout
 
 Map actions live inside `mesh_tag.bin`. Three 32-bit big-endian fields at the start of the mesh header point at the action buffer:
