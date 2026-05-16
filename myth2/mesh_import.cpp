@@ -3,7 +3,7 @@
 // displacement back into raw/mesh_tag.bin.
 //
 // Usage:
-//   mesh_import <tag_folder> <input.obj> [heightscale]
+//   mesh_import <folder> <input.obj> [heightscale]
 //
 // Notes:
 //   - This importer updates physical_height and regenerates the packed normal word.
@@ -427,9 +427,9 @@ static void usage(const char* prog) {
     fprintf(stderr,
         "Myth II Terrain Displacement Importer\n\n"
         "Usage:\n"
-        "  %s <tag_folder> <input.obj> [heightscale]\n\n"
+        "  %s <folder> <input.obj> [heightscale]\n\n"
         "Arguments:\n"
-        "  tag_folder    Extracted Myth II map folder from extract\n"
+        "  folder        Extracted Myth II map folder from extract\n"
         "  input.obj     Modified displacement OBJ from mesh\n"
         "  heightscale   Scale used when exporting (default: 1/512)\n\n"
         "Patches raw/mesh_tag.bin in-place with new terrain displacement.\n"

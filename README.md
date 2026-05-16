@@ -45,12 +45,13 @@ And place units, monsters, and sounds. (Models and other assets are export only 
 ### `extract_map`
 
 ```bash
-extract_map <tags_folder> <meshtag> [output_folder] [--ora] [--debug-blobs]
-extract_map <tags_folder> <meshtag> --out <output_folder> [--ora] [--debug-blobs]
+extract_map <tags_folder|plugin_file> <meshtag> [output_folder] [--ora] [--debug-blobs]
+extract_map <tags_folder|plugin_file> <meshtag> --out <output_folder> [--ora] [--debug-blobs]
 ```
 
-First-pass Myth II map extractor. It scans the supplied Myth II tags folder,
-finds the requested `mesh` tag and its referenced assets, and writes to
+First-pass Myth II map extractor. It scans the supplied Myth II tags folder or
+single plugin/tag file, finds the requested `mesh` tag and its referenced
+assets, and writes to
 `output_folder`, or to `<meshtag>/` when no output folder is supplied:
 
 - `raw/mesh_tag.bin`
@@ -103,7 +104,7 @@ exports that are no longer needed for normal rebuilds.
 ### `build_plugin`
 
 ```bash
-build_plugin <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation] [--zero-runtime-cache]
+build_plugin <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation] [--zero-runtime-cache] [--zero-mesh-lod]
 ```
 
 Rebuilds a Myth II `dng2` plugin from an extracted map folder. The first pass
@@ -122,6 +123,8 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 - `--zero-runtime-cache` experimentally removes regenerable post-action mesh
   cache sections during `--edit`. This is a test path toward bin-free mesh
   rebuilds; validate the resulting plugin in Myth II before relying on it.
+- `--zero-mesh-lod` experimentally zeroes only the mesh LOD section during
+  `--edit` while preserving the rest of the post-action mesh data.
 - `build_plugin` reads editable assets from the canonical extracted paths:
   - `terrain/terrain.bmp`
   - `terrain/shadow.bmp`
@@ -169,7 +172,7 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 ### `export_mesh`
 
 ```bash
-export_mesh <tag_folder> [output.obj] [heightscale]
+export_mesh <folder> [output.obj] [heightscale]
 ```
 
 Exports an extracted Myth II mesh folder as Wavefront `OBJ`. The exporter uses
@@ -179,7 +182,7 @@ the Myth II alternating cell diagonal pattern and a default height scale of
 ### `export_water_mesh`
 
 ```bash
-export_water_mesh <tag_folder> [output.obj] [heightscale]
+export_water_mesh <folder> [output.obj] [heightscale]
 ```
 
 Exports the current Myth II water surface as an OBJ aligned to the terrain OBJ.
@@ -189,7 +192,7 @@ that points to the generated `water_mask.png` texture.
 ### `export_map_objects`
 
 ```bash
-export_map_objects <tags_folder|plugin_file> <out_folder> [terrain.obj] [--world-space] [--overwrite] [--animation-frame first|none|all]
+export_map_objects <folder|plugin_file> <out_folder> [terrain.obj] [--world-space] [--overwrite] [--animation-frame first|none|all]
 ```
 
 Exports placed map objects and supporting assets from an extracted Myth II mesh
@@ -249,12 +252,14 @@ one step:
 
 ```bat
 extract_assets.bat myth2_tags le3e out\le3e --overwrite
+extract_assets.bat G:\Myth_2\plugins\le3e_plugin le3e out\le3e --overwrite
 ```
 
 On Linux/macOS, use the Bash version:
 
 ```bash
 ./extract_assets.sh myth2_tags le3e out/le3e --overwrite
+./extract_assets.sh ./out/le3e_plugin le3e out/le3e --overwrite
 ```
 
 It runs `extract_map`, `export_mesh`, `export_water_mesh`, `export_map_objects`,
@@ -279,7 +284,9 @@ that OBJ already contains the terrain object, it will not import
 `assets/terrain/fences.obj`, and `assets/models/animations.json` are imported
 when present.
 
-`assets/sprites/units.obj` is imported when present. Moved unit sprites can be
+`assets/sprites/units.obj` is imported when present. The generated Blender scene
+also adds a `unit_helpers` collection with directional ground arrows to make
+unit facing easier to read while editing. Moved unit sprites can be
 written back to `assets/sprites/units_edited.json` with
 `Export All Unit Placements` or `Export Selected Unit Placements` from the
 `Myth II` sidebar. During `build_plugin --edit`, that file patches the matching
@@ -389,7 +396,7 @@ cells whose media bits are set.
 ### `mesh_import`
 
 ```bash
-mesh_import <tag_folder> <input.obj> [heightscale]
+mesh_import <folder> <input.obj> [heightscale]
 ```
 
 Imports an edited Myth II OBJ back into `raw/mesh_tag.bin` by patching
@@ -462,7 +469,7 @@ Lists tags in Myth II `dng2` plugin files and `mth2` local tag files.
 ### `water_depth`
 
 ```bash
-water_depth <tag_folder> <terrain.obj> <water.obj> [level1] [level2] [level3] [output.bmp] [heightscale] [--smooth]
+water_depth <folder> <terrain.obj> <water.obj> [level1] [level2] [level3] [output.bmp] [heightscale] [--smooth]
 ```
 
 Generates a `water.bmp`-style media-type map from the depth between the terrain
@@ -475,8 +482,9 @@ single image-space cleanup pass to reduce isolated jagged triangle spikes.
 
 - Myth and Myth II data are **big-endian** (Mac PowerPC lineage). All multi-byte
   integers in tag/archive data are byte-swapped before use.
-- `extract_map` scans the supplied Myth II tags folder to locate the requested
-  `mesh` tag and its referenced assets rather than relying on hard-coded offsets.
+- `extract_map` scans the supplied Myth II tags folder or plugin/tag file to
+  locate the requested `mesh` tag and its referenced assets rather than relying
+  on hard-coded offsets.
 - Image outputs use standard BMP files as editable containers. The games store
   palette-indexed image data internally.
 - See `Doc/sprite_storage.md` for the current `.256` sprite/bitmap decoding

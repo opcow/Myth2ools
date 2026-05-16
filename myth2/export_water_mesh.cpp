@@ -2,7 +2,7 @@
 // Export a Myth II extracted water surface to Wavefront OBJ.
 //
 // Usage:
-//   export_water_mesh <tag_folder> [output.obj] [heightscale]
+//   export_water_mesh <folder> [output.obj] [heightscale]
 
 #include <cstdio>
 #include <cstdlib>
@@ -412,10 +412,10 @@ static void usage(const char* p) {
     fprintf(stderr,
         "Myth II Water Surface Exporter\n\n"
         "Usage:\n"
-        "  %s <tag_folder> [output.obj] [heightscale]\n\n"
+        "  %s <folder> [output.obj] [heightscale]\n\n"
         "Arguments:\n"
-        "  tag_folder    Extracted Myth II map folder from extract\n"
-        "  output.obj    Output OBJ path (default: <tag_folder>/assets/terrain/water.obj)\n"
+        "  folder        Extracted Myth II map folder from extract\n"
+        "  output.obj    Output OBJ path (default: <folder>/assets/terrain/water.obj)\n"
         "  heightscale   Vertical scale multiplier (default: 1/512)\n\n"
         "Example:\n"
         "  %s 85gy\n"

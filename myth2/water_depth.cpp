@@ -2,7 +2,7 @@
 // Generate a Myth II water type bitmap from terrain and water OBJ geometry.
 //
 // Usage:
-//   water_depth <tag_folder> <terrain.obj> <water.obj> [level1] [level2] [level3] [output.bmp] [heightscale] [--smooth]
+//   water_depth <folder> <terrain.obj> <water.obj> [level1] [level2] [level3] [output.bmp] [heightscale] [--smooth]
 
 #include <cstdio>
 #include <cstdlib>
@@ -275,9 +275,9 @@ static void usage(const char* p) {
     fprintf(stderr,
         "Myth II Water Depth Generator\n\n"
         "Usage:\n"
-        "  %s <tag_folder> <terrain.obj> <water.obj> [level1] [level2] [level3] [output.bmp] [heightscale] [--smooth]\n\n"
+        "  %s <folder> <terrain.obj> <water.obj> [level1] [level2] [level3] [output.bmp] [heightscale] [--smooth]\n\n"
         "Arguments:\n"
-        "  tag_folder    Extracted Myth II map folder\n"
+        "  folder        Extracted Myth II map folder\n"
         "  terrain.obj   Terrain OBJ from mesh\n"
         "  water.obj     Water OBJ from water_mesh\n"
         "  level1        Depth where water type 1 begins (raw units, optional)\n"
