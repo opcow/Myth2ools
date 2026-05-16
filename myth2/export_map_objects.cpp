@@ -1623,25 +1623,40 @@ static bool exportUnitPlaceholders(const std::string& outFolder,
 
             float cardW = std::max(0.25f, (float)def->width / 64.0f);
             float cardH = std::max(0.25f, (float)def->height / 64.0f);
-            float x0 = wx - cardW * 0.5f;
-            float x1 = wx + cardW * 0.5f;
-            float z0 = wz;
-            float z1 = wz + cardH;
-            char buf[512];
-            snprintf(buf, sizeof(buf),
-                     "v %.6f %.6f %.6f\nv %.6f %.6f %.6f\n"
-                     "v %.6f %.6f %.6f\nv %.6f %.6f %.6f\n",
-                     x0, z0, wy, x1, z0, wy, x1, z1, wy, x0, z1, wy);
-            obj += buf;
+            const float r = cardW * 0.5f;
+            const float h = cardH;
+            float facingRad = (facingDeg - 90.0f) * (float)(PI / 180.0);
+            float cosF = std::cos(facingRad);
+            float sinF = std::sin(facingRad);
+            auto emitVertex = [&](float lx, float ly, float lz) {
+                float rx = cosF * lx - sinF * ly;
+                float ry = sinF * lx + cosF * ly;
+                char buf[128];
+                snprintf(buf, sizeof(buf), "v %.6f %.6f %.6f\n", wx + rx, wz + lz, wy + ry);
+                obj += buf;
+            };
+
+            emitVertex(-r, 0.0f, 0.0f);
+            emitVertex(r, 0.0f, 0.0f);
+            emitVertex(r, 0.0f, h);
+            emitVertex(-r, 0.0f, h);
+            emitVertex(0.0f, -r, 0.0f);
+            emitVertex(0.0f, r, 0.0f);
+            emitVertex(0.0f, r, h);
+            emitVertex(0.0f, -r, h);
             obj += "vt 0.000000 0.000000\nvt 1.000000 0.000000\n";
             obj += "vt 1.000000 1.000000\nvt 0.000000 1.000000\n";
-            char fbuf[128];
-            snprintf(fbuf, sizeof(fbuf), "f %d/%d %d/%d %d/%d %d/%d\n\n",
-                     vBase, vtBase, vBase+1, vtBase+1,
-                     vBase+2, vtBase+2, vBase+3, vtBase+3);
+            obj += "vt 0.000000 0.000000\nvt 1.000000 0.000000\n";
+            obj += "vt 1.000000 1.000000\nvt 0.000000 1.000000\n";
+            char fbuf[192];
+            snprintf(fbuf, sizeof(fbuf),
+                     "f %d/%d %d/%d %d/%d %d/%d\n"
+                     "f %d/%d %d/%d %d/%d %d/%d\n\n",
+                     vBase, vtBase, vBase+1, vtBase+1, vBase+2, vtBase+2, vBase+3, vtBase+3,
+                     vBase+4, vtBase+4, vBase+5, vtBase+5, vBase+6, vtBase+6, vBase+7, vtBase+7);
             obj += fbuf;
-            vBase += 4;
-            vtBase += 4;
+            vBase += 8;
+            vtBase += 8;
             texturedCount++;
         } else {
             obj += "usemtl unit_placeholder\n";

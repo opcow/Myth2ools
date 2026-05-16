@@ -770,6 +770,37 @@ def enable_alpha_for_sprite_materials(objects):
                 mat.show_transparent_back = True
 
 
+def enable_texture_alpha(objects, blend_method="CLIP"):
+    for obj in objects:
+        for slot in getattr(obj, "material_slots", []):
+            mat = slot.material
+            if not mat:
+                continue
+            node_tree = ensure_material_nodes(mat)
+            if not node_tree:
+                continue
+            nodes = node_tree.nodes
+            links = node_tree.links
+            bsdf = nodes.get("Principled BSDF")
+            if not bsdf:
+                continue
+            image_node = None
+            for node in nodes:
+                if node.type == "TEX_IMAGE":
+                    image_node = node
+                    break
+            if not image_node or "Alpha" not in image_node.outputs:
+                continue
+            mat.blend_method = blend_method
+            alpha_input = bsdf.inputs.get("Alpha")
+            if alpha_input:
+                for link in list(alpha_input.links):
+                    links.remove(link)
+                links.new(image_node.outputs["Alpha"], alpha_input)
+            if hasattr(mat, "show_transparent_back"):
+                mat.show_transparent_back = True
+
+
 def enable_alpha_for_objects(objects, blend_method="CLIP"):
     for obj in objects:
         for slot in getattr(obj, "material_slots", []):
@@ -1073,6 +1104,7 @@ def main():
     if combined_obj.exists():
         combined_objects = import_combined_map(combined_obj)
         apply_ordered_marker_metadata(imported_model_objects(combined_objects), placement_json, "instances", "model", map_folder)
+        enable_texture_alpha(imported_model_objects(combined_objects))
         imported_combined = True
         combined_has_terrain = obj_has_terrain(combined_obj)
 
@@ -1090,7 +1122,9 @@ def main():
         prepare_fence_materials(fence_objects)
 
     if units_obj.exists():
-        apply_unit_metadata(group_imported_objects_by_tag(units_obj, "units"), units_json, map_folder)
+        unit_objects = group_imported_objects_by_tag(units_obj, "units")
+        enable_texture_alpha(unit_objects)
+        apply_unit_metadata(unit_objects, units_json, map_folder)
 
     sound_speakers = add_sound_speakers(sounds_json, map_folder)
     if not sound_speakers and sounds_obj.exists():
@@ -1098,11 +1132,13 @@ def main():
 
     if scenery_obj.exists():
         scenery_objects = group_imported_objects_by_tag(scenery_obj, "scenery")
+        enable_texture_alpha(scenery_objects)
         apply_marker_metadata(scenery_objects, scenery_json, "scenery", "scenery", map_folder)
         enable_alpha_for_sprite_materials(scenery_objects)
 
     if projectiles_obj.exists():
         projectile_objects = group_imported_objects_by_tag(projectiles_obj, "projectiles")
+        enable_texture_alpha(projectile_objects)
         apply_marker_metadata(projectile_objects, projectiles_json, "projectiles", "projectile", map_folder)
 
     if not args.no_animations and animations_json.exists():
