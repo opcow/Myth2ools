@@ -342,11 +342,8 @@ static bool writeORA(const std::string& base){
 
 static void makeDir(const std::string& p){
     if(p.empty()) return;
-#ifdef _WIN32
-    _mkdir(p.c_str());
-#else
-    mkdir(p.c_str(),0755);
-#endif
+    std::error_code ec;
+    fs::create_directories(fs::path(p), ec);
 }
 
 static void makeDirs(const std::string& base){
