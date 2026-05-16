@@ -200,6 +200,8 @@ tag (`raw/mesh_tag.bin`). It writes:
   correct map positions and orientations, ready to import into Blender
 - `assets/terrain/displacement.obj` + `.mtl` — terrain displacement mesh
 - `assets/terrain/water.obj` + `.mtl` — water surface mesh
+- `assets/terrain/fences.obj` + `assets/terrain/fences.json` — connector-derived fence
+  spans resolved from fence-post markers when present
 - `assets/models/animations.json` plus `assets/models/<anim>_<N>_frame##_*.obj` — model
   animation manifests and frame OBJs for animated map objects such as gates
 - `assets/sprites/scenery.obj` plus `assets/sprites/scenery.json` — textured crossed billboards
@@ -273,8 +275,9 @@ or:
 
 The Blender importer uses `assets/terrain/map_combined.obj` when present. If
 that OBJ already contains the terrain object, it will not import
-`assets/terrain/displacement.obj` a second time. `assets/terrain/water.obj` and
-`assets/models/animations.json` are imported when present.
+`assets/terrain/displacement.obj` a second time. `assets/terrain/water.obj`,
+`assets/terrain/fences.obj`, and `assets/models/animations.json` are imported
+when present.
 
 `assets/sprites/units.obj` is imported when present. Moved unit sprites can be
 written back to `assets/sprites/units_edited.json` with

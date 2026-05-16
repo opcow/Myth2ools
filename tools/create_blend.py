@@ -923,6 +923,7 @@ def main():
     combined_obj = terrain_dir / "map_combined.obj"
     displacement_obj = terrain_dir / "displacement.obj"
     water_obj = terrain_dir / "water.obj"
+    fences_obj = terrain_dir / "fences.obj"
     units_obj = sprites_dir / "units.obj"
     sounds_obj = sounds_dir / "sounds.obj"
     sounds_json = sounds_dir / "sounds.json"
@@ -952,6 +953,9 @@ def main():
 
     if not args.no_water and water_obj.exists():
         set_material_alpha(import_into_collection(water_obj, "water"), 0.25)
+
+    if fences_obj.exists():
+        set_material_alpha(import_into_collection(fences_obj, "fences"), 0.65, blend_method="BLEND")
 
     if units_obj.exists():
         apply_unit_metadata(group_imported_objects_by_tag(units_obj, "units"), units_json, map_folder)

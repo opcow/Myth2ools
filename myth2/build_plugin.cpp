@@ -2167,6 +2167,16 @@ static bool zeroRegenerableMeshCacheSections(std::vector<uint8_t>& meshData) {
     return true;
 }
 
+static bool zeroMeshLodSectionOnly(std::vector<uint8_t>& meshData) {
+    constexpr size_t MESH_HEADER_SIZE = 1024;
+    if (meshData.size() < MESH_HEADER_SIZE) return false;
+
+    writeBE32To(meshData.data() + 0xD0, 0); // mesh_LOD_data_size
+    writeBE32To(meshData.data() + 0xD4, 0); // runtime pointer
+    printf("Zeroed mesh LOD section only; left media coverage and 0x120 trailing section intact\n");
+    return true;
+}
+
 static std::vector<UnitPlacementEdit> readUnitPlacementEdits(const std::string& path) {
     std::vector<UnitPlacementEdit> edits;
     std::string j = readTextFile(path);
@@ -2494,7 +2504,7 @@ static void usage(const char* p) {
     fprintf(stderr,
         "Myth II Plugin Assembler\n\n"
         "Usage:\n"
-        "  %s <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation] [--zero-runtime-cache]\n\n"
+        "  %s <folder> [output] [--edit] [--obj <input.obj>] [--water-obj <input.obj>] [--heightscale <n>] [--water] [--water-flags] [--animation] [--zero-runtime-cache] [--zero-mesh-lod]\n\n"
         "  folder   Extracted Myth II map folder from extract\n"
         "  output   Output plugin path (default: <folder>_plugin)\n"
         "  --edit [preg,over,post,scre,name,stor,soun,terr,mesh,mark]  Re-read edited assets.\n"
@@ -2512,6 +2522,7 @@ static void usage(const char* p) {
         "  --water-flags Import only water flags/types from terrain/water.bmp (default under --edit)\n"
         "  --animation Experimentally import terrain/animation.bmp during --edit\n"
         "  --zero-runtime-cache Experimentally omit regenerable post-action mesh cache sections during --edit\n"
+        "  --zero-mesh-lod Experimentally zero only the mesh LOD section during --edit\n"
         "  --heightscale OBJ vertical scale, default 1/512\n",
         p);
 }
@@ -2542,6 +2553,7 @@ int main(int argc, char* argv[]) {
     bool importWaterFlagsExplicit = false;
     bool importAnimation = false;
     bool zeroRuntimeCache = false;
+    bool zeroMeshLod = false;
     std::string objPath;
     std::string waterObjPath;
     float objHeightScale = 1.0f / 512.0f;
@@ -2601,6 +2613,8 @@ int main(int argc, char* argv[]) {
             importAnimation = true;
         } else if (a == "--zero-runtime-cache") {
             zeroRuntimeCache = true;
+        } else if (a == "--zero-mesh-lod") {
+            zeroMeshLod = true;
         } else if (a == "--obj") {
             if (i + 1 < argc) objPath = argv[++i];
             else {
@@ -2697,6 +2711,7 @@ int main(int argc, char* argv[]) {
         }
         if (importAnimation) printf("Animation import: enabled (experimental)\n\n");
         if (zeroRuntimeCache) printf("Runtime cache: zero regenerated mesh sections (experimental)\n\n");
+        if (zeroMeshLod) printf("Mesh LOD:      zero section only (experimental)\n\n");
     }
 
     std::vector<TagSpec> tags;
@@ -2959,7 +2974,7 @@ int main(int argc, char* argv[]) {
                 bool shouldEditTerrain = !editListProvided || editTerrain;
                 bool shouldEditMarkers = !editListProvided || editMark;
                 bool hasExplicitMesh = !effectiveObjPath.empty() || !effectiveWaterObjPath.empty()
-                    || importWater || importWaterFlagsExplicit || importAnimation || zeroRuntimeCache
+                    || importWater || importWaterFlagsExplicit || importAnimation || zeroRuntimeCache || zeroMeshLod
                     || editTerrain;
 
                 if (shouldEditMesh || hasExplicitMesh) {
@@ -3075,6 +3090,12 @@ int main(int argc, char* argv[]) {
                 if (zeroRuntimeCache) {
                     if (!zeroRegenerableMeshCacheSections(t.data)) {
                         fprintf(stderr, "Zeroing mesh runtime cache sections failed\n");
+                        return 1;
+                    }
+                }
+                if (zeroMeshLod) {
+                    if (!zeroMeshLodSectionOnly(t.data)) {
+                        fprintf(stderr, "Zeroing mesh LOD section failed\n");
                         return 1;
                     }
                 }

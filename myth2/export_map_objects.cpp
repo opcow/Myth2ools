@@ -490,6 +490,8 @@ struct MeshHeader {
     uint16_t submeshW=0, submeshH=0;
     uint32_t unitTypeCount=0, unitTypeOffset=0;
     uint32_t instanceCount=0, instanceOffset=0;
+    uint32_t connectorTag=0;
+    uint32_t connectorCount=0, connectorOffset=0, connectorSize=0;
 };
 
 static bool parseMeshHeader(const std::vector<uint8_t>& d, MeshHeader& h) {
@@ -500,6 +502,10 @@ static bool parseMeshHeader(const std::vector<uint8_t>& d, MeshHeader& h) {
     h.unitTypeOffset  = readBE32u(d.data(), 0x28);
     h.instanceCount   = readBE32u(d.data(), 0x34);
     h.instanceOffset  = readBE32u(d.data(), 0x38);
+    h.connectorTag    = readBE32u(d.data(), 72);
+    h.connectorCount  = readBE32u(d.data(), 0x11C);
+    h.connectorOffset = readBE32u(d.data(), 0x120);
+    h.connectorSize   = readBE32u(d.data(), 0x124);
     return h.submeshW>0 && h.submeshH>0;
 }
 
@@ -1844,6 +1850,203 @@ struct ScenerySpriteDef {
     int height = 32;
 };
 
+struct ConnectorDefinition {
+    uint32_t collectionRefTag = 0;
+    int16_t normalSequenceIndex = -1;
+    int16_t damagedSequenceIndex = -1;
+};
+
+struct FencePostPoint {
+    uint16_t identifier = 0;
+    size_t markerIdx = 0;
+    float cellX = 0.0f;
+    float cellY = 0.0f;
+    float cellZ = 0.0f;
+};
+
+static bool readConnectorDefinition(const std::vector<TagEntry>& tags,
+                                    uint32_t connectorTag,
+                                    ConnectorDefinition& def) {
+    static const uint32_t GROUP_CONN = 0x636F6E6Eu; // 'conn'
+    const TagEntry* entry = findTag(tags, GROUP_CONN, connectorTag);
+    if (!entry) return false;
+    std::vector<uint8_t> data;
+    if (!readTagData(*entry, data) || data.size() < 16) return false;
+    def.collectionRefTag = readBE32u(data.data(), 4);
+    def.normalSequenceIndex = readBE16s(data.data(), 8);
+    def.damagedSequenceIndex = readBE16s(data.data(), 14);
+    return true;
+}
+
+static bool exportFenceConnectors(const std::string& outFolder,
+                                  const MeshHeader& mh,
+                                  const std::vector<uint8_t>& meshData,
+                                  const std::vector<ObjectInstance>& instances,
+                                  const std::map<int16_t, std::vector<const UnitType*>>& typeRelIdx,
+                                  const std::vector<TagEntry>& tags) {
+    if (mh.connectorCount == 0 || mh.connectorSize == 0) return false;
+    if (mh.connectorOffset >= meshData.size()) return false;
+    if (mh.connectorTag == 0 || mh.connectorTag == 0xFFFFFFFFu) return false;
+
+    size_t connectorsAbs = 1024 + (size_t)mh.connectorOffset;
+    if (connectorsAbs >= meshData.size()) return false;
+    if (connectorsAbs + (size_t)mh.connectorSize > meshData.size()) return false;
+    if (mh.connectorCount == 0 || (mh.connectorSize % mh.connectorCount) != 0) return false;
+    const size_t recordSize = (size_t)(mh.connectorSize / mh.connectorCount);
+    if (recordSize < 4 || (recordSize % 2) != 0) return false;
+
+    auto itTR = typeRelIdx.find(1);
+    if (itTR == typeRelIdx.end() || itTR->second.empty()) return false;
+
+    const uint32_t fencePostTag = tagFromString("mufp");
+    std::map<uint16_t, FencePostPoint> postsByIdentifier;
+    for (size_t ii = 0; ii < instances.size(); ii++) {
+        const auto& inst = instances[ii];
+        if (inst.markerType != 1) continue;
+        if ((size_t)inst.paletteIdx >= itTR->second.size()) continue;
+        const UnitType* t = itTR->second[inst.paletteIdx];
+        if (!t || t->w0 != 1 || t->typeTag != fencePostTag) continue;
+        FencePostPoint p;
+        p.identifier = inst.identifier;
+        p.markerIdx = ii;
+        p.cellX = (float)inst.posX / WORLD_ONE;
+        p.cellY = (float)inst.posY / WORLD_ONE;
+        p.cellZ = (float)inst.posZ / WORLD_ONE;
+        postsByIdentifier[p.identifier] = p;
+    }
+    if (postsByIdentifier.empty()) return false;
+
+    ConnectorDefinition connDef;
+    bool haveConnDef = readConnectorDefinition(tags, mh.connectorTag, connDef);
+
+    const float halfW = (float)(mh.submeshW * 32) * 0.5f;
+    const float halfH = (float)(mh.submeshH * 32) * 0.5f;
+    const float fenceHeight = 0.72f;
+
+    std::string objPath = outFolder + "/assets/terrain/fences.obj";
+    std::string mtlPath = outFolder + "/assets/terrain/fences.mtl";
+    std::string jsonPath = outFolder + "/assets/terrain/fences.json";
+
+    std::string mtl;
+    mtl += "newmtl fence_placeholder\n";
+    mtl += "Ka 0.10 0.10 0.10\n";
+    mtl += "Kd 0.72 0.78 0.80\n";
+    mtl += "Ks 0.00 0.00 0.00\n";
+    mtl += "d 0.65\n";
+    mtl += "illum 1\n\n";
+    if (!writeText(mtlPath, mtl))
+        return false;
+
+    std::string obj;
+    obj += "# Myth II fence connector placeholders\n";
+    obj += "mtllib fences.mtl\n\n";
+
+    std::string json;
+    json += "{\n";
+    json += "  \"connector_tag\": ";
+    appendJsonString(json, tagToString(mh.connectorTag));
+    if (haveConnDef) {
+        json += ",\n  \"collection_tag\": ";
+        appendJsonString(json, tagToString(connDef.collectionRefTag));
+        char metaBuf[128];
+        snprintf(metaBuf, sizeof(metaBuf),
+                 ",\n  \"normal_sequence\": %d,\n  \"damaged_sequence\": %d",
+                 (int)connDef.normalSequenceIndex, (int)connDef.damagedSequenceIndex);
+        json += metaBuf;
+    }
+    json += ",\n  \"fences\": [\n";
+
+    int vBase = 1;
+    int fenceCount = 0;
+    int segmentCount = 0;
+    for (uint32_t ci = 0; ci < mh.connectorCount; ci++) {
+        size_t recOff = connectorsAbs + (size_t)ci * recordSize;
+        std::vector<FencePostPoint> chain;
+        for (size_t wi = 0; wi < recordSize / 2; wi++) {
+            uint16_t identifier = readBE16u(meshData.data(), recOff + wi * 2);
+            auto pit = postsByIdentifier.find(identifier);
+            if (pit == postsByIdentifier.end())
+                break;
+            if (!chain.empty() && chain.back().identifier == identifier)
+                continue;
+            chain.push_back(pit->second);
+        }
+        if (chain.size() < 2)
+            continue;
+
+        char name[64];
+        snprintf(name, sizeof(name), "fence_%u", (unsigned)ci);
+        obj += "o ";
+        obj += name;
+        obj += "\n";
+        obj += "g ";
+        obj += name;
+        obj += "\n";
+        obj += "usemtl fence_placeholder\n";
+
+        for (size_t pi = 0; pi + 1 < chain.size(); pi++) {
+            const auto& a = chain[pi];
+            const auto& b = chain[pi + 1];
+            float ax = halfW - a.cellX;
+            float ay = a.cellY - halfH;
+            float az0 = a.cellZ + 0.05f;
+            float az1 = az0 + fenceHeight;
+            float bx = halfW - b.cellX;
+            float by = b.cellY - halfH;
+            float bz0 = b.cellZ + 0.05f;
+            float bz1 = bz0 + fenceHeight;
+
+            char buf[512];
+            snprintf(buf, sizeof(buf),
+                     "v %.6f %.6f %.6f\n"
+                     "v %.6f %.6f %.6f\n"
+                     "v %.6f %.6f %.6f\n"
+                     "v %.6f %.6f %.6f\n"
+                     "f %d %d %d %d\n",
+                     ax, az0, ay,
+                     bx, bz0, by,
+                     bx, bz1, by,
+                     ax, az1, ay,
+                     vBase, vBase + 1, vBase + 2, vBase + 3);
+            obj += buf;
+            vBase += 4;
+            segmentCount++;
+        }
+        obj += "\n";
+
+        if (fenceCount) json += ",\n";
+        char headerBuf[128];
+        snprintf(headerBuf, sizeof(headerBuf),
+                 "    {\"connector_idx\": %u, \"post_count\": %zu, \"posts\": [",
+                 (unsigned)ci, chain.size());
+        json += headerBuf;
+        for (size_t pi = 0; pi < chain.size(); pi++) {
+            if (pi) json += ", ";
+            const auto& p = chain[pi];
+            char postBuf[256];
+            snprintf(postBuf, sizeof(postBuf),
+                     "{\"identifier\": %u, \"marker_idx\": %zu, \"x\": %.4f, \"y\": %.4f, \"z\": %.4f}",
+                     (unsigned)p.identifier, p.markerIdx, p.cellX, p.cellY, p.cellZ);
+            json += postBuf;
+        }
+        json += "]}";
+        fenceCount++;
+    }
+
+    json += "\n  ]\n}\n";
+    if (segmentCount == 0)
+        return false;
+
+    bool okObj = writeText(objPath, obj);
+    bool okJson = writeText(jsonPath, json);
+    if (okObj)
+        printf("Fence connectors: %s (%d fences, %d segments)\n",
+               objPath.c_str(), fenceCount, segmentCount);
+    if (okJson)
+        printf("Fence metadata:   %s\n", jsonPath.c_str());
+    return okObj && okJson;
+}
+
 static ScenerySpriteDef resolveScenerySprite(const std::string& outFolder,
                                              const std::vector<TagEntry>& tags,
                                              uint32_t typeTag,
@@ -2867,6 +3070,7 @@ int main(int argc, char* argv[]) {
     exportSoundPlaceholders(outFolder, mh, instances, typeRelIdx, tags, overwriteTextures);
     exportSceneryPlaceholders(outFolder, mh, instances, typeRelIdx, tags, overwriteTextures);
     exportProjectilePlaceholders(outFolder, mh, instances, typeRelIdx);
+    exportFenceConnectors(outFolder, mh, meshData, instances, typeRelIdx, tags);
 
     // ---- Write combined map OBJ ----
     if (!placedInstances.empty()) {
