@@ -1569,6 +1569,24 @@ static bool exportUnitPlaceholders(const std::string& outFolder,
     }
     writeText(mtlPath, mtl);
 
+    auto findAvailableUnitView = [](const UnitSpriteDef& def, int preferred) -> int {
+        if (def.viewCount <= 0) return -1;
+        preferred %= def.viewCount;
+        if (preferred < 0) preferred += def.viewCount;
+        if (!def.texturePngs[(size_t)preferred].empty())
+            return preferred;
+        for (int radius = 1; radius < def.viewCount; radius++) {
+            int a = (preferred + radius) % def.viewCount;
+            if (!def.texturePngs[(size_t)a].empty())
+                return a;
+            int b = preferred - radius;
+            while (b < 0) b += def.viewCount;
+            if (!def.texturePngs[(size_t)b].empty())
+                return b;
+        }
+        return -1;
+    };
+
     int vBase = 1;
     int vtBase = 1;
     int unitCount = 0;
@@ -1587,6 +1605,8 @@ static bool exportUnitPlaceholders(const std::string& outFolder,
         float cellY = (float)inst.posY / WORLD_ONE;
         float cellZ = (float)inst.posZ / WORLD_ONE;
         float facingDeg = (float)(((double)inst.yaw / 65536.0) * 360.0);
+        float displayFacingDeg = std::fmod(180.0f - facingDeg, 360.0f);
+        if (displayFacingDeg < 0.0f) displayFacingDeg += 360.0f;
 
         float wx = halfW - cellX;
         float wy = cellY - halfH;
@@ -1602,30 +1622,16 @@ static bool exportUnitPlaceholders(const std::string& outFolder,
         bool textured = def && def->textured && def->viewCount > 0;
         int viewIndex = 0;
         if (textured) {
-            viewIndex = (int)std::floor(((double)facingDeg / 360.0) * def->viewCount + 0.5);
-            viewIndex %= def->viewCount;
-            if (viewIndex < 0) viewIndex += def->viewCount;
-            if (def->texturePngs[(size_t)viewIndex].empty()) {
-                int fallbackView = -1;
-                for (int vi = 0; vi < def->viewCount; vi++) {
-                    if (!def->texturePngs[(size_t)vi].empty()) {
-                        fallbackView = vi;
-                        break;
-                    }
-                }
-                if (fallbackView >= 0) viewIndex = fallbackView;
-                else textured = false;
-            }
+            viewIndex = findAvailableUnitView(*def,
+                (int)std::floor(((double)displayFacingDeg / 360.0) * def->viewCount + 0.5));
+            if (viewIndex < 0) textured = false;
         }
         if (textured) {
-            obj += "usemtl " + tagToFileStem(t->typeTag) + "_unit_"
-                 + std::to_string(viewIndex) + "_sprite\n";
-
             float cardW = std::max(0.25f, (float)def->width / 64.0f);
             float cardH = std::max(0.25f, (float)def->height / 64.0f);
             const float r = cardW * 0.5f;
             const float h = cardH;
-            float facingRad = (facingDeg - 90.0f) * (float)(PI / 180.0);
+            float facingRad = (displayFacingDeg - 90.0f) * (float)(PI / 180.0);
             float cosF = std::cos(facingRad);
             float sinF = std::sin(facingRad);
             auto emitVertex = [&](float lx, float ly, float lz) {
@@ -1637,30 +1643,29 @@ static bool exportUnitPlaceholders(const std::string& outFolder,
             };
 
             emitVertex(-r, 0.0f, 0.0f);
-            emitVertex(r, 0.0f, 0.0f);
-            emitVertex(r, 0.0f, h);
+            emitVertex( r, 0.0f, 0.0f);
+            emitVertex( r, 0.0f, h);
             emitVertex(-r, 0.0f, h);
-            emitVertex(0.0f, -r, 0.0f);
-            emitVertex(0.0f, r, 0.0f);
-            emitVertex(0.0f, r, h);
-            emitVertex(0.0f, -r, h);
+
+            obj += "usemtl " + tagToFileStem(t->typeTag) + "_unit_"
+                 + std::to_string(viewIndex) + "_sprite\n";
             obj += "vt 0.000000 0.000000\nvt 1.000000 0.000000\n";
             obj += "vt 1.000000 1.000000\nvt 0.000000 1.000000\n";
-            obj += "vt 0.000000 0.000000\nvt 1.000000 0.000000\n";
-            obj += "vt 1.000000 1.000000\nvt 0.000000 1.000000\n";
-            char fbuf[192];
+
+            char fbuf[128];
             snprintf(fbuf, sizeof(fbuf),
-                     "f %d/%d %d/%d %d/%d %d/%d\n"
                      "f %d/%d %d/%d %d/%d %d/%d\n\n",
-                     vBase, vtBase, vBase+1, vtBase+1, vBase+2, vtBase+2, vBase+3, vtBase+3,
-                     vBase+4, vtBase+4, vBase+5, vtBase+5, vBase+6, vtBase+6, vBase+7, vtBase+7);
+                     vBase + 1, vtBase + 1,
+                     vBase + 2, vtBase + 2,
+                     vBase + 3, vtBase + 3,
+                     vBase + 0, vtBase + 0);
             obj += fbuf;
-            vBase += 8;
-            vtBase += 8;
+            vBase += 4;
+            vtBase += 4;
             texturedCount++;
         } else {
             obj += "usemtl unit_placeholder\n";
-            float facingRad = (facingDeg - 90.0f) * (float)(PI / 180.0);
+            float facingRad = (displayFacingDeg - 90.0f) * (float)(PI / 180.0);
             float cosF = std::cos(facingRad);
             float sinF = std::sin(facingRad);
 
@@ -1700,10 +1705,11 @@ static bool exportUnitPlaceholders(const std::string& outFolder,
         char jbuf[256];
         snprintf(jbuf, sizeof(jbuf),
                  ", \"x\": %.4f, \"y\": %.4f, \"z\": %.4f"
-                 ", \"facing_deg\": %.4f, \"sequence\": %d"
+                 ", \"facing_deg\": %.4f, \"display_facing_deg\": %.4f, \"sequence\": %d"
                  ", \"view\": %d, \"textured\": %s"
                  ", \"pal_idx\": %d, \"marker_idx\": %zu, \"identifier\": %u}",
                  cellX, cellY, cellZ, facingDeg,
+                 displayFacingDeg,
                  textured ? def->sequenceIndex : -1,
                  textured ? viewIndex : -1,
                  textured ? "true" : "false",

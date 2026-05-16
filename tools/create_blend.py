@@ -801,6 +801,93 @@ def enable_texture_alpha(objects, blend_method="CLIP"):
                 mat.show_transparent_back = True
 
 
+def ensure_unit_helper_material():
+    mat = bpy.data.materials.get("Myth2UnitHelper")
+    if not mat:
+        mat = bpy.data.materials.new("Myth2UnitHelper")
+    mat.use_nodes = True
+    mat.blend_method = "BLEND"
+    if hasattr(mat, "shadow_method"):
+        mat.shadow_method = "NONE"
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    nodes.clear()
+    output = nodes.new("ShaderNodeOutputMaterial")
+    output.location = (260, 0)
+    bsdf = nodes.new("ShaderNodeBsdfPrincipled")
+    bsdf.location = (0, 0)
+    bsdf.inputs["Base Color"].default_value = (0.18, 0.85, 0.35, 1.0)
+    bsdf.inputs["Emission Color"].default_value = (0.03, 0.18, 0.06, 1.0)
+    bsdf.inputs["Emission Strength"].default_value = 0.35
+    bsdf.inputs["Roughness"].default_value = 0.45
+    bsdf.inputs["Alpha"].default_value = 0.4
+    links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
+    return mat
+
+
+def add_unit_ground_helpers(unit_objects):
+    helper_root = child_collection("unit_helpers")
+    mat = ensure_unit_helper_material()
+    helpers = []
+    for obj in unit_objects:
+        if obj.type != "MESH":
+            continue
+        name = f"{obj.name}_helper"
+        existing = bpy.data.objects.get(name)
+        if existing:
+            bpy.data.objects.remove(existing, do_unlink=True)
+        mesh = bpy.data.meshes.new(f"{name}_mesh")
+        helper = bpy.data.objects.new(name, mesh)
+        facing_deg = float(obj.get("myth2_facing_deg", 0.0))
+        facing_rad = math.radians(facing_deg + 90.0)
+        ref_forward = Vector((-math.sin(facing_rad), math.cos(facing_rad)))
+        if ref_forward.length_squared > 0.0:
+            ref_forward.normalize()
+        mesh_normal = None
+        if getattr(obj.data, "polygons", None) and len(obj.data.polygons):
+            mesh_normal = (obj.matrix_world.to_3x3() @ obj.data.polygons[0].normal).to_2d()
+        if mesh_normal and mesh_normal.length_squared > 1.0e-8:
+            forward = mesh_normal.normalized()
+            if forward.dot(ref_forward) < 0.0:
+                forward.negate()
+        else:
+            forward = ref_forward
+        right = Vector((forward.y, -forward.x))
+
+        def rotate_point(px, py):
+            point = (right * px) + (forward * py)
+            return (point.x, point.y, 0.02)
+
+        mesh.from_pydata(
+            [
+                rotate_point(-0.22, -0.16),
+                rotate_point(0.22, -0.16),
+                rotate_point(0.22, 0.05),
+                rotate_point(0.10, 0.05),
+                rotate_point(0.0, 0.34),
+                rotate_point(-0.10, 0.05),
+                rotate_point(-0.22, 0.05),
+            ],
+            [],
+            [(0, 1, 2, 3, 4, 5, 6)],
+        )
+        mesh.update()
+        mesh.materials.append(mat)
+        helper.display_type = "TEXTURED"
+        helper.show_in_front = True
+        helper["myth2_asset_kind"] = "unit_helper"
+        helper["myth2_parent_unit"] = obj.name
+        if "myth2_marker_idx" in obj:
+            helper["myth2_marker_idx"] = obj["myth2_marker_idx"]
+        if "myth2_tag" in obj:
+            helper["myth2_tag"] = obj["myth2_tag"]
+        move_to_collection(helper, helper_root)
+        helper.location = obj.location.copy()
+        helper.rotation_euler = (0.0, 0.0, 0.0)
+        helpers.append(helper)
+    return helpers
+
+
 def enable_alpha_for_objects(objects, blend_method="CLIP"):
     for obj in objects:
         for slot in getattr(obj, "material_slots", []):
@@ -826,6 +913,7 @@ def prepare_fence_materials(objects):
             nodes = node_tree.nodes
             links = node_tree.links
             bsdf = nodes.get("Principled BSDF")
+            output = nodes.get("Material Output")
             if not bsdf:
                 continue
             image_node = None
@@ -836,13 +924,6 @@ def prepare_fence_materials(objects):
             if not image_node:
                 continue
             image_node.interpolation = "Closest"
-            invert = nodes.get("Myth2FenceAlphaInvert")
-            if not invert:
-                invert = nodes.new("ShaderNodeInvert")
-                invert.name = "Myth2FenceAlphaInvert"
-                invert.label = "Myth2FenceAlphaInvert"
-                invert.location = (image_node.location.x + 220.0, image_node.location.y - 180.0)
-            invert.inputs["Fac"].default_value = 1.0
 
             separate = nodes.get("Myth2FenceSeparateRGB")
             if not separate:
@@ -895,6 +976,15 @@ def prepare_fence_materials(objects):
                 blue_mask.operation = "MULTIPLY"
                 blue_mask.location = (blue_and_red.location.x + 220.0, blue_and_red.location.y - 40.0)
 
+            alpha_math = nodes.get("Myth2FenceAlphaMask")
+            if not alpha_math:
+                alpha_math = nodes.new("ShaderNodeMath")
+                alpha_math.name = "Myth2FenceAlphaMask"
+                alpha_math.label = "Myth2FenceAlphaMask"
+                alpha_math.operation = "SUBTRACT"
+                alpha_math.location = (blue_mask.location.x + 220.0, blue_mask.location.y - 140.0)
+            alpha_math.inputs[0].default_value = 1.0
+
             color_mix = nodes.get("Myth2FenceColorMix")
             if not color_mix:
                 color_mix = nodes.new("ShaderNodeMix")
@@ -904,14 +994,29 @@ def prepare_fence_materials(objects):
                 color_mix.location = (blue_mask.location.x + 220.0, image_node.location.y)
             color_mix.inputs["B"].default_value = (0.0, 0.0, 0.0, 1.0)
 
-            alpha_input = bsdf.inputs.get("Alpha")
             base_color_input = bsdf.inputs.get("Base Color")
             if base_color_input:
                 for link in list(base_color_input.links):
                     links.remove(link)
-            if alpha_input:
-                for link in list(alpha_input.links):
+
+            transparent = nodes.get("Myth2FenceTransparent")
+            if not transparent:
+                transparent = nodes.new("ShaderNodeBsdfTransparent")
+                transparent.name = "Myth2FenceTransparent"
+                transparent.label = "Myth2FenceTransparent"
+                transparent.location = (color_mix.location.x + 220.0, color_mix.location.y - 140.0)
+
+            shader_mix = nodes.get("Myth2FenceShaderMix")
+            if not shader_mix:
+                shader_mix = nodes.new("ShaderNodeMixShader")
+                shader_mix.name = "Myth2FenceShaderMix"
+                shader_mix.label = "Myth2FenceShaderMix"
+                shader_mix.location = (transparent.location.x + 220.0, transparent.location.y + 80.0)
+
+            if output and output.inputs.get("Surface"):
+                for link in list(output.inputs["Surface"].links):
                     links.remove(link)
+
             links.new(image_node.outputs["Color"], separate.inputs["Color"])
             links.new(separate.outputs["Blue"], blue_gt.inputs[0])
             links.new(separate.outputs["Red"], red_lt.inputs[0])
@@ -920,13 +1025,16 @@ def prepare_fence_materials(objects):
             links.new(red_lt.outputs["Value"], blue_and_red.inputs[1])
             links.new(blue_and_red.outputs["Value"], blue_mask.inputs[0])
             links.new(green_lt.outputs["Value"], blue_mask.inputs[1])
+            links.new(blue_mask.outputs["Value"], alpha_math.inputs[1])
             links.new(blue_mask.outputs["Value"], color_mix.inputs["Factor"])
             links.new(image_node.outputs["Color"], color_mix.inputs["A"])
-            links.new(image_node.outputs["Alpha"], invert.inputs["Color"])
             if base_color_input:
                 links.new(color_mix.outputs["Result"], base_color_input)
-            if alpha_input:
-                links.new(invert.outputs["Color"], alpha_input)
+            links.new(alpha_math.outputs["Value"], shader_mix.inputs["Fac"])
+            links.new(transparent.outputs["BSDF"], shader_mix.inputs[1])
+            links.new(bsdf.outputs["BSDF"], shader_mix.inputs[2])
+            if output and output.inputs.get("Surface"):
+                links.new(shader_mix.outputs["Shader"], output.inputs["Surface"])
             if hasattr(mat, "show_transparent_back"):
                 mat.show_transparent_back = True
 
@@ -1052,6 +1160,17 @@ def set_view_defaults():
     bpy.ops.object.camera_add(location=(0.0, -80.0, 60.0), rotation=(1.1, 0.0, 0.0))
     bpy.context.scene.camera = bpy.context.object
 
+    screen = getattr(bpy.context, "screen", None)
+    if screen:
+        for area in screen.areas:
+            if area.type != "VIEW_3D":
+                continue
+            for space in area.spaces:
+                if space.type == "VIEW_3D":
+                    overlay = getattr(space, "overlay", None)
+                    if overlay and hasattr(overlay, "show_relationship_lines"):
+                        overlay.show_relationship_lines = False
+
 
 def parse_args(argv):
     if "--" in argv:
@@ -1125,6 +1244,7 @@ def main():
         unit_objects = group_imported_objects_by_tag(units_obj, "units")
         enable_texture_alpha(unit_objects)
         apply_unit_metadata(unit_objects, units_json, map_folder)
+        add_unit_ground_helpers(unit_objects)
 
     sound_speakers = add_sound_speakers(sounds_json, map_folder)
     if not sound_speakers and sounds_obj.exists():
