@@ -193,7 +193,9 @@ static bool extractDot256Texture(const std::vector<uint8_t>& d,
                                   int viewIndex,
                                   const std::string& outPng,
                                   int* outW = nullptr,
-                                  int* outH = nullptr) {
+                                  int* outH = nullptr,
+                                  bool chromaBlueTransparent = false,
+                                  bool forceOpaqueNonBlue = false) {
     if (d.size() < 320) return false;
 
     int32_t bulkOff        = readBE32s(d.data(), 248);
@@ -348,9 +350,18 @@ static bool extractDot256Texture(const std::vector<uint8_t>& d,
         uint8_t idx = indexes[(size_t)i];
         const uint8_t* c = palData + (size_t)idx * 8;
         uint8_t a = alpha[(size_t)i];
-        rgba[(size_t)i*4+0] = a ? c[0] : 0; // r - zero transparent pixels to avoid color bleed
-        rgba[(size_t)i*4+1] = a ? c[2] : 0; // g
-        rgba[(size_t)i*4+2] = a ? c[4] : 0; // b
+        uint8_t r = a ? c[0] : 0;
+        uint8_t g = a ? c[2] : 0;
+        uint8_t b = a ? c[4] : 0;
+        if (chromaBlueTransparent && r == 0 && g == 0 && b == 255) {
+            a = 0;
+            r = g = b = 0;
+        } else if (forceOpaqueNonBlue && a != 0) {
+            a = 255;
+        }
+        rgba[(size_t)i*4+0] = r;
+        rgba[(size_t)i*4+1] = g;
+        rgba[(size_t)i*4+2] = b;
         rgba[(size_t)i*4+3] = a;
     }
 
@@ -1922,23 +1933,47 @@ static bool exportFenceConnectors(const std::string& outFolder,
     const float halfW = (float)(mh.submeshW * 32) * 0.5f;
     const float halfH = (float)(mh.submeshH * 32) * 0.5f;
     const float fenceHeight = 0.72f;
+    const float minSegmentLength = 0.001f;
 
     std::string objPath = outFolder + "/assets/terrain/fences.obj";
     std::string mtlPath = outFolder + "/assets/terrain/fences.mtl";
     std::string jsonPath = outFolder + "/assets/terrain/fences.json";
+    std::string texturePath;
+    bool textured = false;
+    int texW = 0, texH = 0;
+    if (haveConnDef && connDef.collectionRefTag != 0 && connDef.collectionRefTag != 0xFFFFFFFFu &&
+        connDef.normalSequenceIndex >= 0) {
+        const TagEntry* collEntry = findTextureCollection(tags, connDef.collectionRefTag);
+        if (collEntry) {
+            std::vector<uint8_t> collData;
+            if (readTagData(*collEntry, collData)) {
+                std::string texDir = outFolder + "/assets/terrain/textures";
+                makeDirs(texDir);
+                texturePath = texDir + "/" + tagToFileStem(mh.connectorTag) + "_fence.png";
+                textured = extractDot256Texture(collData, connDef.normalSequenceIndex, 0, texturePath,
+                                                &texW, &texH,
+                                                true,  // pure blue becomes transparent
+                                                true); // non-blue fence pixels stay opaque
+            }
+        }
+    }
 
     std::string mtl;
     mtl += "newmtl fence_placeholder\n";
     mtl += "Ka 0.10 0.10 0.10\n";
-    mtl += "Kd 0.72 0.78 0.80\n";
+    mtl += textured ? "Kd 1.00 1.00 1.00\n" : "Kd 0.72 0.78 0.80\n";
     mtl += "Ks 0.00 0.00 0.00\n";
-    mtl += "d 0.65\n";
+    mtl += "d 1.00\n";
     mtl += "illum 1\n\n";
+    if (textured) {
+        mtl += "map_Kd textures/" + fs::path(texturePath).filename().string() + "\n";
+        mtl += "map_d textures/" + fs::path(texturePath).filename().string() + "\n\n";
+    }
     if (!writeText(mtlPath, mtl))
         return false;
 
     std::string obj;
-    obj += "# Myth II fence connector placeholders\n";
+    obj += "# Myth II fence connector spans\n";
     obj += "mtllib fences.mtl\n\n";
 
     std::string json;
@@ -1957,6 +1992,7 @@ static bool exportFenceConnectors(const std::string& outFolder,
     json += ",\n  \"fences\": [\n";
 
     int vBase = 1;
+    int vtBase = 1;
     int fenceCount = 0;
     int segmentCount = 0;
     for (uint32_t ci = 0; ci < mh.connectorCount; ci++) {
@@ -1995,21 +2031,34 @@ static bool exportFenceConnectors(const std::string& outFolder,
             float by = b.cellY - halfH;
             float bz0 = b.cellZ + 0.05f;
             float bz1 = bz0 + fenceHeight;
+            float dx = bx - ax;
+            float dy = by - ay;
+            float segLen = std::sqrt(dx * dx + dy * dy);
+            if (segLen < minSegmentLength)
+                continue;
+            float u1 = textured && texW > 0 ? (segLen / ((float)texW / 64.0f)) : 1.0f;
 
-            char buf[512];
+            char buf[768];
             snprintf(buf, sizeof(buf),
                      "v %.6f %.6f %.6f\n"
                      "v %.6f %.6f %.6f\n"
                      "v %.6f %.6f %.6f\n"
                      "v %.6f %.6f %.6f\n"
-                     "f %d %d %d %d\n",
+                     "vt 0.000000 0.000000\n"
+                     "vt %.6f 0.000000\n"
+                     "vt %.6f 1.000000\n"
+                     "vt 0.000000 1.000000\n"
+                     "f %d/%d %d/%d %d/%d %d/%d\n",
                      ax, az0, ay,
                      bx, bz0, by,
                      bx, bz1, by,
                      ax, az1, ay,
-                     vBase, vBase + 1, vBase + 2, vBase + 3);
+                     u1, u1,
+                     vBase, vtBase, vBase + 1, vtBase + 1,
+                     vBase + 2, vtBase + 2, vBase + 3, vtBase + 3);
             obj += buf;
             vBase += 4;
+            vtBase += 4;
             segmentCount++;
         }
         obj += "\n";

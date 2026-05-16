@@ -770,6 +770,136 @@ def enable_alpha_for_sprite_materials(objects):
                 mat.show_transparent_back = True
 
 
+def enable_alpha_for_objects(objects, blend_method="CLIP"):
+    for obj in objects:
+        for slot in getattr(obj, "material_slots", []):
+            mat = slot.material
+            if not mat:
+                continue
+            mat.blend_method = blend_method
+            ensure_material_nodes(mat)
+            if hasattr(mat, "show_transparent_back"):
+                mat.show_transparent_back = True
+
+
+def prepare_fence_materials(objects):
+    for obj in objects:
+        for slot in getattr(obj, "material_slots", []):
+            mat = slot.material
+            if not mat:
+                continue
+            mat.blend_method = "BLEND"
+            node_tree = ensure_material_nodes(mat)
+            if not node_tree:
+                continue
+            nodes = node_tree.nodes
+            links = node_tree.links
+            bsdf = nodes.get("Principled BSDF")
+            if not bsdf:
+                continue
+            image_node = None
+            for node in nodes:
+                if node.type == "TEX_IMAGE":
+                    image_node = node
+                    break
+            if not image_node:
+                continue
+            image_node.interpolation = "Closest"
+            invert = nodes.get("Myth2FenceAlphaInvert")
+            if not invert:
+                invert = nodes.new("ShaderNodeInvert")
+                invert.name = "Myth2FenceAlphaInvert"
+                invert.label = "Myth2FenceAlphaInvert"
+                invert.location = (image_node.location.x + 220.0, image_node.location.y - 180.0)
+            invert.inputs["Fac"].default_value = 1.0
+
+            separate = nodes.get("Myth2FenceSeparateRGB")
+            if not separate:
+                separate = nodes.new("ShaderNodeSeparateColor")
+                separate.name = "Myth2FenceSeparateRGB"
+                separate.label = "Myth2FenceSeparateRGB"
+                separate.mode = "RGB"
+                separate.location = (image_node.location.x + 220.0, image_node.location.y + 80.0)
+
+            blue_gt = nodes.get("Myth2FenceBlueGT")
+            if not blue_gt:
+                blue_gt = nodes.new("ShaderNodeMath")
+                blue_gt.name = "Myth2FenceBlueGT"
+                blue_gt.label = "Myth2FenceBlueGT"
+                blue_gt.operation = "GREATER_THAN"
+                blue_gt.location = (separate.location.x + 220.0, separate.location.y + 80.0)
+            blue_gt.inputs[1].default_value = 0.95
+
+            red_lt = nodes.get("Myth2FenceRedLT")
+            if not red_lt:
+                red_lt = nodes.new("ShaderNodeMath")
+                red_lt.name = "Myth2FenceRedLT"
+                red_lt.label = "Myth2FenceRedLT"
+                red_lt.operation = "LESS_THAN"
+                red_lt.location = (separate.location.x + 220.0, separate.location.y)
+            red_lt.inputs[1].default_value = 0.05
+
+            green_lt = nodes.get("Myth2FenceGreenLT")
+            if not green_lt:
+                green_lt = nodes.new("ShaderNodeMath")
+                green_lt.name = "Myth2FenceGreenLT"
+                green_lt.label = "Myth2FenceGreenLT"
+                green_lt.operation = "LESS_THAN"
+                green_lt.location = (separate.location.x + 220.0, separate.location.y - 80.0)
+            green_lt.inputs[1].default_value = 0.05
+
+            blue_and_red = nodes.get("Myth2FenceBlueAndRed")
+            if not blue_and_red:
+                blue_and_red = nodes.new("ShaderNodeMath")
+                blue_and_red.name = "Myth2FenceBlueAndRed"
+                blue_and_red.label = "Myth2FenceBlueAndRed"
+                blue_and_red.operation = "MULTIPLY"
+                blue_and_red.location = (blue_gt.location.x + 220.0, blue_gt.location.y)
+
+            blue_mask = nodes.get("Myth2FenceBlueMask")
+            if not blue_mask:
+                blue_mask = nodes.new("ShaderNodeMath")
+                blue_mask.name = "Myth2FenceBlueMask"
+                blue_mask.label = "Myth2FenceBlueMask"
+                blue_mask.operation = "MULTIPLY"
+                blue_mask.location = (blue_and_red.location.x + 220.0, blue_and_red.location.y - 40.0)
+
+            color_mix = nodes.get("Myth2FenceColorMix")
+            if not color_mix:
+                color_mix = nodes.new("ShaderNodeMix")
+                color_mix.name = "Myth2FenceColorMix"
+                color_mix.label = "Myth2FenceColorMix"
+                color_mix.data_type = "RGBA"
+                color_mix.location = (blue_mask.location.x + 220.0, image_node.location.y)
+            color_mix.inputs["B"].default_value = (0.0, 0.0, 0.0, 1.0)
+
+            alpha_input = bsdf.inputs.get("Alpha")
+            base_color_input = bsdf.inputs.get("Base Color")
+            if base_color_input:
+                for link in list(base_color_input.links):
+                    links.remove(link)
+            if alpha_input:
+                for link in list(alpha_input.links):
+                    links.remove(link)
+            links.new(image_node.outputs["Color"], separate.inputs["Color"])
+            links.new(separate.outputs["Blue"], blue_gt.inputs[0])
+            links.new(separate.outputs["Red"], red_lt.inputs[0])
+            links.new(separate.outputs["Green"], green_lt.inputs[0])
+            links.new(blue_gt.outputs["Value"], blue_and_red.inputs[0])
+            links.new(red_lt.outputs["Value"], blue_and_red.inputs[1])
+            links.new(blue_and_red.outputs["Value"], blue_mask.inputs[0])
+            links.new(green_lt.outputs["Value"], blue_mask.inputs[1])
+            links.new(blue_mask.outputs["Value"], color_mix.inputs["Factor"])
+            links.new(image_node.outputs["Color"], color_mix.inputs["A"])
+            links.new(image_node.outputs["Alpha"], invert.inputs["Color"])
+            if base_color_input:
+                links.new(color_mix.outputs["Result"], base_color_input)
+            if alpha_input:
+                links.new(invert.outputs["Color"], alpha_input)
+            if hasattr(mat, "show_transparent_back"):
+                mat.show_transparent_back = True
+
+
 def ensure_material_nodes(mat):
     if mat.node_tree:
         return mat.node_tree
@@ -955,7 +1085,9 @@ def main():
         set_material_alpha(import_into_collection(water_obj, "water"), 0.25)
 
     if fences_obj.exists():
-        set_material_alpha(import_into_collection(fences_obj, "fences"), 0.65, blend_method="BLEND")
+        fence_objects = import_into_collection(fences_obj, "fences")
+        enable_alpha_for_objects(fence_objects, blend_method="BLEND")
+        prepare_fence_materials(fence_objects)
 
     if units_obj.exists():
         apply_unit_metadata(group_imported_objects_by_tag(units_obj, "units"), units_json, map_folder)
