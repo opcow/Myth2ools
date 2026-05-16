@@ -75,6 +75,8 @@ try_bin_dir() {
 
 try_bin_dir "$script_dir"
 try_bin_dir "$current_dir"
+try_bin_dir "$script_dir/bin"
+try_bin_dir "$current_dir/bin"
 try_bin_dir "$script_dir/build/Release"
 try_bin_dir "$script_dir/build"
 try_bin_dir "$current_dir/build/Release"
@@ -91,6 +93,8 @@ Could not find the extraction executables.
 Checked:
   "$script_dir"
   "$current_dir"
+  "$script_dir/bin"
+  "$current_dir/bin"
   "$script_dir/build/Release"
   "$script_dir/build"
   "$current_dir/build/Release"

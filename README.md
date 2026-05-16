@@ -245,21 +245,45 @@ references between actions and placed markers. It writes:
   flags, timing, indentation, and typed parameters
 - `assets/actions/actions.txt` — compact human-readable action listing
 
+### `myth2ools_gui`
+
+```bash
+myth2ools_gui
+```
+
+Experimental Dear ImGui desktop shell for the common Myth II workflow. The
+current first pass wraps the existing command-line tools with a small GUI for:
+
+- `extract_assets`
+- `build_plugin`
+- `create_blend`
+
+It is meant as a starting point for a future editor, not a replacement for the
+CLI yet. The GUI runs those same tools under the hood and shows their output in
+an in-app command log.
+
+The GUI currently expects this fixed layout inside `myth2ools_gui/`:
+
+- `myth2ools_gui/myth2ools_gui.exe`
+- `myth2ools_gui/scripts/` for workflow wrappers such as `extract_assets` and `create_blend`
+- `myth2ools_gui/bin/` for CLI tools such as `extract_map`, `export_mesh`, and `build_plugin`
+- `myth2ools_gui/tools/` for Python helpers such as `create_blend.py`
+
 ## Example Workflow
 
-On Windows, `extract_assets.bat` runs the common extraction/export sequence in
+On Windows, `myth2ools_gui\scripts\extract_assets.bat` runs the common extraction/export sequence in
 one step:
 
 ```bat
-extract_assets.bat myth2_tags le3e out\le3e --overwrite
-extract_assets.bat G:\Myth_2\plugins\le3e_plugin le3e out\le3e --overwrite
+myth2ools_gui\scripts\extract_assets.bat myth2_tags le3e out\le3e --overwrite
+myth2ools_gui\scripts\extract_assets.bat G:\Myth_2\plugins\le3e_plugin le3e out\le3e --overwrite
 ```
 
 On Linux/macOS, use the Bash version:
 
 ```bash
-./extract_assets.sh myth2_tags le3e out/le3e --overwrite
-./extract_assets.sh ./out/le3e_plugin le3e out/le3e --overwrite
+./myth2ools_gui/scripts/extract_assets.sh myth2_tags le3e out/le3e --overwrite
+./myth2ools_gui/scripts/extract_assets.sh ./out/le3e_plugin le3e out/le3e --overwrite
 ```
 
 It runs `extract_map`, `export_mesh`, `export_water_mesh`, `export_map_objects`,
@@ -269,13 +293,13 @@ To create a Blender scene from an extracted/exported map folder, set
 `BLENDER_PATH` or put Blender's executable path in `blender_path.txt`, then run:
 
 ```bat
-create_blend.bat out\le3e
+myth2ools_gui\scripts\create_blend.bat out\le3e
 ```
 
 or:
 
 ```bash
-./create_blend.sh out/le3e
+./myth2ools_gui/scripts/create_blend.sh out/le3e
 ```
 
 The Blender importer uses `assets/terrain/map_combined.obj` when present. If
@@ -531,6 +555,7 @@ cmake --build build --target export_water_mesh
 cmake --build build --target export_map_objects
 cmake --build build --target export_map_actions
 cmake --build build --target build_plugin
+cmake --build build --target myth2ools_gui
 ```
 
 With Visual Studio-style generators, include the config:
@@ -560,6 +585,16 @@ On Windows with Visual Studio-style generators:
 cmake -S . -B build
 cmake --build build --config Release --target package_release
 ```
+
+`package_release` produces a portable zip in `dist/` whose top-level payload is
+the `myth2ools_gui/` app folder:
+
+- `myth2ools_gui/myth2ools_gui(.exe)`
+- `myth2ools_gui/bin/`
+- `myth2ools_gui/scripts/`
+- `myth2ools_gui/tools/`
+
+That is the same layout the local GUI expects when run outside the repo.
 
 Builds the release executables and writes `dist/myth2ools_<tag>_<platform>.zip`,
 where `<tag>` is the latest git tag reported by `git describe --tags --abbrev=0`

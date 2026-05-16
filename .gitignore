@@ -12,6 +12,7 @@ tools/*
 !tools/create_blend.py
 build/
 build-linux/
+build-root/
 ghidra*/
 out/
 extracted_maps/
@@ -29,3 +30,6 @@ refresh.bat
 myth2/fill_mesh_tag.cpp
 myth2/fill_mesh_tag.h
 dist/
+myth2ools_gui/
+imgui.ini
+myth2ools_gui/
