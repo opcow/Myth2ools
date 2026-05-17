@@ -24,9 +24,14 @@
 #include <cctype>
 #include <filesystem>
 #include <limits>
+#include <unordered_map>
 #include <system_error>
 
+#include <nlohmann/json.hpp>
+
 #include "mesh_flags.h"
+
+using json = nlohmann::json;
 
 static uint32_t swap32(uint32_t n) {
     return ((n & 0xFF000000u) >> 24) | ((n & 0x00FF0000u) >> 8)
@@ -2043,37 +2048,210 @@ struct ActionJsonEntry {
     std::vector<uint8_t> parameterData;
 };
 
+static uint16_t actionParamTypeIdFromJson(const json& param) {
+    if (param.contains("type_id") && param["type_id"].is_number_integer()) {
+        return (uint16_t)param["type_id"].get<int>();
+    }
+    static const std::unordered_map<std::string, uint16_t> byName = {
+        {"flag", 0},
+        {"string", 1},
+        {"monster_identifier", 2},
+        {"action_identifier", 3},
+        {"angle", 4},
+        {"integer", 5},
+        {"world_distance", 6},
+        {"field_name", 7},
+        {"fixed", 8},
+        {"projectile", 12},
+        {"sound", 11},
+        {"world_point_2d", 13},
+        {"world_rectangle_2d", 14},
+        {"object_identifier", 15},
+        {"model_identifier", 16},
+        {"sound_source_identifier", 17},
+        {"world_point_3d", 18},
+        {"local_projectile_group_identifier", 19},
+        {"model_animation_identifier", 20},
+    };
+    std::string typeName = param.contains("type") && param["type"].is_string()
+        ? param["type"].get<std::string>() : "";
+    auto it = byName.find(typeName);
+    return it == byName.end() ? 0xFFFFu : it->second;
+}
+
+static uint16_t actionParamCountFromJson(uint16_t typeId, const json& values) {
+    if (typeId == 0 && values.is_boolean()) return values.get<bool>() ? 0u : 1u;
+    if (typeId == 1 && values.is_string()) return (uint16_t)values.get<std::string>().size();
+    if (values.is_array()) return (uint16_t)values.size();
+    if (values.is_null()) return 0;
+    return 1;
+}
+
+static bool appendActionParamHeader(std::vector<uint8_t>& out, uint16_t typeId, uint16_t count, const std::string& name) {
+    if (name.size() != 4) return false;
+    size_t old = out.size();
+    out.resize(old + 8);
+    writeBE16To(out.data() + old + 0, typeId);
+    writeBE16To(out.data() + old + 2, count);
+    memcpy(out.data() + old + 4, name.data(), 4);
+    return true;
+}
+
+static bool appendActionParamValues(std::vector<uint8_t>& out, uint16_t typeId, uint16_t count, const json& values) {
+    std::vector<uint8_t> bytes;
+    auto appendBE16 = [&](uint16_t v) {
+        size_t old = bytes.size();
+        bytes.resize(old + 2);
+        writeBE16To(bytes.data() + old, v);
+    };
+    auto appendBE32 = [&](uint32_t v) {
+        size_t old = bytes.size();
+        bytes.resize(old + 4);
+        writeBE32To(bytes.data() + old, v);
+    };
+    auto fixedToU32 = [](double v, double scale) -> uint32_t {
+        return (uint32_t)(int32_t)std::lround(v * scale);
+    };
+    switch (typeId) {
+    case 0: { // flag
+        bool v = values.is_boolean() ? values.get<bool>() : false;
+        if (!v) bytes.push_back(0);
+        break;
+    }
+    case 1: { // string
+        std::string s = values.is_string() ? values.get<std::string>() : "";
+        bytes.insert(bytes.end(), s.begin(), s.end());
+        break;
+    }
+    case 7:
+    case 9:
+    case 11:
+    case 12: { // FourCC arrays
+        if (!values.is_array()) return count == 0;
+        for (const json& v : values) {
+            std::string s = v.is_string() ? v.get<std::string>() : "";
+            if (s.size() != 4) return false;
+            bytes.insert(bytes.end(), s.begin(), s.end());
+        }
+        break;
+    }
+    case 13: { // world_point_2d
+        if (!values.is_array()) return count == 0;
+        for (const json& v : values) {
+            if (!v.is_object() || !v.contains("x") || !v.contains("y")) return false;
+            appendBE32(fixedToU32(v["x"].get<double>(), 512.0));
+            appendBE32(fixedToU32(v["y"].get<double>(), 512.0));
+        }
+        break;
+    }
+    case 18: { // world_point_3d
+        if (!values.is_array()) return count == 0;
+        for (const json& v : values) {
+            if (!v.is_object() || !v.contains("x") || !v.contains("y") || !v.contains("z")) return false;
+            appendBE32(fixedToU32(v["x"].get<double>(), 512.0));
+            appendBE32(fixedToU32(v["y"].get<double>(), 512.0));
+            appendBE32(fixedToU32(v["z"].get<double>(), 512.0));
+        }
+        break;
+    }
+    case 5:
+    case 6:
+    case 8: { // 32-bit scalar lists
+        if (!values.is_array()) return count == 0;
+        for (const json& v : values) {
+            if (typeId == 5) appendBE32((uint32_t)(int32_t)v.get<int>());
+            else if (typeId == 6) appendBE32(fixedToU32(v.get<double>(), 512.0));
+            else appendBE32(fixedToU32(v.get<double>(), 65536.0));
+        }
+        break;
+    }
+    default: { // 16-bit scalar lists
+        if (!values.is_array()) return count == 0;
+        for (const json& v : values) {
+            uint16_t packed = 0;
+            if (typeId == 4) packed = (uint16_t)std::lround(v.get<double>() * (65536.0 / 360.0));
+            else packed = (uint16_t)v.get<int>();
+            appendBE16(packed);
+        }
+        break;
+    }
+    }
+    size_t expected = actionParameterValueBytes(typeId, count);
+    if (bytes.size() > expected) return false;
+    bytes.resize(expected, 0);
+    out.insert(out.end(), bytes.begin(), bytes.end());
+    return true;
+}
+
 static bool readActionJsonEntries(const std::string& path, std::vector<ActionJsonEntry>& actions) {
     actions.clear();
-    std::string j = readTextFile(path);
-    if (j.empty()) return false;
+    std::string text = readTextFile(path);
+    if (text.empty()) return false;
 
-    for (const std::string& obj : jsonObjectsInArray(j, "actions")) {
+    json doc;
+    try {
+        doc = json::parse(text);
+    } catch (...) {
+        return false;
+    }
+    if (!doc.contains("actions") || !doc["actions"].is_array()) return false;
+
+    for (const json& obj : doc["actions"]) {
+        if (!obj.is_object()) return false;
+        if (!obj.contains("id") || !obj["id"].is_number_integer()) return false;
+        if (!obj.contains("expiration_mode_id") || !obj["expiration_mode_id"].is_number_integer()) return false;
+        if (!obj.contains("flags_raw") || !obj["flags_raw"].is_number_integer()) return false;
+        if (!obj.contains("indent") || !obj["indent"].is_number_integer()) return false;
+
         ActionJsonEntry e;
-        int id = 0, expiration = 0, flags = 0, indent = 0, parameterOffset = 0;
-        if (!jsonIntNear(obj, "id", id) ||
-            !jsonIntNear(obj, "expiration_mode_id", expiration) ||
-            !jsonIntNear(obj, "flags_raw", flags) ||
-            !jsonIntNear(obj, "indent", indent) ||
-            !jsonIntNear(obj, "parameter_data_offset", parameterOffset)) {
-            return false;
-        }
-        double lower = 0.0, delta = 0.0;
-        jsonNumberNear(obj, "trigger_time_lower_bound_seconds", lower);
-        jsonNumberNear(obj, "trigger_time_delta_seconds", delta);
-        e.id = (uint16_t)id;
-        e.expirationMode = (uint16_t)expiration;
-        e.type = jsonString(obj, "type", "");
-        e.flags = (uint32_t)flags;
+        e.id = (uint16_t)obj["id"].get<int>();
+        e.expirationMode = (uint16_t)obj["expiration_mode_id"].get<int>();
+        e.type = obj.contains("type") && obj["type"].is_string() ? obj["type"].get<std::string>() : "";
+        e.flags = (uint32_t)obj["flags_raw"].get<int>();
+        double lower = obj.contains("trigger_time_lower_bound_seconds") && obj["trigger_time_lower_bound_seconds"].is_number()
+            ? obj["trigger_time_lower_bound_seconds"].get<double>() : 0.0;
+        double delta = obj.contains("trigger_time_delta_seconds") && obj["trigger_time_delta_seconds"].is_number()
+            ? obj["trigger_time_delta_seconds"].get<double>() : 0.0;
         e.triggerLower = (uint32_t)std::lround(lower * 30.0);
         e.triggerDelta = (uint32_t)std::lround(delta * 30.0);
-        e.parameterOffset = (uint32_t)parameterOffset;
-        e.indent = (uint16_t)indent;
-        std::string hex = jsonString(obj, "parameter_data_hex", "");
-        if (!parseHexBytes(hex, e.parameterData)) return false;
+        e.indent = (uint16_t)obj["indent"].get<int>();
+
+        bool compiled = false;
+        if (obj.contains("parameters") && obj["parameters"].is_array()) {
+            std::vector<uint8_t> compiledData;
+            std::string actionName = obj.contains("name") && obj["name"].is_string() ? obj["name"].get<std::string>() : "";
+            uint16_t nameCount = (uint16_t)actionName.size();
+            if (!appendActionParamHeader(compiledData, 1, nameCount, "name")) return false;
+            if (!appendActionParamValues(compiledData, 1, nameCount, actionName)) return false;
+
+            for (const json& param : obj["parameters"]) {
+                if (!param.is_object()) return false;
+                if (!param.contains("name") || !param["name"].is_string()) return false;
+                std::string paramName = param["name"].get<std::string>();
+                uint16_t typeId = actionParamTypeIdFromJson(param);
+                if (typeId == 0xFFFFu) return false;
+                const json& values = param.contains("values") ? param["values"] : json::array();
+                uint16_t count = actionParamCountFromJson(typeId, values);
+                if (!appendActionParamHeader(compiledData, typeId, count, paramName)) return false;
+                if (!appendActionParamValues(compiledData, typeId, count, values)) return false;
+            }
+            e.parameterData = std::move(compiledData);
+            compiled = true;
+        }
+
+        if (!compiled) {
+            if (!obj.contains("parameter_data_hex") || !obj["parameter_data_hex"].is_string()) return false;
+            std::string hex = obj["parameter_data_hex"].get<std::string>();
+            if (!parseHexBytes(hex, e.parameterData)) return false;
+        }
         if (e.parameterData.size() > 0xFFFFu) return false;
         if (!countActionParameters(e.parameterData, e.numParams)) return false;
         actions.push_back(std::move(e));
+    }
+    size_t nextOffset = 0;
+    for (ActionJsonEntry& e : actions) {
+        e.parameterOffset = (uint32_t)nextOffset;
+        nextOffset += e.parameterData.size();
     }
     return true;
 }
@@ -2084,13 +2262,22 @@ static bool applyMapActionsFromJson(std::vector<uint8_t>& meshData, const std::s
     std::vector<ActionJsonEntry> actions;
     if (!readActionJsonEntries(path, actions)) return false;
 
-    std::string j = readTextFile(path);
+    uint32_t oldOffset = (uint32_t)readBE32s(meshData.data(), 0x84);
+    uint32_t oldSize = (uint32_t)readBE32s(meshData.data(), 0x88);
+    size_t oldStart = MESH_HEADER_SIZE + (size_t)oldOffset;
+    size_t oldEnd = oldStart + (size_t)oldSize;
+    if (oldStart > meshData.size() || oldEnd > meshData.size() || oldStart > oldEnd) return false;
+
     size_t actionHeadEnd = actions.size() * ACTION_HEAD_SIZE;
-    size_t bufferSize = (size_t)std::max(jsonInt(j, "action_buffer_size", 0), (int)actionHeadEnd);
+    size_t bufferSize = actionHeadEnd;
     for (const ActionJsonEntry& a : actions) {
         bufferSize = std::max(bufferSize, actionHeadEnd + (size_t)a.parameterOffset + a.parameterData.size());
     }
     std::vector<uint8_t> buffer(bufferSize, 0);
+    size_t preservedBytes = std::min(buffer.size(), (size_t)oldSize);
+    std::copy(meshData.begin() + (ptrdiff_t)oldStart,
+              meshData.begin() + (ptrdiff_t)(oldStart + preservedBytes),
+              buffer.begin());
     for (size_t i = 0; i < actions.size(); i++) {
         const ActionJsonEntry& a = actions[i];
         size_t h = i * ACTION_HEAD_SIZE;
@@ -2107,12 +2294,6 @@ static bool applyMapActionsFromJson(std::vector<uint8_t>& meshData, const std::s
         std::copy(a.parameterData.begin(), a.parameterData.end(),
                   buffer.begin() + (ptrdiff_t)(actionHeadEnd + (size_t)a.parameterOffset));
     }
-
-    uint32_t oldOffset = (uint32_t)readBE32s(meshData.data(), 0x84);
-    uint32_t oldSize = (uint32_t)readBE32s(meshData.data(), 0x88);
-    size_t oldStart = MESH_HEADER_SIZE + (size_t)oldOffset;
-    size_t oldEnd = oldStart + (size_t)oldSize;
-    if (oldStart > meshData.size() || oldEnd > meshData.size() || oldStart > oldEnd) return false;
 
     meshData.erase(meshData.begin() + (ptrdiff_t)oldStart, meshData.begin() + (ptrdiff_t)oldEnd);
     meshData.insert(meshData.begin() + (ptrdiff_t)oldStart, buffer.begin(), buffer.end());

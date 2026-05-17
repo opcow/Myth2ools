@@ -3,6 +3,7 @@
 #include "backends/imgui_impl_opengl2.h"
 
 #include <GLFW/glfw3.h>
+#include <nlohmann/json.hpp>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -13,6 +14,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -28,6 +30,7 @@
 #include <vector>
 
 namespace fs = std::filesystem;
+using json = nlohmann::ordered_json;
 
 struct ShellRunner {
     std::atomic<bool> running{false};
@@ -120,6 +123,12 @@ static fs::path resolveUserPath(const fs::path& baseDir, const std::string& raw)
 
 template <size_t N>
 static void copyToBuffer(std::array<char, N>& dst, const std::string& src);
+
+static bool normalizeActionsDocForSave(json& doc, const std::set<int>& dirtyActionIndices, std::string& error);
+static bool recomputeActionDocLayout(json& doc, std::string& error);
+static void setActionsStatus(struct AppState& state, const std::string& message, bool writeToLog = true);
+static void logActionSummary(struct AppState& state, const json& action, const char* phase);
+static bool guiParseHexBytes(const std::string& s, std::vector<uint8_t>& out);
 
 #if defined(_WIN32)
 static std::wstring widen(const char* text) {
@@ -562,6 +571,14 @@ struct AppState {
     std::string mapScanStatus;
     std::string logSaveStatus;
     std::string settingsStatus;
+    std::string actionsStatus;
+    std::array<char, 128> actionFilter{};
+    int selectedActionIndex = -1;
+    bool actionsLoaded = false;
+    bool actionsDirty = false;
+    bool actionsStructureDirty = false;
+    std::set<int> dirtyActionIndices;
+    json actionsDoc;
     ShellRunner runner;
 };
 
@@ -656,6 +673,9 @@ static std::vector<std::string> collectWorkflowIssues(const AppState& state) {
     addIssue(validatePathText(state.pluginOutput.data(), "Plugin Output File or Folder"));
     if (std::strlen(state.blenderPath.data()) > 0) {
         addIssue(validatePathText(state.blenderPath.data(), "Blender Executable", true));
+    }
+    if (state.actionsLoaded && state.actionsDirty) {
+        issues.push_back("Actions have unsaved changes. Save Actions before building a plugin.");
     }
     return issues;
 }
@@ -855,6 +875,1128 @@ static std::string buildCreateBlendCommand(const AppState& s) {
     fs::path outFolder = resolveUserPath(repoDir, s.outputFolder.data());
     std::string command = quoteArg(script) + " " + quoteArg(outFolder);
     return wrapWindowsCommand(command);
+}
+
+static fs::path actionsJsonPath(const AppState& state) {
+    fs::path repoDir = state.exeDir.parent_path();
+    fs::path outFolder = resolveUserPath(repoDir, state.outputFolder.data());
+    return outFolder / "assets" / "actions" / "actions.json";
+}
+
+static std::string normalizeLineEndingsForPlatform(const std::string& text) {
+#if defined(_WIN32)
+    std::string normalized;
+    normalized.reserve(text.size() + text.size() / 32);
+    for (size_t i = 0; i < text.size(); ++i) {
+        char c = text[i];
+        if (c == '\r') continue;
+        if (c == '\n') {
+            normalized += "\r\n";
+        } else {
+            normalized.push_back(c);
+        }
+    }
+    return normalized;
+#else
+    return text;
+#endif
+}
+
+static bool loadActionsDoc(AppState& state) {
+    fs::path path = actionsJsonPath(state);
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        setActionsStatus(state, "Could not open " + path.string());
+        state.actionsLoaded = false;
+        state.actionsDirty = false;
+        state.actionsStructureDirty = false;
+        state.dirtyActionIndices.clear();
+        state.selectedActionIndex = -1;
+        state.actionsDoc = json{};
+        return false;
+    }
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    try {
+        state.actionsDoc = json::parse(text);
+        if (!state.actionsDoc.contains("actions") || !state.actionsDoc["actions"].is_array()) {
+            setActionsStatus(state, "actions.json is missing an actions array.");
+            state.actionsLoaded = false;
+            state.actionsDirty = false;
+            state.actionsStructureDirty = false;
+            state.dirtyActionIndices.clear();
+            state.selectedActionIndex = -1;
+            state.actionsDoc = json{};
+            return false;
+        }
+    } catch (const std::exception& e) {
+        setActionsStatus(state, std::string("Failed to parse actions.json: ") + e.what());
+        state.actionsLoaded = false;
+        state.actionsDirty = false;
+        state.actionsStructureDirty = false;
+        state.dirtyActionIndices.clear();
+        state.selectedActionIndex = -1;
+        state.actionsDoc = json{};
+        return false;
+    }
+
+    state.actionsLoaded = true;
+    state.actionsDirty = false;
+    state.actionsStructureDirty = false;
+    state.dirtyActionIndices.clear();
+    state.selectedActionIndex = state.actionsDoc["actions"].empty() ? -1 : 0;
+    setActionsStatus(state, "Loaded " + std::to_string(state.actionsDoc["actions"].size()) + " actions.");
+    return true;
+}
+
+static bool saveActionsDoc(AppState& state) {
+    if (!state.actionsLoaded) return false;
+    std::vector<int> dirtyIndices(state.dirtyActionIndices.begin(), state.dirtyActionIndices.end());
+    for (int dirtyIndex : dirtyIndices) {
+        if (dirtyIndex < 0 || dirtyIndex >= static_cast<int>(state.actionsDoc["actions"].size())) continue;
+        logActionSummary(state, state.actionsDoc["actions"][static_cast<size_t>(dirtyIndex)], "before-save");
+    }
+    std::string normalizeError;
+    if (!normalizeActionsDocForSave(state.actionsDoc, state.dirtyActionIndices, normalizeError)) {
+        setActionsStatus(state, "Could not rebuild action parameter data: " + normalizeError);
+        return false;
+    }
+    if (state.actionsStructureDirty) {
+        std::string layoutError;
+        if (!recomputeActionDocLayout(state.actionsDoc, layoutError)) {
+            setActionsStatus(state, "Could not rebuild action layout: " + layoutError);
+            return false;
+        }
+    }
+    for (int dirtyIndex : dirtyIndices) {
+        if (dirtyIndex < 0 || dirtyIndex >= static_cast<int>(state.actionsDoc["actions"].size())) continue;
+        logActionSummary(state, state.actionsDoc["actions"][static_cast<size_t>(dirtyIndex)], "after-normalize");
+    }
+    fs::path path = actionsJsonPath(state);
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        setActionsStatus(state, "Could not write " + path.string());
+        return false;
+    }
+    std::string serialized = state.actionsDoc.dump(2) + "\n";
+    serialized = normalizeLineEndingsForPlatform(serialized);
+    out << serialized;
+    if (!out.good()) {
+        setActionsStatus(state, "Failed while writing " + path.string());
+        return false;
+    }
+    state.actionsDirty = false;
+    state.actionsStructureDirty = false;
+    state.dirtyActionIndices.clear();
+    setActionsStatus(state, "Saved " + path.string());
+    for (int dirtyIndex : dirtyIndices) {
+        if (dirtyIndex < 0 || dirtyIndex >= static_cast<int>(state.actionsDoc["actions"].size())) continue;
+        logActionSummary(state, state.actionsDoc["actions"][static_cast<size_t>(dirtyIndex)], "saved");
+    }
+    return true;
+}
+
+static std::string jsonStringOrEmpty(const json& j, const char* key) {
+    if (!j.contains(key) || !j[key].is_string()) return "";
+    return j[key].get<std::string>();
+}
+
+static int jsonIntOrDefault(const json& j, const char* key, int fallback = 0) {
+    if (!j.contains(key) || !j[key].is_number_integer()) return fallback;
+    return j[key].get<int>();
+}
+
+static double jsonDoubleOrDefault(const json& j, const char* key, double fallback = 0.0) {
+    if (!j.contains(key) || !j[key].is_number()) return fallback;
+    return j[key].get<double>();
+}
+
+enum ActionParamType {
+    GUI_PARAM_FLAG = 0,
+    GUI_PARAM_STRING = 1,
+    GUI_PARAM_MONSTER_IDENTIFIER = 2,
+    GUI_PARAM_ACTION_IDENTIFIER = 3,
+    GUI_PARAM_ANGLE = 4,
+    GUI_PARAM_INTEGER = 5,
+    GUI_PARAM_WORLD_DISTANCE = 6,
+    GUI_PARAM_FIELD_NAME = 7,
+    GUI_PARAM_FIXED = 8,
+    GUI_PARAM_PROJECTILE = 9,
+    GUI_PARAM_STRING_LIST = 10,
+    GUI_PARAM_SOUND = 11,
+    GUI_PARAM_PROJECTILE_OR_WORLD_POINT_2D = 12,
+    GUI_PARAM_WORLD_POINT_2D = 13,
+    GUI_PARAM_WORLD_RECTANGLE_2D = 14,
+    GUI_PARAM_OBJECT_IDENTIFIER = 15,
+    GUI_PARAM_MODEL_IDENTIFIER = 16,
+    GUI_PARAM_SOUND_SOURCE_IDENTIFIER = 17,
+    GUI_PARAM_WORLD_POINT_3D = 18,
+    GUI_PARAM_LOCAL_PROJECTILE_GROUP_IDENTIFIER = 19,
+    GUI_PARAM_MODEL_ANIMATION_IDENTIFIER = 20
+};
+
+static constexpr double GUI_WORLD_POINT_SF = 512.0;
+static constexpr double GUI_FIXED_SF = 65536.0;
+static constexpr double GUI_ANGLE_SF = 65536.0 / 360.0;
+
+static const char* guiExpirationModeName(int modeId) {
+    switch (modeId) {
+    case 0: return "trigger";
+    case 1: return "execution";
+    case 2: return "successful_execution";
+    case 3: return "never";
+    case 4: return "failed_execution";
+    default: return "trigger";
+    }
+}
+
+static int guiExpirationModeIdFromName(const std::string& mode) {
+    if (mode == "trigger") return 0;
+    if (mode == "execution") return 1;
+    if (mode == "successful_execution") return 2;
+    if (mode == "never") return 3;
+    if (mode == "failed_execution") return 4;
+    return 0;
+}
+
+static std::vector<std::string> guiActionFlagNames(uint32_t flags) {
+    const char* names[] = {
+        "initially_active",
+        "activates_only_once",
+        "no_initial_delay",
+        "only_initial_delay",
+        "deleted_on_deactivation"
+    };
+    std::vector<std::string> out;
+    for (int i = 0; i < 5; ++i) {
+        if (flags & (1u << i)) out.push_back(names[i]);
+    }
+    return out;
+}
+
+static void syncActionFlagsJson(json& action) {
+    uint32_t flags = static_cast<uint32_t>(jsonIntOrDefault(action, "flags_raw"));
+    std::vector<std::string> names = guiActionFlagNames(flags);
+    action["flags"] = json::array();
+    for (const std::string& name : names) action["flags"].push_back(name);
+}
+
+static size_t guiAlignTo(size_t value, size_t align) {
+    return (value + align - 1) & ~(align - 1);
+}
+
+static void guiAppendBE16(std::vector<uint8_t>& out, uint16_t value) {
+    out.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>(value & 0xFF));
+}
+
+static void guiAppendBE32(std::vector<uint8_t>& out, uint32_t value) {
+    out.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
+    out.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>(value & 0xFF));
+}
+
+static void guiAppendBE32s(std::vector<uint8_t>& out, int32_t value) {
+    guiAppendBE32(out, static_cast<uint32_t>(value));
+}
+
+static void guiAppendFourCC(std::vector<uint8_t>& out, const std::string& raw) {
+    for (int i = 0; i < 4; ++i) {
+        out.push_back(i < static_cast<int>(raw.size()) ? static_cast<uint8_t>(raw[static_cast<size_t>(i)]) : 0);
+    }
+}
+
+static void guiAppendPadding(std::vector<uint8_t>& out, size_t align) {
+    size_t padded = guiAlignTo(out.size(), align);
+    while (out.size() < padded) out.push_back(0);
+}
+
+static std::string guiHexEncode(const std::vector<uint8_t>& bytes) {
+    static const char* hex = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2);
+    for (uint8_t b : bytes) {
+        out.push_back(hex[(b >> 4) & 0xF]);
+        out.push_back(hex[b & 0xF]);
+    }
+    return out;
+}
+
+struct GuiParamRecordLayout {
+    uint16_t typeId = 0;
+    uint16_t count = 0;
+    std::string name;
+    std::vector<uint8_t> payload;
+};
+
+static int guiHexValue(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static bool guiParseHexBytes(const std::string& s, std::vector<uint8_t>& out) {
+    out.clear();
+    if ((s.size() % 2) != 0) return false;
+    out.reserve(s.size() / 2);
+    for (size_t i = 0; i < s.size(); i += 2) {
+        int hi = guiHexValue(s[i]);
+        int lo = guiHexValue(s[i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out.push_back(static_cast<uint8_t>((hi << 4) | lo));
+    }
+    return true;
+}
+
+static uint16_t guiReadBE16(const uint8_t* b, size_t o) {
+    return static_cast<uint16_t>((static_cast<uint16_t>(b[o]) << 8) | static_cast<uint16_t>(b[o + 1]));
+}
+
+static std::string guiReadFourCC(const uint8_t* p) {
+    if ((p[0] == 0xFF && p[1] == 0xFF && p[2] == 0xFF && p[3] == 0xFF) ||
+        (p[0] == 0x00 && p[1] == 0x00 && p[2] == 0x00 && p[3] == 0x00)) {
+        return "";
+    }
+    return std::string(reinterpret_cast<const char*>(p), 4);
+}
+
+static size_t guiActionParameterValueBytes(uint16_t type, uint16_t count) {
+    switch (type) {
+    case 1:
+    case 0:
+        return guiAlignTo(count, 4);
+    case 7:
+    case 9:
+    case 10:
+    case 11:
+    case 12:
+        return static_cast<size_t>(count) * 4;
+    case 13:
+        return static_cast<size_t>(count) * 8;
+    case 18:
+        return static_cast<size_t>(count) * 12;
+    case 5:
+    case 6:
+    case 8:
+        return static_cast<size_t>(count) * 4;
+    default:
+        return guiAlignTo(count, 2) * 2;
+    }
+}
+
+static bool guiParseParameterLayout(const std::string& hex, std::vector<GuiParamRecordLayout>& layout, std::string& error) {
+    std::vector<uint8_t> bytes;
+    if (!guiParseHexBytes(hex, bytes)) {
+        error = "parameter_data_hex is not valid hex";
+        return false;
+    }
+    layout.clear();
+    size_t p = 0;
+    while (p < bytes.size()) {
+        if (p + 8 > bytes.size()) {
+            error = "parameter layout has a truncated header";
+            return false;
+        }
+        GuiParamRecordLayout rec;
+        rec.typeId = guiReadBE16(bytes.data(), p + 0);
+        rec.count = guiReadBE16(bytes.data(), p + 2);
+        rec.name = guiReadFourCC(bytes.data() + p + 4);
+        p += 8;
+        size_t payloadBytes = guiActionParameterValueBytes(rec.typeId, rec.count);
+        if (p + payloadBytes > bytes.size()) {
+            error = "parameter layout has a truncated payload";
+            return false;
+        }
+        rec.payload.assign(bytes.begin() + static_cast<ptrdiff_t>(p),
+                           bytes.begin() + static_cast<ptrdiff_t>(p + payloadBytes));
+        p += payloadBytes;
+        layout.push_back(std::move(rec));
+    }
+    return true;
+}
+
+static bool guiJsonNumberArray(const json& values, std::vector<double>& out) {
+    if (!values.is_array()) return false;
+    out.clear();
+    for (const json& item : values) {
+        if (!item.is_number()) return false;
+        out.push_back(item.get<double>());
+    }
+    return true;
+}
+
+static bool guiJsonIntArray(const json& values, std::vector<int>& out) {
+    if (!values.is_array()) return false;
+    out.clear();
+    for (const json& item : values) {
+        if (!item.is_number_integer()) return false;
+        out.push_back(item.get<int>());
+    }
+    return true;
+}
+
+static bool guiJsonStringArray(const json& values, std::vector<std::string>& out) {
+    if (!values.is_array()) return false;
+    out.clear();
+    for (const json& item : values) {
+        if (!item.is_string()) return false;
+        out.push_back(item.get<std::string>());
+    }
+    return true;
+}
+
+static bool guiAppendSerializedParameter(std::vector<uint8_t>& out, const std::string& paramName, uint16_t typeId, const json& values, std::string& error) {
+    std::vector<uint8_t> payload;
+    uint16_t count = 0;
+
+    switch (typeId) {
+    case GUI_PARAM_FLAG: {
+        if (!values.is_boolean()) {
+            error = "flag parameter '" + paramName + "' must be true/false";
+            return false;
+        }
+        count = 1;
+        payload.push_back(values.get<bool>() ? 1 : 0);
+        while (payload.size() < 4) payload.push_back(0);
+        break;
+    }
+    case GUI_PARAM_STRING: {
+        if (!values.is_string()) {
+            error = "string parameter '" + paramName + "' must be a string";
+            return false;
+        }
+        std::string s = values.get<std::string>();
+        if (s.size() > 0xFFFFu) {
+            error = "string parameter '" + paramName + "' is too long";
+            return false;
+        }
+        count = static_cast<uint16_t>(s.size());
+        payload.insert(payload.end(), s.begin(), s.end());
+        while (payload.size() < guiAlignTo(payload.size(), 4)) payload.push_back(0);
+        break;
+    }
+    case GUI_PARAM_SOUND:
+    case GUI_PARAM_FIELD_NAME:
+    case GUI_PARAM_PROJECTILE:
+    case GUI_PARAM_PROJECTILE_OR_WORLD_POINT_2D:
+    case GUI_PARAM_STRING_LIST: {
+        std::vector<std::string> vals;
+        if (!guiJsonStringArray(values, vals)) {
+            error = "FourCC parameter '" + paramName + "' must be a string array";
+            return false;
+        }
+        count = static_cast<uint16_t>(vals.size());
+        for (const std::string& s : vals) guiAppendFourCC(payload, s);
+        break;
+    }
+    case GUI_PARAM_WORLD_POINT_2D: {
+        if (!values.is_array()) {
+            error = "world_point_2d parameter '" + paramName + "' must be an array";
+            return false;
+        }
+        count = static_cast<uint16_t>(values.size());
+        for (const json& point : values) {
+            if (!point.is_object() || !point.contains("x") || !point.contains("y") ||
+                !point["x"].is_number() || !point["y"].is_number()) {
+                error = "world_point_2d parameter '" + paramName + "' has an invalid point";
+                return false;
+            }
+            uint32_t x = static_cast<uint32_t>(std::lround(point["x"].get<double>() * GUI_WORLD_POINT_SF));
+            uint32_t y = static_cast<uint32_t>(std::lround(point["y"].get<double>() * GUI_WORLD_POINT_SF));
+            guiAppendBE32(payload, x);
+            guiAppendBE32(payload, y);
+        }
+        break;
+    }
+    case GUI_PARAM_WORLD_POINT_3D: {
+        if (!values.is_array()) {
+            error = "world_point_3d parameter '" + paramName + "' must be an array";
+            return false;
+        }
+        count = static_cast<uint16_t>(values.size());
+        for (const json& point : values) {
+            if (!point.is_object() || !point.contains("x") || !point.contains("y") || !point.contains("z") ||
+                !point["x"].is_number() || !point["y"].is_number() || !point["z"].is_number()) {
+                error = "world_point_3d parameter '" + paramName + "' has an invalid point";
+                return false;
+            }
+            guiAppendBE32(payload, static_cast<uint32_t>(std::lround(point["x"].get<double>() * GUI_WORLD_POINT_SF)));
+            guiAppendBE32(payload, static_cast<uint32_t>(std::lround(point["y"].get<double>() * GUI_WORLD_POINT_SF)));
+            guiAppendBE32(payload, static_cast<uint32_t>(std::lround(point["z"].get<double>() * GUI_WORLD_POINT_SF)));
+        }
+        break;
+    }
+    case GUI_PARAM_FIXED:
+    case GUI_PARAM_WORLD_DISTANCE: {
+        std::vector<double> vals;
+        if (!guiJsonNumberArray(values, vals)) {
+            error = "numeric parameter '" + paramName + "' must be a number array";
+            return false;
+        }
+        count = static_cast<uint16_t>(vals.size());
+        double scale = (typeId == GUI_PARAM_FIXED) ? GUI_FIXED_SF : GUI_WORLD_POINT_SF;
+        for (double value : vals) {
+            guiAppendBE32s(payload, static_cast<int32_t>(std::lround(value * scale)));
+        }
+        break;
+    }
+    case GUI_PARAM_INTEGER: {
+        std::vector<int> vals;
+        if (!guiJsonIntArray(values, vals)) {
+            error = "integer parameter '" + paramName + "' must be an integer array";
+            return false;
+        }
+        count = static_cast<uint16_t>(vals.size());
+        for (int value : vals) guiAppendBE32s(payload, value);
+        break;
+    }
+    default: {
+        std::vector<int> vals;
+        if (!guiJsonIntArray(values, vals) && typeId != GUI_PARAM_ANGLE) {
+            error = "parameter '" + paramName + "' uses an unsupported value shape";
+            return false;
+        }
+        if (typeId == GUI_PARAM_ANGLE) {
+            std::vector<double> angleVals;
+            if (!guiJsonNumberArray(values, angleVals)) {
+                error = "angle parameter '" + paramName + "' must be a number array";
+                return false;
+            }
+            count = static_cast<uint16_t>(angleVals.size());
+            for (double value : angleVals) {
+                guiAppendBE16(payload, static_cast<uint16_t>(std::lround(value * GUI_ANGLE_SF)));
+            }
+            if ((count & 1u) != 0) guiAppendBE16(payload, 0);
+        } else {
+            count = static_cast<uint16_t>(vals.size());
+            for (int value : vals) guiAppendBE16(payload, static_cast<uint16_t>(value));
+            if ((count & 1u) != 0) guiAppendBE16(payload, 0);
+        }
+        break;
+    }
+    }
+
+    guiAppendBE16(out, typeId);
+    guiAppendBE16(out, count);
+    guiAppendFourCC(out, paramName);
+    out.insert(out.end(), payload.begin(), payload.end());
+    return true;
+}
+
+static bool guiBuildSerializedParameter(std::vector<uint8_t>& out,
+                                        const std::string& paramName,
+                                        uint16_t typeId,
+                                        const json& values,
+                                        std::string& error,
+                                        bool stringUsesNullTerminator) {
+    if (typeId == GUI_PARAM_STRING) {
+        if (!values.is_string()) {
+            error = "string parameter '" + paramName + "' must be a string";
+            return false;
+        }
+        std::vector<uint8_t> payload;
+        std::string s = values.get<std::string>();
+        if (s.size() > 0xFFFEu) {
+            error = "string parameter '" + paramName + "' is too long";
+            return false;
+        }
+        uint16_t count = static_cast<uint16_t>(s.size() + (stringUsesNullTerminator ? 1 : 0));
+        payload.insert(payload.end(), s.begin(), s.end());
+        if (stringUsesNullTerminator) payload.push_back(0);
+        while (payload.size() < guiAlignTo(payload.size(), 4)) payload.push_back(0);
+        guiAppendBE16(out, typeId);
+        guiAppendBE16(out, count);
+        guiAppendFourCC(out, paramName);
+        out.insert(out.end(), payload.begin(), payload.end());
+        return true;
+    }
+    return guiAppendSerializedParameter(out, paramName, typeId, values, error);
+}
+
+static bool guiBuildSerializedParameterUsingLayout(std::vector<uint8_t>& out,
+                                                   const GuiParamRecordLayout& layout,
+                                                   const json& values,
+                                                   std::string& error) {
+    if (layout.typeId == GUI_PARAM_FLAG) {
+        if (!values.is_boolean()) {
+            error = "flag parameter '" + layout.name + "' must be true/false";
+            return false;
+        }
+        bool enabled = values.get<bool>();
+        if (layout.count == 0) {
+            if (!enabled) {
+                error = "flag parameter '" + layout.name + "' cannot be set false without changing record size";
+                return false;
+            }
+            guiAppendBE16(out, layout.typeId);
+            guiAppendBE16(out, 0);
+            guiAppendFourCC(out, layout.name);
+            return true;
+        }
+    }
+
+    if (layout.typeId == GUI_PARAM_STRING) {
+        if (!values.is_string()) {
+            error = "string parameter '" + layout.name + "' must be a string";
+            return false;
+        }
+        const std::string s = values.get<std::string>();
+        const bool hadNullTerminator = layout.count > 0 && layout.payload.size() >= layout.count &&
+                                       layout.payload[static_cast<size_t>(layout.count - 1)] == 0;
+        const uint16_t desiredCount = static_cast<uint16_t>(s.size() + (hadNullTerminator ? 1 : 0));
+        if (desiredCount != layout.count) {
+            error = "string parameter '" + layout.name + "' cannot change encoded length yet";
+            return false;
+        }
+        std::vector<uint8_t> payload;
+        payload.insert(payload.end(), s.begin(), s.end());
+        if (hadNullTerminator) payload.push_back(0);
+        while (payload.size() < layout.payload.size()) payload.push_back(0);
+        if (payload.size() != layout.payload.size()) {
+            error = "string parameter '" + layout.name + "' would change payload size";
+            return false;
+        }
+        guiAppendBE16(out, layout.typeId);
+        guiAppendBE16(out, layout.count);
+        guiAppendFourCC(out, layout.name);
+        out.insert(out.end(), payload.begin(), payload.end());
+        return true;
+    }
+
+    std::vector<uint8_t> payload = layout.payload;
+    auto writeBE16At = [&](size_t offset, uint16_t value) {
+        payload[offset + 0] = static_cast<uint8_t>((value >> 8) & 0xFF);
+        payload[offset + 1] = static_cast<uint8_t>(value & 0xFF);
+    };
+    auto writeBE32At = [&](size_t offset, uint32_t value) {
+        payload[offset + 0] = static_cast<uint8_t>((value >> 24) & 0xFF);
+        payload[offset + 1] = static_cast<uint8_t>((value >> 16) & 0xFF);
+        payload[offset + 2] = static_cast<uint8_t>((value >> 8) & 0xFF);
+        payload[offset + 3] = static_cast<uint8_t>(value & 0xFF);
+    };
+
+    switch (layout.typeId) {
+    case GUI_PARAM_SOUND:
+    case GUI_PARAM_FIELD_NAME:
+    case GUI_PARAM_PROJECTILE:
+    case GUI_PARAM_PROJECTILE_OR_WORLD_POINT_2D:
+    case GUI_PARAM_STRING_LIST: {
+        std::vector<std::string> vals;
+        if (!guiJsonStringArray(values, vals)) {
+            error = "FourCC parameter '" + layout.name + "' must be a string array";
+            return false;
+        }
+        if (vals.size() != layout.count) {
+            error = "parameter '" + layout.name + "' cannot change item count yet";
+            return false;
+        }
+        for (size_t i = 0; i < vals.size(); ++i) {
+            for (int j = 0; j < 4; ++j) {
+                payload[i * 4 + static_cast<size_t>(j)] = (j < static_cast<int>(vals[i].size()))
+                    ? static_cast<uint8_t>(vals[i][static_cast<size_t>(j)])
+                    : 0;
+            }
+        }
+        break;
+    }
+    case GUI_PARAM_WORLD_POINT_2D: {
+        if (!values.is_array() || values.size() != layout.count) {
+            error = "parameter '" + layout.name + "' cannot change point count yet";
+            return false;
+        }
+        for (size_t i = 0; i < values.size(); ++i) {
+            const json& point = values[i];
+            if (!point.is_object() || !point.contains("x") || !point.contains("y") ||
+                !point["x"].is_number() || !point["y"].is_number()) {
+                error = "world_point_2d parameter '" + layout.name + "' has an invalid point";
+                return false;
+            }
+            writeBE32At(i * 8 + 0, static_cast<uint32_t>(std::lround(point["x"].get<double>() * GUI_WORLD_POINT_SF)));
+            writeBE32At(i * 8 + 4, static_cast<uint32_t>(std::lround(point["y"].get<double>() * GUI_WORLD_POINT_SF)));
+        }
+        break;
+    }
+    case GUI_PARAM_WORLD_POINT_3D: {
+        if (!values.is_array() || values.size() != layout.count) {
+            error = "parameter '" + layout.name + "' cannot change point count yet";
+            return false;
+        }
+        for (size_t i = 0; i < values.size(); ++i) {
+            const json& point = values[i];
+            if (!point.is_object() || !point.contains("x") || !point.contains("y") || !point.contains("z") ||
+                !point["x"].is_number() || !point["y"].is_number() || !point["z"].is_number()) {
+                error = "world_point_3d parameter '" + layout.name + "' has an invalid point";
+                return false;
+            }
+            writeBE32At(i * 12 + 0, static_cast<uint32_t>(std::lround(point["x"].get<double>() * GUI_WORLD_POINT_SF)));
+            writeBE32At(i * 12 + 4, static_cast<uint32_t>(std::lround(point["y"].get<double>() * GUI_WORLD_POINT_SF)));
+            writeBE32At(i * 12 + 8, static_cast<uint32_t>(std::lround(point["z"].get<double>() * GUI_WORLD_POINT_SF)));
+        }
+        break;
+    }
+    case GUI_PARAM_INTEGER: {
+        std::vector<int> vals;
+        if (!guiJsonIntArray(values, vals)) {
+            error = "integer parameter '" + layout.name + "' must be an integer array";
+            return false;
+        }
+        if (vals.size() != layout.count) {
+            error = "parameter '" + layout.name + "' cannot change item count yet";
+            return false;
+        }
+        for (size_t i = 0; i < vals.size(); ++i) {
+            writeBE32At(i * 4, static_cast<uint32_t>(vals[i]));
+        }
+        break;
+    }
+    case GUI_PARAM_FIXED:
+    case GUI_PARAM_WORLD_DISTANCE: {
+        std::vector<double> vals;
+        if (!guiJsonNumberArray(values, vals)) {
+            error = "numeric parameter '" + layout.name + "' must be a number array";
+            return false;
+        }
+        if (vals.size() != layout.count) {
+            error = "parameter '" + layout.name + "' cannot change item count yet";
+            return false;
+        }
+        double scale = (layout.typeId == GUI_PARAM_FIXED) ? GUI_FIXED_SF : GUI_WORLD_POINT_SF;
+        for (size_t i = 0; i < vals.size(); ++i) {
+            writeBE32At(i * 4, static_cast<uint32_t>(std::lround(vals[i] * scale)));
+        }
+        break;
+    }
+    case GUI_PARAM_ANGLE: {
+        std::vector<double> vals;
+        if (!guiJsonNumberArray(values, vals)) {
+            error = "angle parameter '" + layout.name + "' must be a number array";
+            return false;
+        }
+        if (vals.size() != layout.count) {
+            error = "parameter '" + layout.name + "' cannot change item count yet";
+            return false;
+        }
+        for (size_t i = 0; i < vals.size(); ++i) {
+            writeBE16At(i * 2, static_cast<uint16_t>(std::lround(vals[i] * GUI_ANGLE_SF)));
+        }
+        break;
+    }
+    default: {
+        std::vector<int> vals;
+        if (!guiJsonIntArray(values, vals)) {
+            error = "parameter '" + layout.name + "' uses an unsupported value shape";
+            return false;
+        }
+        if (vals.size() != layout.count) {
+            error = "parameter '" + layout.name + "' cannot change item count yet";
+            return false;
+        }
+        for (size_t i = 0; i < vals.size(); ++i) {
+            writeBE16At(i * 2, static_cast<uint16_t>(vals[i]));
+        }
+        break;
+    }
+    }
+
+    guiAppendBE16(out, layout.typeId);
+    guiAppendBE16(out, layout.count);
+    guiAppendFourCC(out, layout.name);
+    out.insert(out.end(), payload.begin(), payload.end());
+    return true;
+}
+
+static bool guiRepackActionParameters(json& action, std::string& error) {
+    std::vector<GuiParamRecordLayout> layout;
+    if (!guiParseParameterLayout(jsonStringOrEmpty(action, "parameter_data_hex"), layout, error)) return false;
+
+    std::vector<bool> matched;
+    if (action.contains("parameters") && action["parameters"].is_array()) {
+        matched.assign(action["parameters"].size(), false);
+    }
+
+    std::vector<uint8_t> bytes;
+    for (const GuiParamRecordLayout& rec : layout) {
+        if (rec.name == "name") {
+            if (!guiBuildSerializedParameter(bytes, "name", GUI_PARAM_STRING, json(jsonStringOrEmpty(action, "name")), error, true)) {
+                return false;
+            }
+            continue;
+        }
+
+        bool found = false;
+        if (action.contains("parameters") && action["parameters"].is_array()) {
+            for (size_t i = 0; i < action["parameters"].size(); ++i) {
+                json& param = action["parameters"][i];
+                if (matched[i]) continue;
+                if (jsonStringOrEmpty(param, "name") == rec.name &&
+                    jsonIntOrDefault(param, "type_id", -1) == rec.typeId) {
+                    if (!param.contains("values")) {
+                        error = "parameter '" + rec.name + "' is missing values";
+                        return false;
+                    }
+                    if (!guiBuildSerializedParameterUsingLayout(bytes, rec, param["values"], error)) {
+                        return false;
+                    }
+                    matched[i] = true;
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if (!found) {
+            guiAppendBE16(bytes, rec.typeId);
+            guiAppendBE16(bytes, rec.count);
+            guiAppendFourCC(bytes, rec.name);
+            bytes.insert(bytes.end(), rec.payload.begin(), rec.payload.end());
+        }
+    }
+
+    if (action.contains("parameters") && action["parameters"].is_array()) {
+        for (size_t i = 0; i < action["parameters"].size(); ++i) {
+            if (matched[i]) continue;
+            json& param = action["parameters"][i];
+            std::string paramName = jsonStringOrEmpty(param, "name");
+            int typeId = jsonIntOrDefault(param, "type_id", -1);
+            if (paramName.size() != 4) {
+                error = "parameter name '" + paramName + "' must be exactly four characters";
+                return false;
+            }
+            if (typeId < 0 || typeId > 20) {
+                error = "parameter '" + paramName + "' has unsupported type_id " + std::to_string(typeId);
+                return false;
+            }
+            if (!param.contains("values")) {
+                error = "parameter '" + paramName + "' is missing values";
+                return false;
+            }
+            if (!guiBuildSerializedParameter(bytes, paramName, static_cast<uint16_t>(typeId), param["values"], error, true)) {
+                return false;
+            }
+        }
+    }
+
+    action["parameter_data_hex"] = guiHexEncode(bytes);
+    action["parameter_data_size"] = static_cast<int>(bytes.size());
+    return true;
+}
+
+static bool normalizeActionsDocForSave(json& doc, const std::set<int>& dirtyActionIndices, std::string& error) {
+    if (!doc.contains("actions") || !doc["actions"].is_array()) {
+        error = "actions document is missing the actions array";
+        return false;
+    }
+
+    for (int dirtyIndex : dirtyActionIndices) {
+        if (dirtyIndex < 0 || dirtyIndex >= static_cast<int>(doc["actions"].size())) continue;
+        json& action = doc["actions"][static_cast<size_t>(dirtyIndex)];
+        int expirationModeId = jsonIntOrDefault(action, "expiration_mode_id", guiExpirationModeIdFromName(jsonStringOrEmpty(action, "expiration_mode")));
+        action["expiration_mode_id"] = expirationModeId;
+        action["expiration_mode"] = std::string(guiExpirationModeName(expirationModeId));
+        syncActionFlagsJson(action);
+        if (!guiRepackActionParameters(action, error)) return false;
+    }
+    return true;
+}
+
+static bool recomputeActionDocLayout(json& doc, std::string& error) {
+    if (!doc.contains("actions") || !doc["actions"].is_array()) {
+        error = "actions document is missing the actions array";
+        return false;
+    }
+
+    constexpr int ACTION_HEAD_SIZE = 64;
+    int runningOffset = 0;
+    for (json& action : doc["actions"]) {
+        std::string hex = jsonStringOrEmpty(action, "parameter_data_hex");
+        std::vector<uint8_t> bytes;
+        if (!guiParseHexBytes(hex, bytes)) {
+            error = "action " + std::to_string(jsonIntOrDefault(action, "id")) + " has invalid parameter_data_hex";
+            return false;
+        }
+        action["parameter_data_size"] = static_cast<int>(bytes.size());
+        action["parameter_data_offset"] = runningOffset;
+        runningOffset += static_cast<int>(bytes.size());
+    }
+
+    doc["action_count"] = static_cast<int>(doc["actions"].size());
+    doc["action_buffer_size"] = static_cast<int>(doc["actions"].size()) * ACTION_HEAD_SIZE + runningOffset;
+    return true;
+}
+
+static bool drawJsonIntListEditor(json& values, const char* addLabel, int defaultValue = 0) {
+    if (!values.is_array()) values = json::array();
+    bool changed = false;
+    for (size_t i = 0; i < values.size(); ++i) {
+        ImGui::PushID(static_cast<int>(i));
+        int value = values[i].is_number_integer() ? values[i].get<int>() : defaultValue;
+        ImGui::SetNextItemWidth(140.0f);
+        if (ImGui::InputInt("##value", &value)) {
+            values[i] = value;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("-")) {
+            values.erase(values.begin() + static_cast<ptrdiff_t>(i));
+            changed = true;
+            ImGui::PopID();
+            break;
+        }
+        ImGui::PopID();
+    }
+    if (ImGui::Button(addLabel)) {
+        values.push_back(defaultValue);
+        changed = true;
+    }
+    return changed;
+}
+
+static bool drawJsonDoubleListEditor(json& values, const char* addLabel, float defaultValue = 0.0f) {
+    if (!values.is_array()) values = json::array();
+    bool changed = false;
+    for (size_t i = 0; i < values.size(); ++i) {
+        ImGui::PushID(static_cast<int>(i));
+        float value = values[i].is_number() ? static_cast<float>(values[i].get<double>()) : defaultValue;
+        ImGui::SetNextItemWidth(140.0f);
+        if (ImGui::InputFloat("##value", &value, 0.0f, 0.0f, "%.4f")) {
+            values[i] = value;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("-")) {
+            values.erase(values.begin() + static_cast<ptrdiff_t>(i));
+            changed = true;
+            ImGui::PopID();
+            break;
+        }
+        ImGui::PopID();
+    }
+    if (ImGui::Button(addLabel)) {
+        values.push_back(defaultValue);
+        changed = true;
+    }
+    return changed;
+}
+
+static bool drawJsonStringListEditor(json& values, const char* addLabel, size_t width = 80) {
+    if (!values.is_array()) values = json::array();
+    bool changed = false;
+    for (size_t i = 0; i < values.size(); ++i) {
+        ImGui::PushID(static_cast<int>(i));
+        std::array<char, 64> buf{};
+        copyToBuffer(buf, values[i].is_string() ? values[i].get<std::string>() : "");
+        ImGui::SetNextItemWidth(static_cast<float>(width));
+        if (ImGui::InputText("##value", buf.data(), buf.size())) {
+            values[i] = std::string(buf.data());
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("-")) {
+            values.erase(values.begin() + static_cast<ptrdiff_t>(i));
+            changed = true;
+            ImGui::PopID();
+            break;
+        }
+        ImGui::PopID();
+    }
+    if (ImGui::Button(addLabel)) {
+        values.push_back("");
+        changed = true;
+    }
+    return changed;
+}
+
+static bool drawJsonPoint2ListEditor(json& values) {
+    if (!values.is_array()) values = json::array();
+    bool changed = false;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (!values[i].is_object()) values[i] = json{{"x", 0.0}, {"y", 0.0}};
+        ImGui::PushID(static_cast<int>(i));
+        float x = values[i].contains("x") && values[i]["x"].is_number() ? static_cast<float>(values[i]["x"].get<double>()) : 0.0f;
+        float y = values[i].contains("y") && values[i]["y"].is_number() ? static_cast<float>(values[i]["y"].get<double>()) : 0.0f;
+        ImGui::SetNextItemWidth(110.0f);
+        if (ImGui::InputFloat("x", &x, 0.0f, 0.0f, "%.4f")) {
+            values[i]["x"] = x;
+            changed = true;
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(110.0f);
+        if (ImGui::InputFloat("y", &y, 0.0f, 0.0f, "%.4f")) {
+            values[i]["y"] = y;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("-")) {
+            values.erase(values.begin() + static_cast<ptrdiff_t>(i));
+            changed = true;
+            ImGui::PopID();
+            break;
+        }
+        ImGui::PopID();
+    }
+    if (ImGui::Button("Add Point")) {
+        values.push_back(json{{"x", 0.0}, {"y", 0.0}});
+        changed = true;
+    }
+    return changed;
+}
+
+static bool drawJsonPoint3ListEditor(json& values) {
+    if (!values.is_array()) values = json::array();
+    bool changed = false;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (!values[i].is_object()) values[i] = json{{"x", 0.0}, {"y", 0.0}, {"z", 0.0}};
+        ImGui::PushID(static_cast<int>(i));
+        float x = values[i].contains("x") && values[i]["x"].is_number() ? static_cast<float>(values[i]["x"].get<double>()) : 0.0f;
+        float y = values[i].contains("y") && values[i]["y"].is_number() ? static_cast<float>(values[i]["y"].get<double>()) : 0.0f;
+        float z = values[i].contains("z") && values[i]["z"].is_number() ? static_cast<float>(values[i]["z"].get<double>()) : 0.0f;
+        ImGui::SetNextItemWidth(90.0f);
+        if (ImGui::InputFloat("x", &x, 0.0f, 0.0f, "%.4f")) {
+            values[i]["x"] = x;
+            changed = true;
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(90.0f);
+        if (ImGui::InputFloat("y", &y, 0.0f, 0.0f, "%.4f")) {
+            values[i]["y"] = y;
+            changed = true;
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(90.0f);
+        if (ImGui::InputFloat("z", &z, 0.0f, 0.0f, "%.4f")) {
+            values[i]["z"] = z;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("-")) {
+            values.erase(values.begin() + static_cast<ptrdiff_t>(i));
+            changed = true;
+            ImGui::PopID();
+            break;
+        }
+        ImGui::PopID();
+    }
+    if (ImGui::Button("Add Point")) {
+        values.push_back(json{{"x", 0.0}, {"y", 0.0}, {"z", 0.0}});
+        changed = true;
+    }
+    return changed;
+}
+
+static bool drawActionParameterEditor(json& param, size_t paramIndex) {
+    (void)paramIndex;
+    int typeId = jsonIntOrDefault(param, "type_id", -1);
+    if (!param.contains("values")) param["values"] = json::array();
+
+    ImGui::Text("type_id: %d", typeId);
+    bool changed = false;
+    json& values = param["values"];
+
+    switch (typeId) {
+    case GUI_PARAM_FLAG: {
+        bool value = values.is_boolean() ? values.get<bool>() : false;
+        if (ImGui::Checkbox("Enabled", &value)) {
+            values = value;
+            changed = true;
+        }
+        break;
+    }
+    case GUI_PARAM_STRING: {
+        std::array<char, 512> buf{};
+        copyToBuffer(buf, values.is_string() ? values.get<std::string>() : "");
+        if (ImGui::InputTextMultiline("Value", buf.data(), buf.size(), ImVec2(-FLT_MIN, 72.0f))) {
+            values = std::string(buf.data());
+            changed = true;
+        }
+        break;
+    }
+    case GUI_PARAM_SOUND:
+    case GUI_PARAM_FIELD_NAME:
+    case GUI_PARAM_PROJECTILE:
+    case GUI_PARAM_PROJECTILE_OR_WORLD_POINT_2D:
+        changed = drawJsonStringListEditor(values, "Add FourCC", 100);
+        break;
+    case GUI_PARAM_WORLD_POINT_2D:
+        changed = drawJsonPoint2ListEditor(values);
+        break;
+    case GUI_PARAM_WORLD_POINT_3D:
+        changed = drawJsonPoint3ListEditor(values);
+        break;
+    case GUI_PARAM_FIXED:
+    case GUI_PARAM_WORLD_DISTANCE:
+    case GUI_PARAM_ANGLE:
+        changed = drawJsonDoubleListEditor(values, "Add Value");
+        break;
+    default:
+        changed = drawJsonIntListEditor(values, "Add Value");
+        break;
+    }
+
+    if (changed) {
+        std::string dump = values.dump();
+        (void)dump;
+    } else {
+        std::string valuesDump = values.dump(2);
+        ImGui::SeparatorText("Current JSON");
+        ImGui::TextWrapped("%s", valuesDump.c_str());
+    }
+    return changed;
+}
+
+static void markCurrentActionDirty(AppState& state) {
+    state.actionsDirty = true;
+    if (state.selectedActionIndex >= 0) {
+        state.dirtyActionIndices.insert(state.selectedActionIndex);
+    }
+}
+
+static void remapDirtyIndicesAfterInsert(AppState& state, int insertIndex) {
+    std::set<int> remapped;
+    for (int idx : state.dirtyActionIndices) {
+        remapped.insert(idx >= insertIndex ? idx + 1 : idx);
+    }
+    state.dirtyActionIndices.swap(remapped);
+}
+
+static void remapDirtyIndicesAfterDelete(AppState& state, int deleteIndex) {
+    std::set<int> remapped;
+    for (int idx : state.dirtyActionIndices) {
+        if (idx == deleteIndex) continue;
+        remapped.insert(idx > deleteIndex ? idx - 1 : idx);
+    }
+    state.dirtyActionIndices.swap(remapped);
+}
+
+static int nextAvailableActionId(const json& actions) {
+    int maxId = 0;
+    if (actions.is_array()) {
+        for (const json& action : actions) {
+            maxId = (std::max)(maxId, jsonIntOrDefault(action, "id"));
+        }
+    }
+    return maxId + 1;
+}
+
+static json makeDefaultActionDoc(const json& actions) {
+    json action = json::object();
+    action["id"] = nextAvailableActionId(actions);
+    action["type"] = "";
+    action["name"] = "New Action";
+    action["expiration_mode"] = "trigger";
+    action["expiration_mode_id"] = 0;
+    action["flags_raw"] = 0;
+    action["flags"] = json::array();
+    action["trigger_time_lower_bound_seconds"] = 0.0;
+    action["trigger_time_delta_seconds"] = 0.0;
+    action["indent"] = 0;
+    action["parameter_data_offset"] = 0;
+    action["parameter_data_size"] = 0;
+    action["parameter_data_hex"] = "";
+    action["parameters"] = json::array();
+    return action;
 }
 
 static bool isKnownMeshTag(const AppState& s, const std::string& value) {
@@ -1149,6 +2291,24 @@ static void drawWorkflowPanel(AppState& state) {
     ImGui::End();
 }
 
+static void setActionsStatus(AppState& state, const std::string& message, bool writeToLog) {
+    state.actionsStatus = message;
+    if (writeToLog) {
+        state.runner.append("[actions] " + message);
+    }
+}
+
+static void logActionSummary(AppState& state, const json& action, const char* phase) {
+    std::ostringstream oss;
+    oss << "[actions] " << phase
+        << " id=" << jsonIntOrDefault(action, "id")
+        << " type=" << jsonStringOrEmpty(action, "type")
+        << " offset=" << jsonIntOrDefault(action, "parameter_data_offset")
+        << " size=" << jsonIntOrDefault(action, "parameter_data_size")
+        << " hex=" << jsonStringOrEmpty(action, "parameter_data_hex");
+    state.runner.append(oss.str());
+}
+
 static void drawLogPanel(AppState& state) {
     ImGui::Begin("Command Log");
     if (ImGui::Button("Clear Log")) {
@@ -1199,6 +2359,214 @@ static void drawLogPanel(AppState& state) {
     if (state.followLog && shouldStickToBottom) {
         ImGui::SetScrollHereY(1.0f);
     }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+static void drawActionsPanel(AppState& state) {
+    ImGui::Begin("Actions");
+
+    ImGui::TextWrapped("Safe path right now: fixed-size action edits. Changing integers, flags, IDs, angles, distances, and point coordinates is supported as long as the serialized parameter size does not change.");
+    ImGui::TextDisabled("Size-changing action edits are currently blocked on save instead of being written riskily.");
+    ImGui::Separator();
+
+    if (ImGui::Button("Load Actions")) {
+        loadActionsDoc(state);
+    }
+    ImGui::SameLine();
+    bool canSave = state.actionsLoaded && state.actionsDirty;
+    if (!canSave) ImGui::BeginDisabled();
+    if (ImGui::Button("Save Actions")) {
+        saveActionsDoc(state);
+    }
+    if (!canSave) ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (state.actionsDirty) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "Modified");
+    } else {
+        ImGui::TextDisabled("Clean");
+    }
+
+    if (state.actionsLoaded) {
+        json& actionsToolbar = state.actionsDoc["actions"];
+        if (ImGui::Button("Add Action")) {
+            int insertIndex = actionsToolbar.is_array() ? static_cast<int>(actionsToolbar.size()) : 0;
+            remapDirtyIndicesAfterInsert(state, insertIndex);
+            actionsToolbar.push_back(makeDefaultActionDoc(actionsToolbar));
+            state.selectedActionIndex = insertIndex;
+            state.actionsDirty = true;
+            state.actionsStructureDirty = true;
+            state.dirtyActionIndices.insert(insertIndex);
+            setActionsStatus(state, "Added action " + std::to_string(jsonIntOrDefault(actionsToolbar[static_cast<size_t>(insertIndex)], "id")));
+        }
+        ImGui::SameLine();
+        bool canDuplicate = state.selectedActionIndex >= 0 && state.selectedActionIndex < static_cast<int>(actionsToolbar.size());
+        if (!canDuplicate) ImGui::BeginDisabled();
+        if (ImGui::Button("Duplicate Action")) {
+            json clone = actionsToolbar[static_cast<size_t>(state.selectedActionIndex)];
+            clone["id"] = nextAvailableActionId(actionsToolbar);
+            std::string name = jsonStringOrEmpty(clone, "name");
+            if (!name.empty()) clone["name"] = name + " Copy";
+            int insertIndex = state.selectedActionIndex + 1;
+            remapDirtyIndicesAfterInsert(state, insertIndex);
+            actionsToolbar.insert(actionsToolbar.begin() + static_cast<ptrdiff_t>(insertIndex), clone);
+            state.selectedActionIndex = insertIndex;
+            state.actionsDirty = true;
+            state.actionsStructureDirty = true;
+            state.dirtyActionIndices.insert(insertIndex);
+            setActionsStatus(state, "Duplicated action to " + std::to_string(jsonIntOrDefault(clone, "id")));
+        }
+        if (!canDuplicate) ImGui::EndDisabled();
+        ImGui::SameLine();
+        bool canDelete = canDuplicate;
+        if (!canDelete) ImGui::BeginDisabled();
+        if (ImGui::Button("Delete Action")) {
+            int deleteIndex = state.selectedActionIndex;
+            int deletedId = jsonIntOrDefault(actionsToolbar[static_cast<size_t>(deleteIndex)], "id");
+            actionsToolbar.erase(actionsToolbar.begin() + static_cast<ptrdiff_t>(deleteIndex));
+            remapDirtyIndicesAfterDelete(state, deleteIndex);
+            state.actionsDirty = true;
+            state.actionsStructureDirty = true;
+            if (actionsToolbar.empty()) {
+                state.selectedActionIndex = -1;
+            } else if (deleteIndex >= static_cast<int>(actionsToolbar.size())) {
+                state.selectedActionIndex = static_cast<int>(actionsToolbar.size()) - 1;
+            } else {
+                state.selectedActionIndex = deleteIndex;
+            }
+            setActionsStatus(state, "Deleted action " + std::to_string(deletedId));
+        }
+        if (!canDelete) ImGui::EndDisabled();
+    }
+
+    if (!state.actionsStatus.empty()) {
+        ImGui::TextWrapped("%s", state.actionsStatus.c_str());
+    }
+
+    fs::path path = actionsJsonPath(state);
+    ImGui::TextDisabled("%s", path.string().c_str());
+    ImGui::Separator();
+
+    if (!state.actionsLoaded) {
+        ImGui::TextWrapped("Load the extracted map's actions.json to browse and edit action records.");
+        ImGui::End();
+        return;
+    }
+
+    json& actions = state.actionsDoc["actions"];
+    ImGui::InputText("Filter", state.actionFilter.data(), state.actionFilter.size());
+    std::string filter = state.actionFilter.data();
+
+    ImGui::BeginChild("actions_list", ImVec2(380.0f, 0.0f), true);
+    for (size_t i = 0; i < actions.size(); ++i) {
+        json& action = actions[i];
+        std::string idText = std::to_string(jsonIntOrDefault(action, "id"));
+        std::string type = jsonStringOrEmpty(action, "type");
+        std::string name = jsonStringOrEmpty(action, "name");
+        std::string label = idText + " | " + (type.empty() ? "<container>" : type) + " | " + (name.empty() ? "<unnamed>" : name);
+        if (!filter.empty()) {
+            std::string haystack = label;
+            if (haystack.find(filter) == std::string::npos) continue;
+        }
+        const bool selected = (static_cast<int>(i) == state.selectedActionIndex);
+        if (ImGui::Selectable(label.c_str(), selected)) {
+            state.selectedActionIndex = static_cast<int>(i);
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    ImGui::BeginChild("actions_editor", ImVec2(0.0f, 0.0f), true);
+    if (state.selectedActionIndex < 0 || state.selectedActionIndex >= static_cast<int>(actions.size())) {
+        ImGui::TextWrapped("Select an action to inspect or edit it.");
+        ImGui::EndChild();
+        ImGui::End();
+        return;
+    }
+
+    json& action = actions[static_cast<size_t>(state.selectedActionIndex)];
+
+    std::array<char, 512> nameBuf{};
+    copyToBuffer(nameBuf, jsonStringOrEmpty(action, "name"));
+    std::array<char, 64> typeBuf{};
+    copyToBuffer(typeBuf, jsonStringOrEmpty(action, "type"));
+    int actionId = jsonIntOrDefault(action, "id");
+    int indent = jsonIntOrDefault(action, "indent");
+    int flagsRaw = jsonIntOrDefault(action, "flags_raw");
+    int expirationModeId = jsonIntOrDefault(action, "expiration_mode_id", guiExpirationModeIdFromName(jsonStringOrEmpty(action, "expiration_mode")));
+    float lower = static_cast<float>(jsonDoubleOrDefault(action, "trigger_time_lower_bound_seconds"));
+    float delta = static_cast<float>(jsonDoubleOrDefault(action, "trigger_time_delta_seconds"));
+
+    ImGui::Text("Action %d", actionId);
+    ImGui::Separator();
+
+    if (ImGui::InputText("Name", nameBuf.data(), nameBuf.size())) {
+        action["name"] = std::string(nameBuf.data());
+        markCurrentActionDirty(state);
+    }
+    if (ImGui::InputText("Type", typeBuf.data(), typeBuf.size())) {
+        action["type"] = std::string(typeBuf.data());
+        markCurrentActionDirty(state);
+    }
+    const char* expirationModes[] = {
+        "trigger",
+        "execution",
+        "successful_execution",
+        "never",
+        "failed_execution"
+    };
+    if (expirationModeId < 0 || expirationModeId > 4) expirationModeId = 0;
+    if (ImGui::Combo("Expiration Mode", &expirationModeId, expirationModes, IM_ARRAYSIZE(expirationModes))) {
+        action["expiration_mode_id"] = expirationModeId;
+        action["expiration_mode"] = std::string(guiExpirationModeName(expirationModeId));
+        markCurrentActionDirty(state);
+    }
+    if (ImGui::InputInt("ID", &actionId)) {
+        action["id"] = actionId;
+        markCurrentActionDirty(state);
+    }
+    if (ImGui::InputInt("Indent", &indent)) {
+        action["indent"] = indent;
+        markCurrentActionDirty(state);
+    }
+    if (ImGui::InputInt("Flags Raw", &flagsRaw)) {
+        action["flags_raw"] = flagsRaw;
+        syncActionFlagsJson(action);
+        markCurrentActionDirty(state);
+    }
+    if (ImGui::InputFloat("Trigger Lower (s)", &lower, 0.5f, 5.0f, "%.4f")) {
+        action["trigger_time_lower_bound_seconds"] = lower;
+        markCurrentActionDirty(state);
+    }
+    if (ImGui::InputFloat("Trigger Delta (s)", &delta, 0.5f, 5.0f, "%.4f")) {
+        action["trigger_time_delta_seconds"] = delta;
+        markCurrentActionDirty(state);
+    }
+
+    ImGui::SeparatorText("Parameters");
+    if (action.contains("parameters") && action["parameters"].is_array()) {
+        for (size_t pi = 0; pi < action["parameters"].size(); ++pi) {
+            json& param = action["parameters"][pi];
+            std::string paramName = jsonStringOrEmpty(param, "name");
+            std::string paramType = jsonStringOrEmpty(param, "type");
+            if (ImGui::TreeNode((paramName + " (" + paramType + ")##param" + std::to_string(pi)).c_str())) {
+                if (drawActionParameterEditor(param, pi)) {
+                    markCurrentActionDirty(state);
+                }
+                ImGui::TreePop();
+            }
+        }
+    } else {
+        ImGui::TextDisabled("No parameters.");
+    }
+
+    if (action.contains("parameter_data_hex")) {
+        ImGui::SeparatorText("Raw Parameter Hex");
+        std::string hex = jsonStringOrEmpty(action, "parameter_data_hex");
+        ImGui::TextWrapped("%s", hex.c_str());
+    }
+
     ImGui::EndChild();
     ImGui::End();
 }
@@ -1267,8 +2635,9 @@ int main(int argc, char** argv) {
         drawTopBar(state);
         ImGui::End();
 
-        drawLogPanel(state);
         drawWorkflowPanel(state);
+        drawActionsPanel(state);
+        drawLogPanel(state);
 
         ImGui::Render();
         int display_w, display_h;
