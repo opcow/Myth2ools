@@ -10,9 +10,7 @@
 tools/*
 !tools/import_animations.py
 !tools/create_blend.py
-build/
-build-linux/
-build-root/
+build*/
 ghidra*/
 out/
 extracted_maps/
