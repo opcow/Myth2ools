@@ -24,6 +24,12 @@ MythTech had many other utility functions, but that's the gist of it.
 
 The tools here were based on that old Metrowerks Codewarrior project. First working as MythTech did with Myth: TFL maps, but then moving to focus on Myth II: Soulblighter maps.
 
+## Graphical Shell
+
+These are still mostly console tools, but we have a graphical shell.
+
+![graphical shell](images/imgui.png)
+
 ## New Workflow
 
 As with the original tools, a map maker can work with 2D images to draw in the terrain type flags, but we can use the displacement.obj in Blender to precisely create terrain flags in 3D at the triangle level.
@@ -37,8 +43,6 @@ And, of course, you can use Blender to create or modify the 3D map surface.
 And place units, monsters, and sounds. (Models and other assets are export only right now.)
 
 ![Other assets on the map](images/assets.png)
-
-
 
 ## Authoring Tools
 
