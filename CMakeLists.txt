@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Git REQUIRED)
 include(FetchContent)
 
+option(MYTH2OOLS_ENABLE_WAYLAND "Enable Wayland support in GLFW on Linux" OFF)
+
 FetchContent_Declare(
     glfw
     GIT_REPOSITORY https://github.com/glfw/glfw.git
@@ -14,6 +16,14 @@ FetchContent_Declare(
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+if(UNIX AND NOT APPLE)
+    if(MYTH2OOLS_ENABLE_WAYLAND)
+        set(GLFW_BUILD_WAYLAND ON CACHE BOOL "" FORCE)
+    else()
+        set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
+    endif()
+    set(GLFW_BUILD_X11 ON CACHE BOOL "" FORCE)
+endif()
 FetchContent_MakeAvailable(glfw)
 
 FetchContent_Declare(
