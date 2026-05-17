@@ -28,7 +28,7 @@ The tools here were based on that old Metrowerks Codewarrior project. First work
 
 These are still mostly console tools, but we have a graphical shell.
 
-![graphical shell](images/imgui.png)
+![Image of the imgui graphical shell](images/imgui-1.png)
 
 ## New Workflow
 
