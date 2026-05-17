@@ -2460,14 +2460,13 @@ static void drawActionsPanel(AppState& state) {
     ImGui::BeginChild("actions_list", ImVec2(380.0f, 0.0f), true);
     for (size_t i = 0; i < actions.size(); ++i) {
         json& action = actions[i];
-        std::string idText = std::to_string(jsonIntOrDefault(action, "id"));
-        std::string type = jsonStringOrEmpty(action, "type");
         std::string name = jsonStringOrEmpty(action, "name");
-        std::string label = idText + " | " + (type.empty() ? "<container>" : type) + " | " + (name.empty() ? "<unnamed>" : name);
+        std::string visibleLabel = name.empty() ? "<unnamed>" : name;
         if (!filter.empty()) {
-            std::string haystack = label;
+            std::string haystack = visibleLabel;
             if (haystack.find(filter) == std::string::npos) continue;
         }
+        std::string label = visibleLabel + "##action" + std::to_string(i);
         const bool selected = (static_cast<int>(i) == state.selectedActionIndex);
         if (ImGui::Selectable(label.c_str(), selected)) {
             state.selectedActionIndex = static_cast<int>(i);
