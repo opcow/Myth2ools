@@ -189,11 +189,26 @@ set(M2OOLS_GUI_ASSET_COMMANDS
 if(NOT M2OOLS_GUI_SOURCE_SCRIPTS_DIR STREQUAL M2OOLS_GUI_SCRIPTS_DIR)
     foreach(script_file IN LISTS M2OOLS_GUI_SCRIPT_FILES)
         if(NOT IS_DIRECTORY "${script_file}")
-            list(APPEND M2OOLS_GUI_ASSET_COMMANDS
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${script_file}"
-                    "${M2OOLS_GUI_SCRIPTS_DIR}/"
-            )
+            get_filename_component(script_name "${script_file}" NAME)
+            if(WIN32)
+                if(script_name MATCHES "\\.bat$")
+                    list(APPEND M2OOLS_GUI_ASSET_COMMANDS
+                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            "${script_file}"
+                            "${M2OOLS_GUI_SCRIPTS_DIR}/"
+                    )
+                endif()
+            else()
+                if(script_name MATCHES "\\.sh$")
+                    list(APPEND M2OOLS_GUI_ASSET_COMMANDS
+                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            "${script_file}"
+                            "${M2OOLS_GUI_SCRIPTS_DIR}/"
+                        COMMAND chmod +x
+                            "${M2OOLS_GUI_SCRIPTS_DIR}/${script_name}"
+                    )
+                endif()
+            endif()
         endif()
     endforeach()
 endif()
@@ -304,11 +319,26 @@ foreach(target IN LISTS CLI_RELEASE_TARGETS)
 endforeach()
 foreach(script_file IN LISTS M2OOLS_GUI_SCRIPT_FILES)
     if(NOT IS_DIRECTORY "${script_file}")
-        list(APPEND PACKAGE_COPY_COMMANDS
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${script_file}"
-                "${PACKAGE_STAGING_DIR}/myth2ools_gui/scripts/"
-        )
+        get_filename_component(script_name "${script_file}" NAME)
+        if(WIN32)
+            if(script_name MATCHES "\\.bat$")
+                list(APPEND PACKAGE_COPY_COMMANDS
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${script_file}"
+                        "${PACKAGE_STAGING_DIR}/myth2ools_gui/scripts/"
+                )
+            endif()
+        else()
+            if(script_name MATCHES "\\.sh$")
+                list(APPEND PACKAGE_COPY_COMMANDS
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${script_file}"
+                        "${PACKAGE_STAGING_DIR}/myth2ools_gui/scripts/"
+                    COMMAND chmod +x
+                        "${PACKAGE_STAGING_DIR}/myth2ools_gui/scripts/${script_name}"
+                )
+            endif()
+        endif()
     endif()
 endforeach()
 
