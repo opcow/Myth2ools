@@ -33,6 +33,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.12.0
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 find_package(OpenGL REQUIRED)
 
 add_library(imgui_lib
@@ -72,12 +79,14 @@ add_executable(media_dump myth2/media_dump.cpp)
 add_executable(core_dump myth2/core_dump.cpp)
 add_executable(proj_dump myth2/proj_dump.cpp)
 add_executable(build_plugin myth2/build_plugin.cpp)
+target_link_libraries(build_plugin PRIVATE nlohmann_json::nlohmann_json)
 add_executable(export_map_actions myth2/export_map_actions.cpp)
 add_executable(export_map_objects myth2/export_map_objects.cpp)
 add_executable(build_mesh myth2/build_mesh.cpp)
 add_executable(mesh_verify myth2/mesh_verify.cpp)
 add_executable(myth2ools_gui gui/myth2ools_gui.cpp)
 target_link_libraries(myth2ools_gui PRIVATE imgui_lib)
+target_link_libraries(myth2ools_gui PRIVATE nlohmann_json::nlohmann_json)
 if(WIN32)
     target_link_libraries(myth2ools_gui PRIVATE Ole32 Shell32)
 endif()

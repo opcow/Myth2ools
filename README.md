@@ -245,6 +245,30 @@ references between actions and placed markers. It writes:
   flags, timing, indentation, and typed parameters
 - `assets/actions/actions.txt` — compact human-readable action listing
 
+To inspect action-to-action links and find dangling references, run:
+
+```bash
+python tools/analyze_action_refs.py out/le3e
+python tools/analyze_action_refs.py out/le3e --json-out out/le3e/assets/actions/action_refs_report.json
+```
+
+It reports inbound references, outbound references, and missing target action
+ids from `assets/actions/actions.json`.
+
+To export a Loathing-style companion text from the lossless action JSON, run:
+
+```bash
+python tools/export_loathing_actions.py out/le3e
+```
+
+This writes:
+
+- `assets/actions/actions_loathing.txt` — Loathing-style readable action text
+
+This file is intended for human inspection and Loathing-import experiments.
+`assets/actions/actions.json` remains the exact rebuild format used by
+`build_plugin`.
+
 ### `myth2ools_gui`
 
 ```bash
