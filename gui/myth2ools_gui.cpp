@@ -1,6 +1,10 @@
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_opengl2.h"
+
+#include "fonts/inter_regular.inl"
+#include "fonts/jetbrains_mono.inl"
 
 #include <GLFW/glfw3.h>
 #include <nlohmann/json.hpp>
@@ -129,6 +133,9 @@ static bool recomputeActionDocLayout(json& doc, std::string& error);
 static void setActionsStatus(struct AppState& state, const std::string& message, bool writeToLog = true);
 static void logActionSummary(struct AppState& state, const json& action, const char* phase);
 static bool guiParseHexBytes(const std::string& s, std::vector<uint8_t>& out);
+static void pushPrimaryButtonStyle();
+static void popPrimaryButtonStyle();
+extern ImFont* g_monoFont;
 
 #if defined(_WIN32)
 static std::wstring widen(const char* text) {
@@ -573,7 +580,13 @@ struct AppState {
     std::string settingsStatus;
     std::string actionsStatus;
     std::array<char, 128> actionFilter{};
+    std::array<char, 128> logFilter{};
     int selectedActionIndex = -1;
+    enum PendingDiscard { PENDING_NONE = 0, PENDING_RELOAD = 1, PENDING_QUIT = 2, PENDING_RUN = 3 };
+    PendingDiscard pendingDiscard = PENDING_NONE;
+    bool openDiscardPopup = false;
+    std::string pendingRunCommand;
+    std::string pendingRunLabel;
     bool actionsLoaded = false;
     bool actionsDirty = false;
     bool actionsStructureDirty = false;
@@ -673,9 +686,6 @@ static std::vector<std::string> collectWorkflowIssues(const AppState& state) {
     addIssue(validatePathText(state.pluginOutput.data(), "Plugin Output File or Folder"));
     if (std::strlen(state.blenderPath.data()) > 0) {
         addIssue(validatePathText(state.blenderPath.data(), "Blender Executable", true));
-    }
-    if (state.actionsLoaded && state.actionsDirty) {
-        issues.push_back("Actions have unsaved changes. Save Actions before building a plugin.");
     }
     return issues;
 }
@@ -2155,139 +2165,165 @@ static void drawWorkflowPanel(AppState& state) {
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
     const float halfButtonWidth = (availWidth - spacing) * 0.5f;
 
-    labeledInputText("Tags Source or Plugin File", "##tagsSource", state.tagsSource);
-    if (halfButtonWidth >= 120.0f) {
-        if (ImGui::Button("Tags Folder", ImVec2(halfButtonWidth, 0.0f))) {
-            pickFolderIntoBuffer(state.tagsSource, repoDir);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Plugin File", ImVec2(halfButtonWidth, 0.0f))) {
-            pickFileIntoBuffer(state.tagsSource, repoDir, "Select Plugin File");
-        }
-    } else {
-        if (ImGui::Button("Tags Folder", ImVec2(-1.0f, 0.0f))) {
-            pickFolderIntoBuffer(state.tagsSource, repoDir);
-        }
-        if (ImGui::Button("Plugin File", ImVec2(-1.0f, 0.0f))) {
-            pickFileIntoBuffer(state.tagsSource, repoDir, "Select Plugin File");
-        }
-    }
+    const ImGuiTreeNodeFlags defaultOpen = ImGuiTreeNodeFlags_DefaultOpen;
 
-    labeledInputText("Mesh Tag", "##meshTag", state.meshTag);
-    if (std::strcmp(state.lastScannedTagsSource.c_str(), state.tagsSource.data()) != 0) {
-        state.mapScanStatus = "Tags source changed. Refresh map list.";
-    }
-    if (ImGui::Button("Refresh Map List", ImVec2(-1.0f, 0.0f))) {
-        refreshAvailableMeshTags(state);
-        syncDerivedPaths(state);
-    }
-    std::string selectedDisplay = selectedMeshChoiceDisplay(state);
-    if (ImGui::BeginCombo("##meshTagPicker", selectedDisplay.c_str())) {
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::InputText("##meshTagFilter", state.meshTagFilter.data(), state.meshTagFilter.size());
-        ImGui::Separator();
-        std::string filter = state.meshTagFilter.data();
-        for (const MeshChoice& choice : state.availableMeshTags) {
-            std::string display = meshChoiceDisplay(choice);
-            if (!filter.empty() &&
-                choice.tag.find(filter) == std::string::npos &&
-                choice.campaignLabel.find(filter) == std::string::npos &&
-                choice.name.find(filter) == std::string::npos) {
-                continue;
+    if (ImGui::CollapsingHeader("Source", defaultOpen)) {
+        labeledInputText("Tags Source or Plugin File", "##tagsSource", state.tagsSource);
+        if (halfButtonWidth >= 120.0f) {
+            if (ImGui::Button("Tags Folder", ImVec2(halfButtonWidth, 0.0f))) {
+                pickFolderIntoBuffer(state.tagsSource, repoDir);
             }
-            const bool selected = (choice.tag == state.meshTag.data());
-            if (ImGui::Selectable(display.c_str(), selected)) {
-                copyToBuffer(state.meshTag, choice.tag);
-                syncDerivedPaths(state);
+            ImGui::SameLine();
+            if (ImGui::Button("Plugin File", ImVec2(halfButtonWidth, 0.0f))) {
+                pickFileIntoBuffer(state.tagsSource, repoDir, "Select Plugin File");
             }
-            if (selected) ImGui::SetItemDefaultFocus();
+        } else {
+            if (ImGui::Button("Tags Folder", ImVec2(-1.0f, 0.0f))) {
+                pickFolderIntoBuffer(state.tagsSource, repoDir);
+            }
+            if (ImGui::Button("Plugin File", ImVec2(-1.0f, 0.0f))) {
+                pickFileIntoBuffer(state.tagsSource, repoDir, "Select Plugin File");
+            }
         }
-        ImGui::EndCombo();
-    }
-    if (!state.mapScanStatus.empty()) {
-        ImGui::TextDisabled("%s", state.mapScanStatus.c_str());
+
+        labeledInputText("Mesh Tag", "##meshTag", state.meshTag);
+        if (std::strcmp(state.lastScannedTagsSource.c_str(), state.tagsSource.data()) != 0) {
+            state.mapScanStatus = "Tags source changed. Refresh map list.";
+        }
+        if (ImGui::Button("Refresh Map List", ImVec2(-1.0f, 0.0f))) {
+            refreshAvailableMeshTags(state);
+            syncDerivedPaths(state);
+        }
+        std::string selectedDisplay = selectedMeshChoiceDisplay(state);
+        if (ImGui::BeginCombo("##meshTagPicker", selectedDisplay.c_str())) {
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputText("##meshTagFilter", state.meshTagFilter.data(), state.meshTagFilter.size());
+            ImGui::Separator();
+            std::string filter = state.meshTagFilter.data();
+            for (const MeshChoice& choice : state.availableMeshTags) {
+                std::string display = meshChoiceDisplay(choice);
+                if (!filter.empty() &&
+                    choice.tag.find(filter) == std::string::npos &&
+                    choice.campaignLabel.find(filter) == std::string::npos &&
+                    choice.name.find(filter) == std::string::npos) {
+                    continue;
+                }
+                const bool selected = (choice.tag == state.meshTag.data());
+                if (ImGui::Selectable(display.c_str(), selected)) {
+                    copyToBuffer(state.meshTag, choice.tag);
+                    syncDerivedPaths(state);
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        if (!state.mapScanStatus.empty()) {
+            ImGui::TextDisabled("%s", state.mapScanStatus.c_str());
+        }
     }
 
-    labeledInputText("Extracted Map Folder", "##outputFolder", state.outputFolder);
-    if (ImGui::Button("Browse Output", ImVec2(-1.0f, 0.0f))) {
-        pickFolderIntoBuffer(state.outputFolder, repoDir);
+    if (ImGui::CollapsingHeader("Output", defaultOpen)) {
+        labeledInputText("Extracted Map Folder", "##outputFolder", state.outputFolder);
+        if (ImGui::Button("Browse Output", ImVec2(-1.0f, 0.0f))) {
+            pickFolderIntoBuffer(state.outputFolder, repoDir);
+        }
+
+        labeledInputText("Plugin Output File or Folder", "##pluginOutput", state.pluginOutput);
+        if (ImGui::Button("Browse Plugin", ImVec2(-1.0f, 0.0f))) {
+            saveFileIntoBuffer(state.pluginOutput, repoDir, "Select Plugin Output");
+        }
+        ImGui::TextDisabled("Build Plugin uses: extracted map folder -> plugin output path. If plugin output is a folder, Myth2ools appends <meshtag>_plugin.");
+
+        labeledInputText("Blender Executable", "##blenderPath", state.blenderPath);
+        if (ImGui::Button("Browse Blender", ImVec2(-1.0f, 0.0f))) {
+            pickFileIntoBuffer(state.blenderPath, repoDir, "Select Blender Executable");
+        }
     }
 
-    labeledInputText("Plugin Output File or Folder", "##pluginOutput", state.pluginOutput);
-    if (ImGui::Button("Browse Plugin", ImVec2(-1.0f, 0.0f))) {
-        saveFileIntoBuffer(state.pluginOutput, repoDir, "Select Plugin Output");
-    }
-    ImGui::TextDisabled("Build Plugin uses: extracted map folder -> plugin output path. If plugin output is a folder, Myth2ools appends <meshtag>_plugin.");
-
-    labeledInputText("Blender Executable", "##blenderPath", state.blenderPath);
-    if (ImGui::Button("Browse Blender", ImVec2(-1.0f, 0.0f))) {
-        pickFileIntoBuffer(state.blenderPath, repoDir, "Select Blender Executable");
-    }
-
-    ImGui::Checkbox("Overwrite exports", &state.overwrite);
-    ImGui::Checkbox("Write ORA from extract_map", &state.writeOra);
-    ImGui::Checkbox("Omit static animation snapshots in map_combined.obj", &state.exportNoAnimationSnapshots);
-    ImGui::Checkbox("Use --edit for build_plugin", &state.editOnBuild);
-    if (ImGui::Checkbox("Auto-append selected map tag to output paths", &state.autoAppendMeshTag)) {
-        syncDerivedPaths(state);
-    }
-    if (ImGui::Button("Save Settings")) {
-        state.settingsStatus = saveSettings(state) ? "Settings saved." : "Failed to save settings.";
-    }
-    if (!state.settingsStatus.empty()) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("%s", state.settingsStatus.c_str());
+    if (ImGui::CollapsingHeader("Options")) {
+        ImGui::Checkbox("Overwrite exports", &state.overwrite);
+        ImGui::Checkbox("Write ORA from extract_map", &state.writeOra);
+        ImGui::Checkbox("Omit static animation snapshots in map_combined.obj", &state.exportNoAnimationSnapshots);
+        ImGui::Checkbox("Use --edit for build_plugin", &state.editOnBuild);
+        if (ImGui::Checkbox("Auto-append selected map tag to output paths", &state.autoAppendMeshTag)) {
+            syncDerivedPaths(state);
+        }
+        if (ImGui::Button("Save Settings")) {
+            state.settingsStatus = saveSettings(state) ? "Settings saved." : "Failed to save settings.";
+        }
+        if (!state.settingsStatus.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", state.settingsStatus.c_str());
+        }
     }
 
     bool ready = hasRequiredLayout(state);
-    std::string scriptsText = state.scriptDir.string();
-    std::string toolsText = state.toolDir.string();
     const std::vector<std::string> workflowIssues = collectWorkflowIssues(state);
-    if (!ready) {
-        scriptsText += " (missing required files)";
-        toolsText += " (missing required files)";
-    }
-    ImGui::SeparatorText("Resolved Paths");
-    ImGui::TextWrapped("Scripts: %s", scriptsText.c_str());
-    ImGui::TextWrapped("Tools: %s", toolsText.c_str());
 
-    const bool busy = state.runner.running.load();
-    const bool validWorkflow = workflowIssues.empty();
-    if (busy || !ready || !validWorkflow) ImGui::BeginDisabled();
-    const float thirdButtonWidth = (availWidth - spacing * 2.0f) / 3.0f;
-    if (thirdButtonWidth >= 110.0f) {
-        if (ImGui::Button("Extract Assets", ImVec2(thirdButtonWidth, 0))) {
-            state.runner.start(buildExtractAssetsCommand(state));
+    if (ImGui::CollapsingHeader("Run", defaultOpen)) {
+        std::string scriptsText = state.scriptDir.string();
+        std::string toolsText = state.toolDir.string();
+        if (!ready) {
+            scriptsText += " (missing required files)";
+            toolsText += " (missing required files)";
         }
-        ImGui::SameLine();
-        if (ImGui::Button("Build Plugin", ImVec2(thirdButtonWidth, 0))) {
-            state.runner.start(buildPluginCommand(state));
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Create Blend", ImVec2(thirdButtonWidth, 0))) {
-            state.runner.start(buildCreateBlendCommand(state));
-        }
-    } else {
-        if (ImGui::Button("Extract Assets", ImVec2(-1.0f, 0))) {
-            state.runner.start(buildExtractAssetsCommand(state));
-        }
-        if (ImGui::Button("Build Plugin", ImVec2(-1.0f, 0))) {
-            state.runner.start(buildPluginCommand(state));
-        }
-        if (ImGui::Button("Create Blend", ImVec2(-1.0f, 0))) {
-            state.runner.start(buildCreateBlendCommand(state));
-        }
-    }
-    if (busy || !ready || !validWorkflow) ImGui::EndDisabled();
+        ImGui::SeparatorText("Resolved Paths");
+        ImGui::TextWrapped("Scripts: %s", scriptsText.c_str());
+        ImGui::TextWrapped("Tools: %s", toolsText.c_str());
 
-    ImGui::Separator();
-    if (!ready) {
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "Could not resolve the Myth2ools scripts/tools layout yet.");
+        const bool busy = state.runner.running.load();
+        const bool validWorkflow = workflowIssues.empty();
+        auto launchOrGuard = [&](const std::string& command, const char* label) {
+            if (state.actionsLoaded && state.actionsDirty) {
+                state.pendingDiscard = AppState::PENDING_RUN;
+                state.pendingRunCommand = command;
+                state.pendingRunLabel = label;
+                state.openDiscardPopup = true;
+            } else {
+                state.runner.start(command);
+            }
+        };
+
+        if (busy || !ready || !validWorkflow) ImGui::BeginDisabled();
+        pushPrimaryButtonStyle();
+        const float thirdButtonWidth = (availWidth - spacing * 2.0f) / 3.0f;
+        if (thirdButtonWidth >= 110.0f) {
+            if (ImGui::Button("Extract Assets", ImVec2(thirdButtonWidth, 0))) {
+                launchOrGuard(buildExtractAssetsCommand(state), "Extract Assets");
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Build Plugin", ImVec2(thirdButtonWidth, 0))) {
+                launchOrGuard(buildPluginCommand(state), "Build Plugin");
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Create Blend", ImVec2(thirdButtonWidth, 0))) {
+                launchOrGuard(buildCreateBlendCommand(state), "Create Blend");
+            }
+        } else {
+            if (ImGui::Button("Extract Assets", ImVec2(-1.0f, 0))) {
+                launchOrGuard(buildExtractAssetsCommand(state), "Extract Assets");
+            }
+            if (ImGui::Button("Build Plugin", ImVec2(-1.0f, 0))) {
+                launchOrGuard(buildPluginCommand(state), "Build Plugin");
+            }
+            if (ImGui::Button("Create Blend", ImVec2(-1.0f, 0))) {
+                launchOrGuard(buildCreateBlendCommand(state), "Create Blend");
+            }
+        }
+        popPrimaryButtonStyle();
+        if (busy || !ready || !validWorkflow) ImGui::EndDisabled();
+
+        if (!ready || !workflowIssues.empty()) {
+            ImGui::Separator();
+        }
+        if (!ready) {
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "Could not resolve the Myth2ools scripts/tools layout yet.");
+        }
+        for (const std::string& issue : workflowIssues) {
+            ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.35f, 1.0f), "%s", issue.c_str());
+        }
     }
-    for (const std::string& issue : workflowIssues) {
-        ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.35f, 1.0f), "%s", issue.c_str());
-    }
-    ImGui::TextWrapped("This first pass is intentionally small: it wraps the existing extract/build/blend workflow so we can grow the editor around real user paths.");
+
     ImGui::End();
 }
 
@@ -2344,40 +2380,116 @@ static void drawLogPanel(AppState& state) {
     if (!state.logSaveStatus.empty()) {
         ImGui::TextWrapped("%s", state.logSaveStatus.c_str());
     }
+
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##logFilter", "Filter (case-insensitive substring)", state.logFilter.data(), state.logFilter.size());
+
     ImGui::Separator();
+
+    static std::vector<std::string> logSnapshot;
+    logSnapshot.clear();
+    {
+        std::lock_guard<std::mutex> lock(state.runner.logMutex);
+        logSnapshot.reserve(state.runner.logLines.size());
+        for (const std::string& line : state.runner.logLines) {
+            logSnapshot.push_back(line);
+        }
+    }
+
+    std::string filter = state.logFilter.data();
+    std::string filterLower;
+    filterLower.reserve(filter.size());
+    for (char c : filter) filterLower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+
+    static std::vector<int> visibleLogIndices;
+    visibleLogIndices.clear();
+    visibleLogIndices.reserve(logSnapshot.size());
+    if (filterLower.empty()) {
+        for (size_t i = 0; i < logSnapshot.size(); ++i) {
+            visibleLogIndices.push_back(static_cast<int>(i));
+        }
+    } else {
+        for (size_t i = 0; i < logSnapshot.size(); ++i) {
+            const std::string& line = logSnapshot[i];
+            std::string lower;
+            lower.reserve(line.size());
+            for (char c : line) lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+            if (lower.find(filterLower) != std::string::npos) {
+                visibleLogIndices.push_back(static_cast<int>(i));
+            }
+        }
+        ImGui::TextDisabled("%zu of %zu lines", visibleLogIndices.size(), logSnapshot.size());
+    }
+
     static std::string logBuffer;
-    bool shouldStickToBottom = false;
-    ImGui::BeginChild("logscroll");
-    shouldStickToBottom = state.followLog && (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20.0f);
+    size_t totalSize = 0;
+    for (int idx : visibleLogIndices) totalSize += logSnapshot[static_cast<size_t>(idx)].size() + 1;
     logBuffer.clear();
-    std::lock_guard<std::mutex> lock(state.runner.logMutex);
-    for (const std::string& line : state.runner.logLines) {
-        logBuffer += line;
+    logBuffer.reserve(totalSize);
+    for (int idx : visibleLogIndices) {
+        logBuffer.append(logSnapshot[static_cast<size_t>(idx)]);
         logBuffer.push_back('\n');
     }
-    ImGui::TextUnformatted(logBuffer.c_str(), logBuffer.c_str() + logBuffer.size());
-    if (state.followLog && shouldStickToBottom) {
-        ImGui::SetScrollHereY(1.0f);
+
+    static size_t prevLogBufLen = 0;
+    const bool contentGrew = logBuffer.size() > prevLogBufLen;
+    prevLogBufLen = logBuffer.size();
+
+    if (g_monoFont) ImGui::PushFont(g_monoFont);
+
+    const ImGuiID inputId = ImGui::GetID("##logview");
+    char childName[512];
+    std::snprintf(childName, sizeof(childName), "%s/##logview_%08X",
+                  ImGui::GetCurrentWindow()->Name, inputId);
+
+    ImGui::InputTextMultiline(
+        "##logview",
+        logBuffer.empty() ? const_cast<char*>("") : &logBuffer[0],
+        logBuffer.empty() ? 1u : logBuffer.size() + 1,
+        ImVec2(-1.0f, -1.0f),
+        ImGuiInputTextFlags_ReadOnly);
+
+    const bool inputActive = ImGui::IsItemActive();
+    if (state.followLog && contentGrew && !inputActive) {
+        if (ImGuiWindow* child = ImGui::FindWindowByName(childName)) {
+            ImGui::SetScrollY(child, child->ScrollMax.y);
+        }
     }
-    ImGui::EndChild();
+
+    if (g_monoFont) ImGui::PopFont();
     ImGui::End();
 }
 
 static void drawActionsPanel(AppState& state) {
-    ImGui::Begin("Actions");
+    const char* actionsWindowTitle = state.actionsDirty ? "Actions *###Actions" : "Actions###Actions";
+    ImGui::Begin(actionsWindowTitle);
 
     ImGui::TextWrapped("Safe path right now: fixed-size action edits. Changing integers, flags, IDs, angles, distances, and point coordinates is supported as long as the serialized parameter size does not change.");
     ImGui::TextDisabled("Size-changing action edits are currently blocked on save instead of being written riskily.");
     ImGui::Separator();
 
     if (ImGui::Button("Load Actions")) {
-        loadActionsDoc(state);
+        if (state.actionsLoaded && state.actionsDirty) {
+            state.pendingDiscard = AppState::PENDING_RELOAD;
+            state.openDiscardPopup = true;
+        } else {
+            loadActionsDoc(state);
+        }
     }
     ImGui::SameLine();
     bool canSave = state.actionsLoaded && state.actionsDirty;
     if (!canSave) ImGui::BeginDisabled();
+    pushPrimaryButtonStyle();
     if (ImGui::Button("Save Actions")) {
         saveActionsDoc(state);
+    }
+    popPrimaryButtonStyle();
+    if (!canSave) ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (!canSave) ImGui::BeginDisabled();
+    if (ImGui::Button("Discard Changes")) {
+        state.pendingDiscard = AppState::PENDING_RELOAD;
+        state.openDiscardPopup = true;
     }
     if (!canSave) ImGui::EndDisabled();
     ImGui::SameLine();
@@ -2385,6 +2497,87 @@ static void drawActionsPanel(AppState& state) {
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "Modified");
     } else {
         ImGui::TextDisabled("Clean");
+    }
+
+    if (state.openDiscardPopup) {
+        ImGui::OpenPopup("Discard unsaved action changes?##discard");
+        state.openDiscardPopup = false;
+    }
+    if (ImGui::BeginPopupModal("Discard unsaved action changes?##discard", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("You have unsaved action edits.");
+        switch (state.pendingDiscard) {
+        case AppState::PENDING_QUIT:
+            ImGui::Text("Quitting will discard them unless you save first.");
+            break;
+        case AppState::PENDING_RELOAD:
+            ImGui::Text("Reloading from disk will discard them.");
+            break;
+        case AppState::PENDING_RUN:
+            ImGui::Text("Running '%s' uses files on disk and ignores your in-memory edits.", state.pendingRunLabel.c_str());
+            break;
+        default:
+            break;
+        }
+        ImGui::Separator();
+
+        const auto runPending = [&]() {
+            if (!state.pendingRunCommand.empty()) {
+                state.runner.start(state.pendingRunCommand);
+                state.pendingRunCommand.clear();
+                state.pendingRunLabel.clear();
+            }
+        };
+        const auto clearDirty = [&]() {
+            state.actionsDirty = false;
+            state.actionsStructureDirty = false;
+            state.dirtyActionIndices.clear();
+        };
+
+        if (state.pendingDiscard == AppState::PENDING_QUIT || state.pendingDiscard == AppState::PENDING_RUN) {
+            pushPrimaryButtonStyle();
+            if (ImGui::Button("Save and Continue", ImVec2(170.0f, 0.0f))) {
+                AppState::PendingDiscard intent = state.pendingDiscard;
+                if (saveActionsDoc(state)) {
+                    state.pendingDiscard = AppState::PENDING_NONE;
+                    ImGui::CloseCurrentPopup();
+                    if (intent == AppState::PENDING_QUIT) {
+                        glfwSetWindowShouldClose(glfwGetCurrentContext(), GLFW_TRUE);
+                    } else if (intent == AppState::PENDING_RUN) {
+                        runPending();
+                    }
+                }
+            }
+            popPrimaryButtonStyle();
+            ImGui::SameLine();
+        }
+
+        const char* discardLabel =
+            state.pendingDiscard == AppState::PENDING_QUIT  ? "Discard and Quit" :
+            state.pendingDiscard == AppState::PENDING_RUN   ? "Discard and Run"  :
+                                                              "Discard and Reload";
+        if (ImGui::Button(discardLabel, ImVec2(180.0f, 0.0f))) {
+            AppState::PendingDiscard intent = state.pendingDiscard;
+            state.pendingDiscard = AppState::PENDING_NONE;
+            ImGui::CloseCurrentPopup();
+            if (intent == AppState::PENDING_RELOAD) {
+                loadActionsDoc(state);
+            } else if (intent == AppState::PENDING_QUIT) {
+                clearDirty();
+                glfwSetWindowShouldClose(glfwGetCurrentContext(), GLFW_TRUE);
+            } else if (intent == AppState::PENDING_RUN) {
+                clearDirty();
+                runPending();
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f))) {
+            state.pendingDiscard = AppState::PENDING_NONE;
+            state.pendingRunCommand.clear();
+            state.pendingRunLabel.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
 
     if (state.actionsLoaded) {
@@ -2454,24 +2647,51 @@ static void drawActionsPanel(AppState& state) {
     }
 
     json& actions = state.actionsDoc["actions"];
-    ImGui::InputText("Filter", state.actionFilter.data(), state.actionFilter.size());
+    ImGui::InputText("Filter (name, type, id)", state.actionFilter.data(), state.actionFilter.size());
     std::string filter = state.actionFilter.data();
+    std::string filterLower;
+    filterLower.reserve(filter.size());
+    for (char c : filter) filterLower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+
+    std::vector<int> visibleIndices;
+    visibleIndices.reserve(actions.size());
+    for (size_t i = 0; i < actions.size(); ++i) {
+        if (!filterLower.empty()) {
+            const json& a = actions[i];
+            std::string haystack = jsonStringOrEmpty(a, "name");
+            haystack += '\n';
+            haystack += jsonStringOrEmpty(a, "type");
+            haystack += '\n';
+            haystack += std::to_string(jsonIntOrDefault(a, "id"));
+            for (char& c : haystack) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (haystack.find(filterLower) == std::string::npos) continue;
+        }
+        visibleIndices.push_back(static_cast<int>(i));
+    }
+
+    ImGui::TextDisabled("%zu of %zu actions", visibleIndices.size(), actions.size());
 
     ImGui::BeginChild("actions_list", ImVec2(380.0f, 0.0f), true);
-    for (size_t i = 0; i < actions.size(); ++i) {
-        json& action = actions[i];
-        std::string name = jsonStringOrEmpty(action, "name");
-        std::string visibleLabel = name.empty() ? "<unnamed>" : name;
-        if (!filter.empty()) {
-            std::string haystack = visibleLabel;
-            if (haystack.find(filter) == std::string::npos) continue;
-        }
-        std::string label = visibleLabel + "##action" + std::to_string(i);
-        const bool selected = (static_cast<int>(i) == state.selectedActionIndex);
-        if (ImGui::Selectable(label.c_str(), selected)) {
-            state.selectedActionIndex = static_cast<int>(i);
+    const ImVec4 dirtyColor(1.0f, 0.75f, 0.35f, 1.0f);
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(visibleIndices.size()));
+    while (clipper.Step()) {
+        for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+            int i = visibleIndices[static_cast<size_t>(row)];
+            const json& action = actions[static_cast<size_t>(i)];
+            std::string name = jsonStringOrEmpty(action, "name");
+            std::string visibleLabel = name.empty() ? "<unnamed>" : name;
+            const bool dirty = state.dirtyActionIndices.count(i) > 0;
+            std::string label = (dirty ? "* " : "  ") + visibleLabel + "##action" + std::to_string(i);
+            const bool selected = (i == state.selectedActionIndex);
+            if (dirty) ImGui::PushStyleColor(ImGuiCol_Text, dirtyColor);
+            if (ImGui::Selectable(label.c_str(), selected)) {
+                state.selectedActionIndex = i;
+            }
+            if (dirty) ImGui::PopStyleColor();
         }
     }
+    clipper.End();
     ImGui::EndChild();
 
     ImGui::SameLine();
@@ -2581,6 +2801,38 @@ static void setupStyle() {
     style.ItemSpacing = ImVec2(8.0f, 6.0f);
 }
 
+ImFont* g_monoFont = nullptr;
+
+static void loadEmbeddedFonts(ImGuiIO& io) {
+    ImFontConfig cfg;
+    cfg.FontDataOwnedByAtlas = false;
+    cfg.OversampleH = 3;
+    cfg.OversampleV = 1;
+    io.Fonts->AddFontFromMemoryTTF(
+        const_cast<std::uint8_t*>(kInterRegular_data),
+        static_cast<int>(kInterRegular_size),
+        16.0f, &cfg);
+
+    ImFontConfig monoCfg;
+    monoCfg.FontDataOwnedByAtlas = false;
+    monoCfg.OversampleH = 2;
+    monoCfg.OversampleV = 1;
+    g_monoFont = io.Fonts->AddFontFromMemoryTTF(
+        const_cast<std::uint8_t*>(kJetBrainsMono_data),
+        static_cast<int>(kJetBrainsMono_size),
+        14.0f, &monoCfg);
+}
+
+static void pushPrimaryButtonStyle() {
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.20f, 0.55f, 0.90f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.66f, 1.00f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.14f, 0.44f, 0.78f, 1.0f));
+}
+
+static void popPrimaryButtonStyle() {
+    ImGui::PopStyleColor(3);
+}
+
 int main(int argc, char** argv) {
     if (!glfwInit()) {
         std::fprintf(stderr, "Failed to initialize GLFW\n");
@@ -2600,6 +2852,8 @@ int main(int argc, char** argv) {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    loadEmbeddedFonts(io);
     setupStyle();
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
@@ -2616,6 +2870,11 @@ int main(int argc, char** argv) {
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+        if (glfwWindowShouldClose(window) && state.actionsLoaded && state.actionsDirty) {
+            glfwSetWindowShouldClose(window, GLFW_FALSE);
+            state.pendingDiscard = AppState::PENDING_QUIT;
+            state.openDiscardPopup = true;
+        }
         syncDerivedPaths(state);
 
         ImGui_ImplOpenGL2_NewFrame();
@@ -2624,14 +2883,46 @@ int main(int argc, char** argv) {
 
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(viewport->WorkPos);
-        ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, 44.0f));
-        ImGuiWindowFlags rootFlags =
+        ImGui::SetNextWindowSize(viewport->WorkSize);
+        ImGui::SetNextWindowViewport(viewport->ID);
+        ImGuiWindowFlags hostFlags =
             ImGuiWindowFlags_NoDecoration |
             ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoSavedSettings |
-            ImGuiWindowFlags_NoBringToFrontOnFocus;
-        ImGui::Begin("Root", nullptr, rootFlags);
+            ImGuiWindowFlags_NoBringToFrontOnFocus |
+            ImGuiWindowFlags_NoDocking;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::Begin("##DockHost", nullptr, hostFlags);
+        ImGui::PopStyleVar(3);
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 4.0f));
+        ImGui::BeginChild("##TopBar", ImVec2(0.0f, 32.0f), false, ImGuiWindowFlags_NoScrollbar);
         drawTopBar(state);
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+
+        ImGuiID dockspaceId = ImGui::GetID("MainDockSpace");
+        ImGui::DockSpace(dockspaceId, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
+
+        static bool dockLayoutInitialized = false;
+        if (!dockLayoutInitialized) {
+            dockLayoutInitialized = true;
+            if (ImGui::DockBuilderGetNode(dockspaceId) == nullptr) {
+                ImGui::DockBuilderRemoveNode(dockspaceId);
+                ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
+                ImGui::DockBuilderSetNodeSize(dockspaceId, viewport->WorkSize);
+                ImGuiID dockMain = dockspaceId;
+                ImGuiID dockLeft = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left, 0.32f, nullptr, &dockMain);
+                ImGuiID dockBottom = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down, 0.34f, nullptr, &dockMain);
+                ImGui::DockBuilderDockWindow("Workflow", dockLeft);
+                ImGui::DockBuilderDockWindow("Actions", dockMain);
+                ImGui::DockBuilderDockWindow("Command Log", dockBottom);
+                ImGui::DockBuilderFinish(dockspaceId);
+            }
+        }
+
         ImGui::End();
 
         drawWorkflowPanel(state);
