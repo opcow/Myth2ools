@@ -94,12 +94,22 @@ When both are present, `build_mesh` prefers:
 
 `raw/mesh_tag.bin` is now only a fallback when one or more support artifacts are missing.
 
+## `--no-blob` build mode
+
+`build_mesh --no-blob` is the transitional mode that gets us closest to a fully semantic rebuild today:
+
+- **Dropped:** editor appendix (past `data_size`), `trailing_a` section. Both confirmed safe by [Doc/mesh_post_action_sections.md](mesh_post_action_sections.md).
+- **Regenerated from semantic data:** the 0x120 fence connector payload is rebuilt from `assets/terrain/fences.json`. Each 64-byte record gets its post identifiers written as uint16 BE plus the post count at byte 63; the unknown bytes 48-62 are zeroed.
+- **Preserved from source (transitional):** `media_coverage_region` (~12 KB) and `mesh_LOD_data` (18432 B for le3e). Empirical 1.8.5 testing showed dropping either breaks the engine: LOD drop → black/transparent terrain, MC drop (with LOD also dropped) → crash in `drop_model_for_current_frame`. The Vengeance source / Myth II decomp claim that these are engine-regenerated does NOT hold in gameplay mode.
+
+In `--no-blob` mode, `post_data_appendix.bin` is no longer needed. `post_action_tail.bin` is still needed (as the source of MC and LOD bytes) until we decode those formats.
+
 ## Remaining gap
 
-This does **not** mean the mesh is fully rebuilt from semantic assets yet.
+This does **not** mean the mesh is fully rebuilt from semantic assets yet. The `--no-blob` mode currently still depends on `post_action_tail.bin` for MC and LOD bytes.
 
-We still preserve several opaque structures byte-for-byte through these support files. The long-term direction is:
+The long-term direction is:
 
-1. export the remaining important structure in documented form
+1. export the remaining important structure in documented form (MC, LOD)
 2. replace raw preservation with semantic rebuilds
 3. make `raw/mesh_tag.bin` unnecessary even as a fallback

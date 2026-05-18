@@ -2,17 +2,24 @@
 
 Investigation of the mesh tag regions that follow the action buffer — required to build a `mesh_tag.bin` from scratch instead of patching an extracted one.
 
-## TL;DR — All four post-action sections can be `size=0`
+## TL;DR — Empirical results contradict the Vengeance/decomp claim
 
-Cross-referencing the **Vengeance source** (a Bungie-derived editor that shares Myth II's mesh format) against the **Myth II.exe runtime decomp** proves that every "non-obvious" section after the action buffer is **engine-regenerated when its size field is zero**. A from-scratch build needs to write **just the header + cells + marker palette + markers + actions**, with all the trailing-section size fields set to 0.
+The Vengeance source and Myth II runtime decomp **suggest** that media_coverage, mesh_LOD, and the 0x120 connector section are engine-regenerated when their size fields are 0. **In practice, loading such a mesh in Myth II 1.8.5 fails:**
 
-| Region | Header descriptor | "From scratch" value | Authority |
+- Dropping **mesh_LOD** alone: map loads but **terrain renders black/transparent and unclickable**. The engine does NOT regenerate LOD.
+- Dropping **media_coverage + mesh_LOD + 0x120 connectors** together: **crash** in `drop_model_for_current_frame` (model_animations.c:575) during model_animation marker init.
+- Regenerating 0x120 connectors from semantic data (`assets/terrain/fences.json`) but still dropping MC and LOD: **same crash**. The crash is caused by dropping MC and/or LOD, not the connector format.
+- Trailing editor data (past `data_size` at 0x1C) is safely droppable — confirmed both by decomp and empirical test.
+
+**Current verified-working blob-free strategy:**
+
+| Region | Header descriptor | Status in 1.8.5 | Strategy |
 | --- | --- | --- | --- |
-| media_coverage_region | 0xC0 (offset), 0xC4 (size) | **size = 0** | Vengeance `mesh.cpp:421-422`; runtime `FUN_004b2580` |
-| mesh_LOD_data | 0xCC (offset), 0xD0 (size) | **size = 0** | Vengeance `mesh.cpp:424-425`; engine recomputes from heights |
-| connectors | 0x10C/0x110/0x114 (count/offset/size) | **count = 0, size = 0** | Vengeance `mesh.cpp:439-441` |
-| section_0x120 (Myth II-specific) | 0x120 (offset), 0x124 (size) | **size = 0** (needs runtime test) | Not present in Vengeance — likely 1.5+ addition |
-| trailing editor data | (file ends past `data_size` at 0x1C) | **omit entirely** | Runtime only loads `1024 + data_size` bytes |
+| media_coverage_region | 0xC0 / 0xC4 | **Required** (despite decomp claim) | Preserve from source for now; decode later. ~12 KB for le3e. |
+| mesh_LOD_data | 0xCC / 0xD0 | **Required** (despite Vengeance claim) | Preserve from source for now; decode later. 18432 B = 9216 × 2 B = likely 96×96 downsampled height grid. |
+| section_0x120 (fence connectors) | 0x11C count, 0x120 offset, 0x124 size | **Required** when map has fences | Regenerate from `assets/terrain/fences.json`. Format: 64-byte records, up to 24 × uint16 BE post identifiers, byte 63 = post count, bytes 48-62 unknown (appear uninitialized in source). |
+| trailing editor data | (file past `data_size`) | **Safely omitted** | Drop entirely. |
+| trailing_a | 0x114 / 0x118 | Always 0 in tested maps | Drop. |
 
 ## Evidence
 
@@ -215,7 +222,7 @@ While verifying the layout, two bugs surfaced in the existing patch-based builde
 
 ## Next steps
 
-1. **Implement `build_mesh_from_scratch()`** that writes the header described above plus the four required data sections.
-2. **Test load** in Myth II 1.8.x with a synthetic minimal mesh (flat 32×32 of grass cells, no markers, no actions). If it loads, the recipe is validated end-to-end.
-3. **Layer back complexity**: add markers, then actions, then water cells (which will exercise the `media_coverage_region` regeneration path).
-4. If section_0x120 turns out to be required, decode its 32-byte record format from `le3e`'s 512-byte payload (16 records) and emit it from squad/group source data.
+1. **Decode `mesh_LOD_data` format.** Hypothesis: 9216 × 2-byte values = 96×96 downsampled height grid (every other cell in a 192-cell-wide map). If confirmed, generate from `cell_grid.json` heights.
+2. **Decode `media_coverage_region` format.** Source on-disk MC starts with `06 00 06 00 06 00 ...` (uint16 BE = `cellW * 8`) which matches the runtime allocation/fill formula from the Ghidra decomp. Need to check whether the runtime regen path is reachable in gameplay vs editor only.
+3. **Decode the unknown 14 bytes of each connector record** (offsets 48-62). Vary wildly across records; possibly per-fence rendering hints, possibly uninitialized editor heap. Test with extreme values to see if engine reads them.
+4. **Investigate `drop_model_for_current_frame` crash.** Use Ghidra to read the offset 0x7E instruction in model_animations.c:575 to see what specific field is being dereferenced. That will pin down whether MC or LOD (or something else) is the missing input.

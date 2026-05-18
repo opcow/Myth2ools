@@ -325,15 +325,20 @@ static void loadCellGridFromJson(const std::string& json, std::vector<SourceCell
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: build_mesh <folder> [--output <path>]\n");
+        fprintf(stderr, "Usage: build_mesh <folder> [--output <path>] [--no-blob]\n"
+                        "  --no-blob   Skip preserved post-action tail and editor appendix; zero out media_coverage,\n"
+                        "              mesh_LOD, and connector descriptors. The engine regenerates them at load.\n"
+                        "              Use to verify a blob-free rebuild loads correctly in Myth II.\n");
         return 1;
     }
     std::string folder = argv[1];
     while (!folder.empty() && (folder.back()=='/'||folder.back()=='\\')) folder.pop_back();
     std::string outPath = folder + "/raw/mesh_tag.bin";
+    bool noBlob = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--output" && i+1 < argc) outPath = argv[++i];
+        else if (a == "--no-blob") noBlob = true;
     }
 
     std::string manifest = readText(folder + "/manifest.json");
@@ -672,6 +677,97 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    std::vector<uint8_t> rebuiltConnectorPayload;
+    uint32_t rebuiltConnectorCount = 0;
+    if (noBlob) {
+        printf("--no-blob: dropping editor appendix and trailing_a; preserving media_coverage and mesh_LOD bytes\n");
+        printf("           (empirical 1.8.5 test: doc's 'engine regenerates these when size=0' claim does NOT hold)\n");
+        printf("           regenerating fence connectors from assets/terrain/fences.json\n");
+        sourceAppendix.clear();
+        sourceTrailingOffsetA = 0;
+        sourceTrailingSizeA = 0;
+
+        std::string fencesJson = readText(folder + "/assets/terrain/fences.json");
+        if (!fencesJson.empty()) {
+            std::vector<std::vector<uint16_t>> fences;
+            size_t p = 0;
+            while (p < fencesJson.size()) {
+                size_t fenceStart = fencesJson.find("\"connector_idx\"", p);
+                if (fenceStart == std::string::npos) break;
+                size_t nextFence = fencesJson.find("\"connector_idx\"", fenceStart + 1);
+                size_t fenceEnd = (nextFence == std::string::npos) ? fencesJson.size() : nextFence;
+                std::vector<uint16_t> ids;
+                size_t q = fenceStart;
+                while (q < fenceEnd) {
+                    size_t idPos = fencesJson.find("\"identifier\"", q);
+                    if (idPos == std::string::npos || idPos >= fenceEnd) break;
+                    q = fencesJson.find(':', idPos);
+                    if (q == std::string::npos || q >= fenceEnd) break;
+                    q++;
+                    while (q < fenceEnd && (fencesJson[q] == ' ' || fencesJson[q] == '\t')) q++;
+                    uint32_t id = 0;
+                    while (q < fenceEnd && fencesJson[q] >= '0' && fencesJson[q] <= '9') {
+                        id = id * 10 + (uint32_t)(fencesJson[q] - '0');
+                        q++;
+                    }
+                    if (id > 0xFFFFu) break;
+                    ids.push_back((uint16_t)id);
+                }
+                fences.push_back(std::move(ids));
+                p = fenceEnd;
+            }
+            for (const auto& ids : fences) {
+                std::vector<uint8_t> rec(64, 0);
+                size_t maxIds = std::min<size_t>(ids.size(), 24);
+                for (size_t i = 0; i < maxIds; i++) {
+                    rec[i*2 + 0] = (uint8_t)((ids[i] >> 8) & 0xFF);
+                    rec[i*2 + 1] = (uint8_t)(ids[i] & 0xFF);
+                }
+                rec[63] = (uint8_t)std::min<size_t>(ids.size(), 0xFFu);
+                rebuiltConnectorPayload.insert(rebuiltConnectorPayload.end(), rec.begin(), rec.end());
+            }
+            rebuiltConnectorCount = (uint32_t)fences.size();
+            // Preserve MC + LOD bytes by keeping the original sourceTail up to the original
+            // connector payload, then appending the regenerated payload. For le3e:
+            //   tail = [MC 12024 bytes][LOD 18432 bytes][connectors 512 bytes]
+            // becomes
+            //   tail = [MC 12024 bytes][LOD 18432 bytes][regenerated connectors]
+            uint32_t sourceTailBase = sourceActionOffset + sourceActionSize;
+            if (sourceTrailingSizeB > 0 && sourceTrailingOffsetB >= sourceTailBase &&
+                !sourceTail.empty()) {
+                size_t connOffInTail = (size_t)(sourceTrailingOffsetB - sourceTailBase);
+                if (connOffInTail <= sourceTail.size()) {
+                    sourceTail.resize(connOffInTail);
+                    sourceTail.insert(sourceTail.end(),
+                                      rebuiltConnectorPayload.begin(),
+                                      rebuiltConnectorPayload.end());
+                    sourceTrailingSizeB = (uint32_t)rebuiltConnectorPayload.size();
+                } else {
+                    // No room to fit; fall back to overwriting the entire tail.
+                    sourceTail = rebuiltConnectorPayload;
+                    sourceTrailingOffsetB = sourceTailBase;
+                    sourceTrailingSizeB = (uint32_t)rebuiltConnectorPayload.size();
+                }
+            } else if (!rebuiltConnectorPayload.empty()) {
+                // No source connectors but fences.json supplies some; append at end of tail.
+                size_t newOff = sourceTail.size();
+                sourceTail.insert(sourceTail.end(),
+                                  rebuiltConnectorPayload.begin(),
+                                  rebuiltConnectorPayload.end());
+                sourceTrailingOffsetB = sourceTailBase + (uint32_t)newOff;
+                sourceTrailingSizeB = (uint32_t)rebuiltConnectorPayload.size();
+            }
+            printf("--no-blob: rebuilt %u fence connectors (%zu bytes) from assets/terrain/fences.json\n",
+                   rebuiltConnectorCount, rebuiltConnectorPayload.size());
+        } else if (sourceTrailingSizeB > 0) {
+            printf("--no-blob: WARNING source has %u connectors but no assets/terrain/fences.json present\n",
+                   sourceTrailingSizeB / 64);
+            printf("           keeping source connector bytes verbatim\n");
+        } else {
+            printf("--no-blob: no fence connectors needed\n");
+        }
+    }
+
     int cellW = subW * 32, cellH = subH * 32;
     int totalCells = cellW * cellH;
     size_t cellDataSize = (size_t)totalCells * 12;
@@ -988,12 +1084,20 @@ int main(int argc, char* argv[]) {
         w32(out.data(), 280, sourceTrailingSizeA);
     }
     // [284-299] Myth II connector/trailing descriptor block.
-    // We do not understand this block well enough yet, so preserve it from the
-    // exported source header when available. This is needed for fence connectors.
-    if (sourceHeader) {
-        memcpy(out.data() + 284, sourceHeader + 284, 16);
-    } else if (haveConnectorDescriptor) {
-        memcpy(out.data() + 284, connectorDescriptorRaw.data(), 16);
+    // Layout: 0x11C count, 0x120 offset (absolute, from end of header), 0x124 size, 0x128 runtime ptr.
+    if (!noBlob) {
+        if (sourceHeader) {
+            memcpy(out.data() + 284, sourceHeader + 284, 16);
+        } else if (haveConnectorDescriptor) {
+            memcpy(out.data() + 284, connectorDescriptorRaw.data(), 16);
+        }
+    } else if (rebuiltConnectorCount > 0) {
+        // Connectors land after the preserved MC + LOD bytes inside the tail.
+        // remapSourceTailOffset adjusts sourceTrailingOffsetB into the rebuilt file.
+        w32(out.data(), 0x11C, rebuiltConnectorCount);
+        w32(out.data(), 0x120, remapSourceTailOffset(sourceTrailingOffsetB));
+        w32(out.data(), 0x124, (uint32_t)rebuiltConnectorPayload.size());
+        // 0x128 runtime ptr left zero
     }
 
     // [300-491] cutscene file paths — 0
