@@ -58,28 +58,40 @@ Then `count` values follow in a type-dependent encoding, padded to alignment. Pa
 
 ## Parameter type table (the 21 known types)
 
-| ID | Name | Encoding | Scale |
-|---|---|---|---|
-| 0 | flag | 1 byte (0/1), padded to 4 | — |
-| 1 | string | `count` bytes, padded to 4 | UTF-8/ASCII |
-| 2 | monster_identifier | u16 × count | raw monster ID |
-| 3 | action_identifier | u16 × count | raw action ID |
-| 4 | angle | u16 × count | ÷ (65536/360) → degrees |
-| 5 | integer | s32 × count | — |
-| 6 | world_distance | u32 × count | ÷ 512 → world units |
-| 7 | field_name | 4-char FourCC × count | — |
-| 8 | fixed | s32 × count | ÷ 65536 |
-| 9, 12 | projectile | FourCC × count | — |
-| 10 | string_list | u16 × count (padded to 2) | — |
-| 11 | sound | FourCC × count | — |
-| 13 | world_point_2d | u32 x, u32 y per point | both ÷ 512 |
-| 14 | world_rectangle_2d | u16 × count (padded) | — |
-| 15 | object_identifier | u16 × count | — |
-| 16 | model_identifier | u16 × count | — |
-| 17 | sound_source_identifier | u16 × count | — |
-| 18 | world_point_3d | 3 × u32 per point | each ÷ 512 |
-| 19 | local_projectile_group_identifier | u16 × count | — |
-| 20 | model_animation_identifier | u16 × count | — |
+Verified against Loathing 1.8.4 — `FUN_00479220` and `FUN_0041dfa0` both contain a 21-case switch on the parameter type (cases 0..20). The descriptor table at `0x519030` (21 × 12-byte entries) confirms the labels.
+
+| ID | Name | Encoding | Tag-group lookup | Scale |
+|---|---|---|---|---|
+| 0 | flag | 1 byte (0/1), padded to 4 | — | — |
+| 1 | string | `count` bytes, padded to 4 | — | UTF-8/ASCII |
+| 2 | monster_identifier | u16 × count, padded to 2 | — | raw monster ID |
+| 3 | action_identifier | u16 × count, padded to 2 | — | raw action ID |
+| 4 | angle | u16 × count, padded to 2 | — | ÷ (65536/360) → degrees |
+| 5 | integer | s32 × count | — | — |
+| 6 | world_distance | s32 × count | — | ÷ 512 → world units |
+| 7 | field_name | FourCC × count (4 bytes/entry) | — | — |
+| 8 | fixed | s32 × count | — | ÷ 65536 |
+| 9 | projectile | FourCC × count (4 bytes/entry) | `prgr` (projectile group tag) | — |
+| 10 | string_list | FourCC × count (4 bytes/entry) | `stli` | — |
+| 11 | sound | FourCC × count (4 bytes/entry) | `soun` | — |
+| 12 | projectile | FourCC × count (4 bytes/entry) | `proj` (distinct from type 9!) | — |
+| 13 | world_point_2d | 2 × s32 per point (8 bytes/entry) | — | both ÷ 512 |
+| 14 | world_rectangle_2d | 4 × s32 per rectangle (16 bytes/entry) | — | each ÷ 512 |
+| 15 | object_identifier | u16 × count, padded to 2 | — | — |
+| 16 | model_identifier | u16 × count, padded to 2 | — | — |
+| 17 | sound_source_identifier | u16 × count, padded to 2 | — | — |
+| 18 | world_point_3d | 3 × s32 per point (12 bytes/entry) | — | each ÷ 512 |
+| 19 | local_projectile_group_identifier | u16 × count, padded to 2 | — | — |
+| 20 | model_animation_identifier | u16 × count, padded to 2 | — | — |
+
+**Note on types 9 and 12:** Both are labeled "projectile" in Loathing's UI (the descriptor strings at `0x4f56b4` are both `"projectile"`) but read different tag groups. Our JSON exporter writes both as `"type": "projectile"` and disambiguates via `"type_id": 9` vs `"type_id": 12`.
+
+**Corrections to earlier versions of this table (now fixed in code):**
+
+- **Type 10 (string_list):** Previously documented as `u16 × count (padded to 2)`. Loathing's formatter reads a `uint32` and looks it up in the `stli` tag group — so the encoding is `FourCC × count`, same shape as types 7/9/11/12.
+- **Type 14 (world_rectangle_2d):** Previously documented as `u16 × count (padded)`. Loathing's case 0xe in `FUN_00479220` reads four 32-bit world distances per rectangle (printed as `(%3.3f,%3.3f,%3.3f,%3.3f)`) and advances by 16 bytes per iteration.
+
+Both corrections are reflected in `myth2/export_map_actions.cpp` (decoder) and `myth2/build_plugin.cpp::actionParameterValueBytes` / `appendActionParamValues` (encoder). Neither type appears in any extracted Bungie map in our corpus, so the prior bugs never surfaced — but anyone authoring an action with these types would have hit them.
 
 ## Special parameter name: `name`
 
@@ -139,9 +151,20 @@ Actions form a **DAG** wired by ID references in `link`/`acos`/`acof`/`subj`/`ob
 
 ## What's still unknown
 
-1. **Flags bits 5–31** — not documented in the extractor, but the corpus uses values up to ~`0x3F` so there are likely 1–2 more flags.
-2. **The semantic meaning of every type/4cc** — there are ~100 distinct action types. The ones above are the common ones; rarer types (`mung`, `legi`, `girl`, `moef`, `snif`, `wand`, `pick`, `lpgr`, `obmo`, `moma`, `rout`, `part`) are best understood by reading Loathing's UI labels (Bungie's mapping editor).
-3. **Whether parameter blocks have any header beyond what's known** — the extractor handles a few alignment quirks (`PARAM_STRING` aligned to 4, default case aligned to 2) which suggests the format is consistent across all known data.
+1. ~~**Flags bits 5–31** — not documented in the extractor, but the corpus uses values up to ~`0x3F` so there are likely 1–2 more flags.~~ **Resolved.** Loathing 1.8.4's flag parser (`FUN_0041d880`) recognizes only the 5 documented names — no fallback for unknown flag names, and the 5 globals at `0x5257cc..dc` are the only flag bits the editor manipulates. If the corpus has flag values beyond `0x1F`, those bits are either game-engine-only or unused.
+2. **The semantic meaning of every action type FourCC** — Loathing does NOT have a per-type dispatch table; action types are treated opaquely (just FourCC labels in the UI). For 35 of the 36 FourCCs found in the solo-map corpus we now have Loathing's display names — see [`action_corpus.md`](action_corpus.md). The remaining `snif` (training-map-only) and the precise PARAMETER semantics (which params each verb requires, what they do at runtime) still live in `Myth II.exe`, not the editor — best path forward there is Ghidra on `Myth II.exe`.
+3. ~~**Whether parameter blocks have any header beyond what's known**~~ **Resolved.** The per-type encoding is the 21-case switch verified above; no hidden header bytes.
+
+## Verified via Ghidra of Loathing 1.8.4
+
+Sources: `..\loathing\map_action_parser.c`, `..\loathing\map_actions_export.c`, `..\Myth 2\map_actions\map_actions.c`, `..\Myth 2\map_actions\map_action_ui.c` (46 functions touched).
+
+Key functions:
+- `FUN_00419220` (parser entry) and `FUN_00479220` (display formatter) — both contain the 21-case parameter-type switch.
+- `FUN_0048d7e0(group_tag, sub_tag)` — the tag-table lookup used by types 9/10/11/12. Walks a tag-entry array at `*(0x5bfba0 + 0x18)` looking for matching `group_tag` and `sub_tag`. Returns `(entry_short0 << 16) | index` or `0xFFFFFFFF` if not found.
+- `FUN_0041d880` — flag-name parser; recognizes only the 5 documented flag strings.
+
+Parameter-type descriptor table at `0x519030` (21 × 12-byte entries) contains, per type: a `short0` "kind" code (0–8 or `0xFFFF`), a pointer to a sub-table (used for types 3/7/9/10/11/12), and a pointer to the human-readable type name string.
 
 ## Authoring (writing) actions
 

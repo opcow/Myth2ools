@@ -353,19 +353,71 @@ Working interpretation:
 
 These deserve more attention later because they are concentrated but not rare:
 
-| Type | Count | Maps | First take |
+| Type | Count | Maps | Loathing's display name |
 |---|---:|---:|---|
-| `obmo` | 64 | 18 | object/model movement, likely camera/object motion support |
-| `mung` | 63 | 6 | some kind of mutator/spawner/manager action family |
-| `legi` | 55 | 8 | legion/army-group setup |
-| `mele` | 45 | 7 | melee-specific combat state/order |
-| `moef` | 38 | 5 | model/object effect-ish family |
-| `snif` | 34 | 1 | mission-specific oddball, worth case-study work |
-| `lpgr` | 34 | 4 | local projectile group management |
-| `suic` | 33 | 5 | self-destruct / sacrificial behavior |
-| `girl` | 33 | 7 | unknown; name likely shorthand rather than plain English |
-| `moma` | 27 | 4 | model animation / move target family |
-| `part` | 25 | 4 | particle or part-management family |
+| `obmo` | 64 | 18 | **Observer Movement** |
+| `mung` | 63 | 6 | **Munger** |
+| `legi` | 55 | 8 | **Legion (defensive)** |
+| `mele` | 45 | 7 | **Melee** (for Thrall, Myrmidons, etc.) |
+| `moef` | 38 | 5 | **Model Effect** |
+| `snif` | 34 | 1 | (training-map-only; no SSR text — likely an AI sniffer/sensor verb) |
+| `lpgr` | 34 | 4 | **Local Projectile Group Action** |
+| `suic` | 33 | 5 | **Suicide** (for wights) |
+| `girl` | 33 | 7 | **Harass** (for ghols) |
+| `moma` | 27 | 4 | **Move Marker** |
+| `part` | 25 | 4 | **Particle System Control** |
+
+## Complete FourCC ↔ display-name catalog
+
+Joined across the 27 solo maps in the corpus and the SSR Map Action Texts
+(`reference_source/Solo_Script_Rebuild_final/Solo Script Rebuild/Extras/SSR Map Action Texts/`).
+Each FourCC was paired with the human label Loathing prints in `[brackets]` for
+that action type. The join is by action display-name; counts in parens are
+agreement counts vs total occurrences.
+
+| FourCC | Loathing label | Confidence |
+|---|---|---|
+| `acli` | Action List | 572/572 |
+| `ambi` | Ambient Sound Control | 20/20 |
+| `anim` | Model Animation | 72/72 |
+| `atta` | Attack | 705/709 |
+| `ctrl` | Unit Control | 740/740 |
+| `dela` | Delay | (no name-match in corpus, but `dela` is the only unmapped FourCC matching `Delay` by spelling) |
+| `endg` | Endgame Condition | 55/55 |
+| `gene` | General Action | 134/134 |
+| `geom` | Geometry Filter | 240/243 |
+| `girl` | Harass (for ghols) | 33/33 |
+| `lead` | Leading | 2/2 |
+| `legi` | Legion (defensive) | 55/55 |
+| `ligh` | Lightning | 8/8 |
+| `lpgr` | Local Projectile Group Action | 27/27 |
+| `mean` | Meander Action (wander aimlessly) | 15/15 |
+| `mele` | Melee | 45/49 |
+| `miss` | Mission | 4/4 |
+| `moef` | Model Effect | 38/38 |
+| `moma` | Move Marker | 27/28 |
+| `move` | Movement | 790/790 |
+| `mung` | Munger | 63/63 |
+| `ngty` | Netgame Type | 2/2 |
+| `obmo` | Observer Movement | 51/52 |
+| `part` | Particle System Control | 25/25 |
+| `pick` | Pick Up Object | 19/19 |
+| `plat` | Platoon | 180/180 |
+| `plmo` | Platoon Movement | 191/191 |
+| `plsc` | Platoon Scouting | 3/3 |
+| `rout` | Rout | 19/19 |
+| `snif` | *(no SSR mapping; 34 occurrences in `00tm` only)* | — |
+| `soun` | Sound Action | 206/206 |
+| `squa` | Squad | 242/242 |
+| `suic` | Suicide (for wights) | 32/32 |
+| `surr` | Surround | 9/9 |
+| `tuni` | Test Unit | 1190/1195 |
+| `wand` | Wandering Movement | 2/2 |
+
+**Notes on the SSR labels not paired with a FourCC above:**
+
+- **Player Count** — appears 3 times in `24 battle 2`, but those action display names (`"1 Player S0L0"`, `"2 Players C0 0P"`, etc.) don't match any action in the extracted `24b2/actions.json` by name. Likely a Loathing UI subcategory that maps to one of the existing FourCCs based on a flag or parameter rather than its own opcode.
+- **anxious / frustrated / exhausted / impressed** — each appears once on action names like `"22 (bowmen) Damn [anxious]"` in `22 dam`. Almost certainly Munger initial-state suffixes that Loathing displays as the action's "type" in the editor, not separate opcodes.
 
 ## Most common parameter names
 

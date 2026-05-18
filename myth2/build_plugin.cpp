@@ -1998,21 +1998,25 @@ static size_t actionParameterValueBytes(uint16_t type, uint16_t count) {
     case 1:  // string
     case 0:  // flag
         return alignToSize(count, 4);
-    case 7:  // field name
-    case 9:  // projectile
-    case 10: // string list
-    case 11: // sound
-    case 12: // projectile or world point 2d
+    case 7:  // field name (FourCC × count)
+    case 9:  // projectile (FourCC × count, looked up in 'prgr' tag group)
+    case 10: // string_list (FourCC × count, looked up in 'stli' tag group)
+    case 11: // sound (FourCC × count, looked up in 'soun' tag group)
+    case 12: // projectile (FourCC × count, looked up in 'proj' tag group)
         return (size_t)count * 4;
-    case 13: // world point 2d
+    case 13: // world_point_2d (2 × s32 fixed-point world distance per point)
         return (size_t)count * 8;
-    case 18: // world point 3d
+    case 14: // world_rectangle_2d (4 × s32 fixed-point world distance per rectangle).
+             // Verified against Loathing 1.8.4 case 0xe in FUN_00479220.
+        return (size_t)count * 16;
+    case 18: // world_point_3d (3 × s32 fixed-point per point)
         return (size_t)count * 12;
-    case 5:  // integer
-    case 6:  // world distance
-    case 8:  // fixed
+    case 5:  // integer (s32 × count)
+    case 6:  // world_distance (s32 × count, fixed-point)
+    case 8:  // fixed (s32 × count, fixed-point)
         return (size_t)count * 4;
-    default:
+    default: // angle / monster_id / action_id / object_id / model_id /
+             // sound_source_id / local_proj_group_id / model_animation_id — all u16 × count, padded.
         return alignToSize(count, 2) * 2;
     }
 }
@@ -2125,8 +2129,9 @@ static bool appendActionParamValues(std::vector<uint8_t>& out, uint16_t typeId, 
     }
     case 7:
     case 9:
+    case 10:
     case 11:
-    case 12: { // FourCC arrays
+    case 12: { // FourCC arrays — verified via Loathing FUN_00479220 cases 7/9/10/11/12
         if (!values.is_array()) return count == 0;
         for (const json& v : values) {
             std::string s = v.is_string() ? v.get<std::string>() : "";
@@ -2141,6 +2146,18 @@ static bool appendActionParamValues(std::vector<uint8_t>& out, uint16_t typeId, 
             if (!v.is_object() || !v.contains("x") || !v.contains("y")) return false;
             appendBE32(fixedToU32(v["x"].get<double>(), 512.0));
             appendBE32(fixedToU32(v["y"].get<double>(), 512.0));
+        }
+        break;
+    }
+    case 14: { // world_rectangle_2d — 4 × s32 fixed-point world distance per rectangle.
+        if (!values.is_array()) return count == 0;
+        for (const json& v : values) {
+            if (!v.is_object() || !v.contains("x0") || !v.contains("y0") ||
+                !v.contains("x1") || !v.contains("y1")) return false;
+            appendBE32(fixedToU32(v["x0"].get<double>(), 512.0));
+            appendBE32(fixedToU32(v["y0"].get<double>(), 512.0));
+            appendBE32(fixedToU32(v["x1"].get<double>(), 512.0));
+            appendBE32(fixedToU32(v["y1"].get<double>(), 512.0));
         }
         break;
     }

@@ -327,7 +327,11 @@ static bool parseActions(const std::vector<uint8_t>& mesh, std::string& json, st
                     p += bytes;
                 }
             } else if (type == PARAM_SOUND || type == PARAM_FIELD_NAME ||
-                       type == PARAM_PROJECTILE || type == PARAM_PROJECTILE_OR_WORLD_POINT_2D) {
+                       type == PARAM_PROJECTILE || type == PARAM_STRING_LIST ||
+                       type == PARAM_PROJECTILE_OR_WORLD_POINT_2D) {
+                // FourCC arrays — verified via Loathing FUN_00479220 cases 7/9/10/11/12.
+                // (Doc previously claimed string_list was u16 × count; Loathing's formatter
+                //  reads a uint32 and looks it up in the 'stli' tag group.)
                 bytes = (size_t)count * 4;
                 if (p + bytes > paramsEnd) { failShort(); }
                 else {
@@ -340,6 +344,33 @@ static bool parseActions(const std::vector<uint8_t>& mesh, std::string& json, st
                         }
                         appendJsonString(valueJson, s);
                         valueText += s;
+                    }
+                    valueJson += "]";
+                    p += bytes;
+                }
+            } else if (type == PARAM_WORLD_RECTANGLE_2D) {
+                // 4 × s32 fixed-point world distance per rectangle. Verified via
+                // Loathing case 0xe in FUN_00479220 (4 floats printed per entry,
+                // local_11c advances by 4 uints per iteration).
+                bytes = (size_t)count * 16;
+                if (p + bytes > paramsEnd) { failShort(); }
+                else {
+                    valueJson = "[";
+                    for (uint16_t i = 0; i < count; i++) {
+                        size_t base = p + (size_t)i * 16;
+                        double x0 = (double)(int32_t)readBE32u(buf, base + 0)  / WORLD_POINT_SF;
+                        double y0 = (double)(int32_t)readBE32u(buf, base + 4)  / WORLD_POINT_SF;
+                        double x1 = (double)(int32_t)readBE32u(buf, base + 8)  / WORLD_POINT_SF;
+                        double y1 = (double)(int32_t)readBE32u(buf, base + 12) / WORLD_POINT_SF;
+                        char item[192];
+                        snprintf(item, sizeof(item),
+                                 "%s{\"x0\": %.4f, \"y0\": %.4f, \"x1\": %.4f, \"y1\": %.4f}",
+                                 i ? ", " : "", x0, y0, x1, y1);
+                        valueJson += item;
+                        snprintf(item, sizeof(item),
+                                 "%s(%.4f, %.4f, %.4f, %.4f)",
+                                 i ? ", " : "", x0, y0, x1, y1);
+                        valueText += item;
                     }
                     valueJson += "]";
                     p += bytes;

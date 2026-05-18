@@ -18,6 +18,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -573,6 +574,11 @@ struct AppState {
     bool editOnBuild = true;
     bool autoAppendMeshTag = true;
     bool followLog = true;
+    int  windowX = INT_MIN;       // INT_MIN = "no saved position; let the OS place the window"
+    int  windowY = INT_MIN;
+    int  windowW = 1440;
+    int  windowH = 900;
+    bool windowMaximized = false;
     std::vector<MeshChoice> availableMeshTags;
     std::string lastScannedTagsSource;
     std::string mapScanStatus;
@@ -800,6 +806,11 @@ static bool saveSettings(AppState& state) {
     out << "editOnBuild=" << (state.editOnBuild ? "1" : "0") << "\n";
     out << "autoAppendMeshTag=" << (state.autoAppendMeshTag ? "1" : "0") << "\n";
     out << "followLog=" << (state.followLog ? "1" : "0") << "\n";
+    out << "windowX=" << state.windowX << "\n";
+    out << "windowY=" << state.windowY << "\n";
+    out << "windowW=" << state.windowW << "\n";
+    out << "windowH=" << state.windowH << "\n";
+    out << "windowMaximized=" << (state.windowMaximized ? "1" : "0") << "\n";
     if (!out.good()) return false;
 
     const std::string blender = state.blenderPath.data();
@@ -836,6 +847,11 @@ static void loadSettings(AppState& state) {
         else if (key == "editOnBuild") state.editOnBuild = (value == "1");
         else if (key == "autoAppendMeshTag") state.autoAppendMeshTag = (value == "1");
         else if (key == "followLog") state.followLog = (value == "1");
+        else if (key == "windowX") { try { state.windowX = std::stoi(value); } catch (...) {} }
+        else if (key == "windowY") { try { state.windowY = std::stoi(value); } catch (...) {} }
+        else if (key == "windowW") { try { int v = std::stoi(value); if (v > 100) state.windowW = v; } catch (...) {} }
+        else if (key == "windowH") { try { int v = std::stoi(value); if (v > 100) state.windowH = v; } catch (...) {} }
+        else if (key == "windowMaximized") state.windowMaximized = (value == "1");
     }
 
     if (std::string(state.blenderPath.data()).empty()) {
@@ -1049,6 +1065,60 @@ enum ActionParamType {
 static constexpr double GUI_WORLD_POINT_SF = 512.0;
 static constexpr double GUI_FIXED_SF = 65536.0;
 static constexpr double GUI_ANGLE_SF = 65536.0 / 360.0;
+
+// Display name for an action-type FourCC, derived from Loathing 1.8.4's UI
+// labels (cross-referenced against the SSR Map Action Texts corpus — see
+// Doc/action_corpus.md). Returns nullptr for unknown codes so callers can
+// decide how to fall back.
+static const char* guiActionTypeLabel(const std::string& fourcc) {
+    if (fourcc.size() != 4) return nullptr;
+    struct Entry { const char* code; const char* label; };
+    static const Entry kEntries[] = {
+        {"acli", "Action List"},
+        {"ambi", "Ambient Sound Control"},
+        {"anim", "Model Animation"},
+        {"atta", "Attack"},
+        {"ctrl", "Unit Control"},
+        {"dela", "Delay"},
+        {"endg", "Endgame Condition"},
+        {"gene", "General Action"},
+        {"geom", "Geometry Filter"},
+        {"girl", "Harass"},
+        {"lead", "Leading"},
+        {"legi", "Legion"},
+        {"ligh", "Lightning"},
+        {"lpgr", "Local Projectile Group"},
+        {"mean", "Meander"},
+        {"mele", "Melee"},
+        {"miss", "Mission"},
+        {"moef", "Model Effect"},
+        {"moma", "Move Marker"},
+        {"move", "Movement"},
+        {"mung", "Munger"},
+        {"ngty", "Netgame Type"},
+        {"obmo", "Observer Movement"},
+        {"part", "Particle System Control"},
+        {"pick", "Pick Up Object"},
+        {"plat", "Platoon"},
+        {"plmo", "Platoon Movement"},
+        {"plsc", "Platoon Scouting"},
+        {"rout", "Rout"},
+        {"snif", "Sniffer"},
+        {"soun", "Sound Action"},
+        {"squa", "Squad"},
+        {"suic", "Suicide"},
+        {"surr", "Surround"},
+        {"tuni", "Test Unit"},
+        {"wand", "Wandering Movement"},
+    };
+    for (const Entry& e : kEntries) {
+        if (fourcc[0] == e.code[0] && fourcc[1] == e.code[1] &&
+            fourcc[2] == e.code[2] && fourcc[3] == e.code[3]) {
+            return e.label;
+        }
+    }
+    return nullptr;
+}
 
 static const char* guiExpirationModeName(int modeId) {
     switch (modeId) {
@@ -2681,6 +2751,13 @@ static void drawActionsPanel(AppState& state) {
             const json& action = actions[static_cast<size_t>(i)];
             std::string name = jsonStringOrEmpty(action, "name");
             std::string visibleLabel = name.empty() ? "<unnamed>" : name;
+            std::string typeStr = jsonStringOrEmpty(action, "type");
+            if (!typeStr.empty()) {
+                const char* typeLabel = guiActionTypeLabel(typeStr);
+                visibleLabel += "  [";
+                visibleLabel += typeLabel ? typeLabel : typeStr;
+                visibleLabel += "]";
+            }
             const bool dirty = state.dirtyActionIndices.count(i) > 0;
             std::string label = (dirty ? "* " : "  ") + visibleLabel + "##action" + std::to_string(i);
             const bool selected = (i == state.selectedActionIndex);
@@ -2724,9 +2801,98 @@ static void drawActionsPanel(AppState& state) {
         action["name"] = std::string(nameBuf.data());
         markCurrentActionDirty(state);
     }
-    if (ImGui::InputText("Type", typeBuf.data(), typeBuf.size())) {
-        action["type"] = std::string(typeBuf.data());
-        markCurrentActionDirty(state);
+    {
+        std::string currentType(typeBuf.data());
+        const char* currentLabel = guiActionTypeLabel(currentType);
+        std::string previewBuf;
+        if (currentType.empty()) {
+            previewBuf = "(container / no type)";
+        } else if (currentLabel) {
+            previewBuf = currentType + "  -  " + currentLabel;
+        } else {
+            previewBuf = currentType + "  -  (custom)";
+        }
+
+        static std::array<char, 64> typeFilter{};
+        if (ImGui::BeginCombo("Type", previewBuf.c_str())) {
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputTextWithHint("##typeFilter", "Filter or type a custom 4-char FourCC",
+                                     typeFilter.data(), typeFilter.size());
+            std::string filterStr = typeFilter.data();
+            std::string filterLower;
+            filterLower.reserve(filterStr.size());
+            for (char c : filterStr) filterLower.push_back((char)std::tolower((unsigned char)c));
+
+            // Built-in entries: every known FourCC + display label.
+            struct Entry { const char* code; const char* label; };
+            static const Entry kEntries[] = {
+                {"acli", "Action List"},          {"ambi", "Ambient Sound Control"},
+                {"anim", "Model Animation"},      {"atta", "Attack"},
+                {"ctrl", "Unit Control"},         {"dela", "Delay"},
+                {"endg", "Endgame Condition"},    {"gene", "General Action"},
+                {"geom", "Geometry Filter"},      {"girl", "Harass"},
+                {"lead", "Leading"},              {"legi", "Legion"},
+                {"ligh", "Lightning"},            {"lpgr", "Local Projectile Group"},
+                {"mean", "Meander"},              {"mele", "Melee"},
+                {"miss", "Mission"},              {"moef", "Model Effect"},
+                {"moma", "Move Marker"},          {"move", "Movement"},
+                {"mung", "Munger"},               {"ngty", "Netgame Type"},
+                {"obmo", "Observer Movement"},   {"part", "Particle System Control"},
+                {"pick", "Pick Up Object"},      {"plat", "Platoon"},
+                {"plmo", "Platoon Movement"},    {"plsc", "Platoon Scouting"},
+                {"rout", "Rout"},                {"snif", "Sniffer"},
+                {"soun", "Sound Action"},        {"squa", "Squad"},
+                {"suic", "Suicide"},             {"surr", "Surround"},
+                {"tuni", "Test Unit"},           {"wand", "Wandering Movement"},
+            };
+
+            // Container (no type) is a real choice.
+            {
+                bool selected = currentType.empty();
+                if (ImGui::Selectable("(container / no type)", selected)) {
+                    action["type"] = std::string();
+                    copyToBuffer(typeBuf, std::string());
+                    markCurrentActionDirty(state);
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::Separator();
+
+            int shown = 0;
+            for (const Entry& e : kEntries) {
+                std::string code = e.code;
+                std::string lbl = e.label;
+                if (!filterLower.empty()) {
+                    std::string hay = code + " " + lbl;
+                    for (char& c : hay) c = (char)std::tolower((unsigned char)c);
+                    if (hay.find(filterLower) == std::string::npos) continue;
+                }
+                std::string line = code + "  -  " + lbl;
+                bool selected = (currentType == code);
+                if (ImGui::Selectable(line.c_str(), selected)) {
+                    action["type"] = code;
+                    copyToBuffer(typeBuf, code);
+                    markCurrentActionDirty(state);
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+                shown++;
+            }
+
+            // Apply-custom-from-filter: if the filter is exactly 4 characters
+            // and doesn't match a known code, offer to set it as a custom type.
+            if (filterStr.size() == 4 && guiActionTypeLabel(filterStr) == nullptr) {
+                ImGui::Separator();
+                std::string apply = std::string("Apply custom type: ") + filterStr;
+                if (ImGui::Selectable(apply.c_str())) {
+                    action["type"] = filterStr;
+                    copyToBuffer(typeBuf, filterStr);
+                    markCurrentActionDirty(state);
+                }
+            } else if (shown == 0 && !filterStr.empty()) {
+                ImGui::TextDisabled("No matches. Type a 4-character custom FourCC to apply.");
+            }
+            ImGui::EndCombo();
+        }
     }
     const char* expirationModes[] = {
         "trigger",
@@ -2834,16 +3000,33 @@ static void popPrimaryButtonStyle() {
 }
 
 int main(int argc, char** argv) {
+    // AppState is built first so settings (including window pos/size) load
+    // before glfwCreateWindow uses them.
+    AppState state;
+    state.exeDir = fs::weakly_canonical(fs::path(argv[0])).parent_path();
+    discoverPaths(state);
+    copyToBuffer(state.tagsSource, "myth2_tags");
+    copyToBuffer(state.meshTag, "le3e");
+    copyToBuffer(state.outputFolder, (fs::path("out") / "le3e").string());
+    copyToBuffer(state.pluginOutput, (fs::path("out") / "le3e_plugin").string());
+    loadSettings(state);
+
     if (!glfwInit()) {
         std::fprintf(stderr, "Failed to initialize GLFW\n");
         return 1;
     }
 
-    GLFWwindow* window = glfwCreateWindow(1440, 900, "Myth2ools", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(state.windowW, state.windowH, "Myth2ools", nullptr, nullptr);
     if (!window) {
         std::fprintf(stderr, "Failed to create GLFW window\n");
         glfwTerminate();
         return 1;
+    }
+    if (state.windowX != INT_MIN && state.windowY != INT_MIN) {
+        glfwSetWindowPos(window, state.windowX, state.windowY);
+    }
+    if (state.windowMaximized) {
+        glfwMaximizeWindow(window);
     }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
@@ -2858,15 +3041,6 @@ int main(int argc, char** argv) {
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL2_Init();
-
-    AppState state;
-    state.exeDir = fs::weakly_canonical(fs::path(argv[0])).parent_path();
-    discoverPaths(state);
-    copyToBuffer(state.tagsSource, "myth2_tags");
-    copyToBuffer(state.meshTag, "le3e");
-    copyToBuffer(state.outputFolder, (fs::path("out") / "le3e").string());
-    copyToBuffer(state.pluginOutput, (fs::path("out") / "le3e_plugin").string());
-    loadSettings(state);
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -2925,6 +3099,16 @@ int main(int argc, char** argv) {
 
         ImGui::End();
 
+        // On the first few frames, force Workflow to the front of whatever
+        // tab group it ends up in. SetNextWindowFocus applies to the next
+        // Begin call in the same frame, so this must be the panel drawn first.
+        // Doing it for ~3 frames covers cases where the dock layout reshuffles
+        // after restore.
+        static int focusFramesRemaining = 3;
+        if (focusFramesRemaining > 0) {
+            ImGui::SetNextWindowFocus();
+            focusFramesRemaining--;
+        }
         drawWorkflowPanel(state);
         drawActionsPanel(state);
         drawLogPanel(state);
@@ -2938,6 +3122,16 @@ int main(int argc, char** argv) {
         ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);
     }
+
+    // Capture window state before tearing down so saveSettings persists the
+    // current geometry. If maximized, we still record the underlying
+    // non-maximized size/pos so the next launch restores to the same place.
+    state.windowMaximized = glfwGetWindowAttrib(window, GLFW_MAXIMIZED) != 0;
+    if (state.windowMaximized) {
+        glfwRestoreWindow(window);
+    }
+    glfwGetWindowPos(window, &state.windowX, &state.windowY);
+    glfwGetWindowSize(window, &state.windowW, &state.windowH);
 
     ImGui_ImplOpenGL2_Shutdown();
     ImGui_ImplGlfw_Shutdown();
