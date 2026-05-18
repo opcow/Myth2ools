@@ -136,6 +136,7 @@ static void logActionSummary(struct AppState& state, const json& action, const c
 static bool guiParseHexBytes(const std::string& s, std::vector<uint8_t>& out);
 static void pushPrimaryButtonStyle();
 static void popPrimaryButtonStyle();
+static void drawStatusChip(const char* text, const ImVec4& bgColor, const ImVec4& textColor = ImVec4(1, 1, 1, 1));
 extern ImFont* g_monoFont;
 
 #if defined(_WIN32)
@@ -2015,14 +2016,6 @@ static bool drawActionParameterEditor(json& param, size_t paramIndex) {
         break;
     }
 
-    if (changed) {
-        std::string dump = values.dump();
-        (void)dump;
-    } else {
-        std::string valuesDump = values.dump(2);
-        ImGui::SeparatorText("Current JSON");
-        ImGui::TextWrapped("%s", valuesDump.c_str());
-    }
     return changed;
 }
 
@@ -2126,9 +2119,21 @@ static void syncDerivedPaths(AppState& s) {
 }
 
 static void drawTopBar(AppState& state) {
+    ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Myth2ools");
     ImGui::SameLine();
-    ImGui::TextDisabled("| ImGui shell");
+    ImGui::TextDisabled("Map extraction, plugin builds, and action editing");
+    drawStatusChip(state.runner.running.load() ? "Runner Active" : "Runner Idle",
+                   state.runner.running.load() ? ImVec4(0.18f, 0.54f, 0.35f, 1.0f)
+                                               : ImVec4(0.26f, 0.30f, 0.36f, 1.0f));
+    ImGui::SameLine();
+    drawStatusChip(state.actionsDirty ? "Unsaved Actions" : "Actions Clean",
+                   state.actionsDirty ? ImVec4(0.70f, 0.42f, 0.12f, 1.0f)
+                                      : ImVec4(0.22f, 0.41f, 0.62f, 1.0f));
+    ImGui::SameLine();
+    std::string mapChip = std::string("Map ") + (std::strlen(state.meshTag.data()) ? state.meshTag.data() : "----");
+    drawStatusChip(mapChip.c_str(), ImVec4(0.32f, 0.23f, 0.14f, 1.0f));
+    ImGui::TextDisabled("Everything stays docked so workflow setup, actions, and logs remain visible together.");
     ImGui::Separator();
 }
 
@@ -2234,10 +2239,13 @@ static void drawWorkflowPanel(AppState& state) {
     const float availWidth = ImGui::GetContentRegionAvail().x;
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
     const float halfButtonWidth = (availWidth - spacing) * 0.5f;
+    const bool ready = hasRequiredLayout(state);
+    const std::vector<std::string> workflowIssues = collectWorkflowIssues(state);
 
     const ImGuiTreeNodeFlags defaultOpen = ImGuiTreeNodeFlags_DefaultOpen;
 
     if (ImGui::CollapsingHeader("Source", defaultOpen)) {
+        ImGui::TextDisabled("Choose a tags folder or plugin file, then pick the map tag you want to work with.");
         labeledInputText("Tags Source or Plugin File", "##tagsSource", state.tagsSource);
         if (halfButtonWidth >= 120.0f) {
             if (ImGui::Button("Tags Folder", ImVec2(halfButtonWidth, 0.0f))) {
@@ -2264,6 +2272,7 @@ static void drawWorkflowPanel(AppState& state) {
             refreshAvailableMeshTags(state);
             syncDerivedPaths(state);
         }
+        ImGui::SetNextItemWidth(-1.0f);
         std::string selectedDisplay = selectedMeshChoiceDisplay(state);
         if (ImGui::BeginCombo("##meshTagPicker", selectedDisplay.c_str())) {
             ImGui::SetNextItemWidth(-1.0f);
@@ -2293,6 +2302,7 @@ static void drawWorkflowPanel(AppState& state) {
     }
 
     if (ImGui::CollapsingHeader("Output", defaultOpen)) {
+        ImGui::TextDisabled("These paths are the handoff between extraction, plugin packaging, and Blender export.");
         labeledInputText("Extracted Map Folder", "##outputFolder", state.outputFolder);
         if (ImGui::Button("Browse Output", ImVec2(-1.0f, 0.0f))) {
             pickFolderIntoBuffer(state.outputFolder, repoDir);
@@ -2311,6 +2321,7 @@ static void drawWorkflowPanel(AppState& state) {
     }
 
     if (ImGui::CollapsingHeader("Options")) {
+        ImGui::TextDisabled("These toggles control how scripts write files and how output paths stay aligned.");
         ImGui::Checkbox("Overwrite exports", &state.overwrite);
         ImGui::Checkbox("Write ORA from extract_map", &state.writeOra);
         ImGui::Checkbox("Omit static animation snapshots in map_combined.obj", &state.exportNoAnimationSnapshots);
@@ -2326,9 +2337,6 @@ static void drawWorkflowPanel(AppState& state) {
             ImGui::TextDisabled("%s", state.settingsStatus.c_str());
         }
     }
-
-    bool ready = hasRequiredLayout(state);
-    const std::vector<std::string> workflowIssues = collectWorkflowIssues(state);
 
     if (ImGui::CollapsingHeader("Run", defaultOpen)) {
         std::string scriptsText = state.scriptDir.string();
@@ -2417,6 +2425,11 @@ static void logActionSummary(AppState& state, const json& action, const char* ph
 
 static void drawLogPanel(AppState& state) {
     ImGui::Begin("Command Log");
+    ImGui::TextDisabled("Live shell output from extraction, plugin build, and action save operations.");
+    drawStatusChip(state.runner.running.load() ? "Streaming Output" : "Idle",
+                   state.runner.running.load() ? ImVec4(0.18f, 0.54f, 0.35f, 1.0f)
+                                               : ImVec4(0.26f, 0.30f, 0.36f, 1.0f));
+    ImGui::Separator();
     if (ImGui::Button("Clear Log")) {
         state.runner.clear();
     }
@@ -2534,8 +2547,22 @@ static void drawActionsPanel(AppState& state) {
     const char* actionsWindowTitle = state.actionsDirty ? "Actions *###Actions" : "Actions###Actions";
     ImGui::Begin(actionsWindowTitle);
 
-    ImGui::TextWrapped("Safe path right now: fixed-size action edits. Changing integers, flags, IDs, angles, distances, and point coordinates is supported as long as the serialized parameter size does not change.");
-    ImGui::TextDisabled("Size-changing action edits are currently blocked on save instead of being written riskily.");
+    ImGui::TextWrapped("This editor is intentionally conservative. Fixed-size action edits are safe, and any edit that would change serialized parameter size is blocked on save.");
+    int loadedCount = 0;
+    if (state.actionsLoaded && state.actionsDoc.contains("actions") && state.actionsDoc["actions"].is_array()) {
+        loadedCount = static_cast<int>(state.actionsDoc["actions"].size());
+    }
+    drawStatusChip(state.actionsLoaded ? "Loaded" : "Not Loaded",
+                   state.actionsLoaded ? ImVec4(0.22f, 0.41f, 0.62f, 1.0f)
+                                       : ImVec4(0.26f, 0.30f, 0.36f, 1.0f));
+    ImGui::SameLine();
+    std::string countChip = std::string("Actions ") + std::to_string(loadedCount);
+    drawStatusChip(countChip.c_str(), ImVec4(0.29f, 0.24f, 0.46f, 1.0f));
+    ImGui::SameLine();
+    std::string dirtyChip = std::string("Dirty ") + std::to_string(state.dirtyActionIndices.size());
+    drawStatusChip(dirtyChip.c_str(),
+                   state.actionsDirty ? ImVec4(0.70f, 0.42f, 0.12f, 1.0f)
+                                      : ImVec4(0.26f, 0.30f, 0.36f, 1.0f));
     ImGui::Separator();
 
     if (ImGui::Button("Load Actions")) {
@@ -2717,7 +2744,7 @@ static void drawActionsPanel(AppState& state) {
     }
 
     json& actions = state.actionsDoc["actions"];
-    ImGui::InputText("Filter (name, type, id)", state.actionFilter.data(), state.actionFilter.size());
+    ImGui::InputTextWithHint("##actionFilter", "Filter by name, type, or id", state.actionFilter.data(), state.actionFilter.size());
     std::string filter = state.actionFilter.data();
     std::string filterLower;
     filterLower.reserve(filter.size());
@@ -2739,10 +2766,20 @@ static void drawActionsPanel(AppState& state) {
         visibleIndices.push_back(static_cast<int>(i));
     }
 
-    ImGui::TextDisabled("%zu of %zu actions", visibleIndices.size(), actions.size());
+    float splitterWidth = 8.0f;
+    const float minListWidth = 260.0f;
+    const float minEditorWidth = 360.0f;
+    static float actionsListWidth = 380.0f;
+    float totalWidth = ImGui::GetContentRegionAvail().x;
+    float maxListWidth = totalWidth - minEditorWidth - splitterWidth;
+    if (maxListWidth < minListWidth) maxListWidth = minListWidth;
+    if (actionsListWidth < minListWidth) actionsListWidth = minListWidth;
+    if (actionsListWidth > maxListWidth) actionsListWidth = maxListWidth;
 
-    ImGui::BeginChild("actions_list", ImVec2(380.0f, 0.0f), true);
+    ImGui::BeginChild("actions_list", ImVec2(actionsListWidth, 0.0f), true);
     const ImVec4 dirtyColor(1.0f, 0.75f, 0.35f, 1.0f);
+    ImGui::TextDisabled("%zu of %zu actions", visibleIndices.size(), actions.size());
+    ImGui::Separator();
     ImGuiListClipper clipper;
     clipper.Begin(static_cast<int>(visibleIndices.size()));
     while (clipper.Step()) {
@@ -2750,17 +2787,24 @@ static void drawActionsPanel(AppState& state) {
             int i = visibleIndices[static_cast<size_t>(row)];
             const json& action = actions[static_cast<size_t>(i)];
             std::string name = jsonStringOrEmpty(action, "name");
-            std::string visibleLabel = name.empty() ? "<unnamed>" : name;
+            std::string visibleLabel = name.empty() ? "Untitled Action" : name;
             std::string typeStr = jsonStringOrEmpty(action, "type");
+            int actionRowId = jsonIntOrDefault(action, "id");
+            int actionIndent = (std::max)(0, jsonIntOrDefault(action, "indent"));
+            const char* typeLabel = guiActionTypeLabel(typeStr);
+            std::string meta = "L" + std::to_string(actionIndent) + "  #" + std::to_string(actionRowId);
             if (!typeStr.empty()) {
-                const char* typeLabel = guiActionTypeLabel(typeStr);
-                visibleLabel += "  [";
-                visibleLabel += typeLabel ? typeLabel : typeStr;
-                visibleLabel += "]";
+                meta += "  ";
+                meta += typeLabel ? typeLabel : typeStr;
+            } else {
+                meta += "  Container";
             }
             const bool dirty = state.dirtyActionIndices.count(i) > 0;
-            std::string label = (dirty ? "* " : "  ") + visibleLabel + "##action" + std::to_string(i);
+            std::string label = (dirty ? "* " : "  ") + visibleLabel + "  [" + meta + "]##action" + std::to_string(i);
             const bool selected = (i == state.selectedActionIndex);
+            const float baseCursorX = ImGui::GetCursorPosX();
+            const float indentPixels = static_cast<float>((std::min)(actionIndent, 12)) * 14.0f;
+            ImGui::SetCursorPosX(baseCursorX + indentPixels);
             if (dirty) ImGui::PushStyleColor(ImGuiCol_Text, dirtyColor);
             if (ImGui::Selectable(label.c_str(), selected)) {
                 state.selectedActionIndex = i;
@@ -2771,7 +2815,28 @@ static void drawActionsPanel(AppState& state) {
     clipper.End();
     ImGui::EndChild();
 
-    ImGui::SameLine();
+    ImGui::SameLine(0.0f, 0.0f);
+    ImVec2 splitterPos = ImGui::GetCursorScreenPos();
+    float splitterHeight = ImGui::GetContentRegionAvail().y;
+    ImGui::InvisibleButton("##actions_splitter", ImVec2(splitterWidth, splitterHeight));
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
+    if (ImGui::IsItemActive()) {
+        actionsListWidth += ImGui::GetIO().MouseDelta.x;
+        if (actionsListWidth < minListWidth) actionsListWidth = minListWidth;
+        if (actionsListWidth > maxListWidth) actionsListWidth = maxListWidth;
+    }
+    ImU32 splitterColor = ImGui::GetColorU32(ImGui::IsItemActive()
+        ? ImVec4(0.36f, 0.64f, 0.94f, 1.0f)
+        : (ImGui::IsItemHovered() ? ImVec4(0.28f, 0.48f, 0.72f, 1.0f)
+                                  : ImVec4(0.19f, 0.22f, 0.27f, 1.0f)));
+    ImGui::GetWindowDrawList()->AddRectFilled(splitterPos,
+                                              ImVec2(splitterPos.x + splitterWidth, splitterPos.y + splitterHeight),
+                                              splitterColor,
+                                              4.0f);
+
+    ImGui::SameLine(0.0f, 0.0f);
 
     ImGui::BeginChild("actions_editor", ImVec2(0.0f, 0.0f), true);
     if (state.selectedActionIndex < 0 || state.selectedActionIndex >= static_cast<int>(actions.size())) {
@@ -2793,8 +2858,20 @@ static void drawActionsPanel(AppState& state) {
     int expirationModeId = jsonIntOrDefault(action, "expiration_mode_id", guiExpirationModeIdFromName(jsonStringOrEmpty(action, "expiration_mode")));
     float lower = static_cast<float>(jsonDoubleOrDefault(action, "trigger_time_lower_bound_seconds"));
     float delta = static_cast<float>(jsonDoubleOrDefault(action, "trigger_time_delta_seconds"));
+    const char* currentTypeLabel = guiActionTypeLabel(typeBuf.data());
+    const std::string actionTitle = std::strlen(nameBuf.data()) ? std::string(nameBuf.data()) : std::string("Untitled Action");
+    std::string detailLine = std::string("ID ") + std::to_string(actionId) + "  |  " +
+                             (std::strlen(typeBuf.data()) ? std::string(typeBuf.data()) : std::string("container"));
+    if (currentTypeLabel) {
+        detailLine += " - ";
+        detailLine += currentTypeLabel;
+    }
+    detailLine += "  |  ";
+    detailLine += std::to_string(action.contains("parameters") && action["parameters"].is_array() ? action["parameters"].size() : 0);
+    detailLine += " parameter(s)";
 
-    ImGui::Text("Action %d", actionId);
+    ImGui::TextUnformatted(actionTitle.c_str());
+    ImGui::TextDisabled("%s", detailLine.c_str());
     ImGui::Separator();
 
     if (ImGui::InputText("Name", nameBuf.data(), nameBuf.size())) {
@@ -2946,12 +3023,6 @@ static void drawActionsPanel(AppState& state) {
         ImGui::TextDisabled("No parameters.");
     }
 
-    if (action.contains("parameter_data_hex")) {
-        ImGui::SeparatorText("Raw Parameter Hex");
-        std::string hex = jsonStringOrEmpty(action, "parameter_data_hex");
-        ImGui::TextWrapped("%s", hex.c_str());
-    }
-
     ImGui::EndChild();
     ImGui::End();
 }
@@ -2959,12 +3030,68 @@ static void drawActionsPanel(AppState& state) {
 static void setupStyle() {
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 6.0f;
-    style.FrameRounding = 4.0f;
-    style.GrabRounding = 4.0f;
-    style.TabRounding = 4.0f;
-    style.FramePadding = ImVec2(8.0f, 5.0f);
-    style.ItemSpacing = ImVec2(8.0f, 6.0f);
+    style.WindowRounding = 10.0f;
+    style.ChildRounding = 10.0f;
+    style.FrameRounding = 8.0f;
+    style.GrabRounding = 8.0f;
+    style.TabRounding = 8.0f;
+    style.ScrollbarRounding = 10.0f;
+    style.PopupRounding = 8.0f;
+    style.WindowBorderSize = 1.0f;
+    style.ChildBorderSize = 1.0f;
+    style.FrameBorderSize = 1.0f;
+    style.FramePadding = ImVec2(10.0f, 7.0f);
+    style.ItemSpacing = ImVec2(10.0f, 8.0f);
+    style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
+    style.WindowPadding = ImVec2(12.0f, 12.0f);
+    style.IndentSpacing = 20.0f;
+
+    ImVec4* colors = style.Colors;
+    colors[ImGuiCol_Text]                 = ImVec4(0.92f, 0.93f, 0.95f, 1.00f);
+    colors[ImGuiCol_TextDisabled]         = ImVec4(0.56f, 0.61f, 0.68f, 1.00f);
+    colors[ImGuiCol_WindowBg]             = ImVec4(0.08f, 0.10f, 0.13f, 1.00f);
+    colors[ImGuiCol_ChildBg]              = ImVec4(0.10f, 0.12f, 0.16f, 1.00f);
+    colors[ImGuiCol_PopupBg]              = ImVec4(0.10f, 0.12f, 0.16f, 0.98f);
+    colors[ImGuiCol_Border]               = ImVec4(0.20f, 0.24f, 0.30f, 1.00f);
+    colors[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    colors[ImGuiCol_FrameBg]              = ImVec4(0.12f, 0.15f, 0.20f, 1.00f);
+    colors[ImGuiCol_FrameBgHovered]       = ImVec4(0.16f, 0.22f, 0.30f, 1.00f);
+    colors[ImGuiCol_FrameBgActive]        = ImVec4(0.20f, 0.28f, 0.38f, 1.00f);
+    colors[ImGuiCol_TitleBg]              = ImVec4(0.09f, 0.11f, 0.15f, 1.00f);
+    colors[ImGuiCol_TitleBgActive]        = ImVec4(0.11f, 0.15f, 0.20f, 1.00f);
+    colors[ImGuiCol_MenuBarBg]            = ImVec4(0.10f, 0.12f, 0.16f, 1.00f);
+    colors[ImGuiCol_ScrollbarBg]          = ImVec4(0.06f, 0.07f, 0.10f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrab]        = ImVec4(0.25f, 0.31f, 0.39f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.32f, 0.40f, 0.50f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.38f, 0.48f, 0.60f, 1.00f);
+    colors[ImGuiCol_CheckMark]            = ImVec4(0.42f, 0.76f, 0.96f, 1.00f);
+    colors[ImGuiCol_SliderGrab]           = ImVec4(0.42f, 0.76f, 0.96f, 1.00f);
+    colors[ImGuiCol_SliderGrabActive]     = ImVec4(0.60f, 0.86f, 1.00f, 1.00f);
+    colors[ImGuiCol_Button]               = ImVec4(0.17f, 0.22f, 0.29f, 1.00f);
+    colors[ImGuiCol_ButtonHovered]        = ImVec4(0.24f, 0.31f, 0.40f, 1.00f);
+    colors[ImGuiCol_ButtonActive]         = ImVec4(0.30f, 0.40f, 0.51f, 1.00f);
+    colors[ImGuiCol_Header]               = ImVec4(0.16f, 0.23f, 0.32f, 0.90f);
+    colors[ImGuiCol_HeaderHovered]        = ImVec4(0.23f, 0.33f, 0.44f, 0.95f);
+    colors[ImGuiCol_HeaderActive]         = ImVec4(0.28f, 0.40f, 0.54f, 1.00f);
+    colors[ImGuiCol_Separator]            = ImVec4(0.22f, 0.26f, 0.33f, 1.00f);
+    colors[ImGuiCol_SeparatorHovered]     = ImVec4(0.35f, 0.58f, 0.88f, 1.00f);
+    colors[ImGuiCol_SeparatorActive]      = ImVec4(0.42f, 0.70f, 1.00f, 1.00f);
+    colors[ImGuiCol_ResizeGrip]           = ImVec4(0.27f, 0.34f, 0.43f, 0.50f);
+    colors[ImGuiCol_ResizeGripHovered]    = ImVec4(0.35f, 0.58f, 0.88f, 0.70f);
+    colors[ImGuiCol_ResizeGripActive]     = ImVec4(0.42f, 0.70f, 1.00f, 0.95f);
+    colors[ImGuiCol_Tab]                  = ImVec4(0.12f, 0.16f, 0.22f, 1.00f);
+    colors[ImGuiCol_TabHovered]           = ImVec4(0.20f, 0.29f, 0.40f, 1.00f);
+    colors[ImGuiCol_TabActive]            = ImVec4(0.17f, 0.24f, 0.33f, 1.00f);
+    colors[ImGuiCol_TabUnfocused]         = ImVec4(0.09f, 0.12f, 0.17f, 1.00f);
+    colors[ImGuiCol_TabUnfocusedActive]   = ImVec4(0.13f, 0.18f, 0.25f, 1.00f);
+    colors[ImGuiCol_DockingPreview]       = ImVec4(0.35f, 0.58f, 0.88f, 0.70f);
+    colors[ImGuiCol_DockingEmptyBg]       = ImVec4(0.07f, 0.09f, 0.12f, 1.00f);
+    colors[ImGuiCol_PlotLines]            = ImVec4(0.70f, 0.74f, 0.82f, 1.00f);
+    colors[ImGuiCol_PlotLinesHovered]     = ImVec4(0.98f, 0.65f, 0.24f, 1.00f);
+    colors[ImGuiCol_PlotHistogram]        = ImVec4(0.36f, 0.72f, 0.94f, 1.00f);
+    colors[ImGuiCol_PlotHistogramHovered] = ImVec4(0.98f, 0.65f, 0.24f, 1.00f);
+    colors[ImGuiCol_TextSelectedBg]       = ImVec4(0.29f, 0.50f, 0.79f, 0.45f);
+    colors[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.04f, 0.05f, 0.08f, 0.74f);
 }
 
 ImFont* g_monoFont = nullptr;
@@ -2997,6 +3124,18 @@ static void pushPrimaryButtonStyle() {
 
 static void popPrimaryButtonStyle() {
     ImGui::PopStyleColor(3);
+}
+
+static void drawStatusChip(const char* text, const ImVec4& bgColor, const ImVec4& textColor) {
+    ImGui::PushStyleColor(ImGuiCol_Button, bgColor);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, bgColor);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, bgColor);
+    ImGui::PushStyleColor(ImGuiCol_Text, textColor);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 4.0f));
+    ImGui::Button(text);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(4);
 }
 
 int main(int argc, char** argv) {
@@ -3071,8 +3210,8 @@ int main(int argc, char** argv) {
         ImGui::Begin("##DockHost", nullptr, hostFlags);
         ImGui::PopStyleVar(3);
 
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 4.0f));
-        ImGui::BeginChild("##TopBar", ImVec2(0.0f, 32.0f), false, ImGuiWindowFlags_NoScrollbar);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 8.0f));
+        ImGui::BeginChild("##TopBar", ImVec2(0.0f, 64.0f), false, ImGuiWindowFlags_NoScrollbar);
         drawTopBar(state);
         ImGui::EndChild();
         ImGui::PopStyleVar();
