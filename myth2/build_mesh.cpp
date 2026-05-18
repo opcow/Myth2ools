@@ -193,6 +193,124 @@ struct SourceCellRecord {
     std::vector<uint8_t> raw;
 };
 
+// Generate the mesh_LOD_data section from a 12-byte-per-cell array.
+// Algorithm reverse-engineered from Loathing 1.8.4 (FUN_004415d0 + FUN_00440730);
+// each LOD entry covers a 2x2 cell block and packs slope/edge/flag bits.
+// Output size = (cellW/2) * (cellH/2) * 2 bytes (BE uint16 per LOD cell).
+static std::vector<uint8_t> generateMeshLodFromCells(const std::vector<SourceCellRecord>& cells,
+                                                     int cellW, int cellH) {
+    std::vector<uint8_t> out;
+    if (cellW <= 0 || cellH <= 0 || (cellW & 1) || (cellH & 1)) return out;
+    if ((size_t)(cellW * cellH) != cells.size()) return out;
+
+    auto clampCellIndex = [&](int x, int y) -> size_t {
+        if (x < 0) x = 0;
+        else if (x >= cellW) x = cellW - 1;
+        if (y < 0) y = 0;
+        else if (y >= cellH) y = cellH - 1;
+        return (size_t)y * (size_t)cellW + (size_t)x;
+    };
+    auto getCell = [&](int x, int y) -> const uint8_t* {
+        return cells[clampCellIndex(x, y)].raw.data();
+    };
+    auto readBE16s = [](const uint8_t* p) -> int16_t {
+        return (int16_t)((uint16_t)((uint16_t)p[0] << 8) | (uint16_t)p[1]);
+    };
+    auto readBE16u = [](const uint8_t* p) -> uint16_t {
+        return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
+    };
+
+    const int LW = cellW / 2;
+    const int LH = cellH / 2;
+    std::vector<uint16_t> lod((size_t)LW * (size_t)LH, 0);
+
+    // First pass: per-LOD-cell compute (matches Loathing FUN_00440730).
+    for (int ly = 0; ly < LH; ++ly) {
+        for (int lx = 0; lx < LW; ++lx) {
+            int cx = lx * 2;
+            int cy = ly * 2;
+            const uint8_t* a  = getCell(cx,   cy);     // top-left of 2x2
+            const uint8_t* b  = getCell(cx+1, cy);     // top-right
+            const uint8_t* c  = getCell(cx+1, cy+1);   // bottom-right
+            const uint8_t* dd = getCell(cx,   cy+1);   // bottom-left
+            const uint8_t* e  = getCell(cx+2, cy);
+            const uint8_t* f  = getCell(cx+2, cy+1);
+            const uint8_t* g  = getCell(cx+2, cy+2);
+            const uint8_t* hh = getCell(cx+1, cy+2);
+            const uint8_t* ii = getCell(cx,   cy+2);
+
+            auto slope = [&](const uint8_t* p, const uint8_t* q, const uint8_t* r) {
+                int v = (int)readBE16s(p) - 2 * (int)readBE16s(q) + (int)readBE16s(r);
+                return v < 0 ? -v : v;
+            };
+            uint16_t L = 0;
+            if (slope(a, b, e) > 128)  L |= 0x01;
+            if (slope(e, f, g) > 128)  L |= 0x02;
+            if (slope(ii, hh, g) > 128) L |= 0x04;
+            if (slope(a, dd, ii) > 128) L |= 0x08;
+            if (slope(b, c, hh) > 128) L |= 0x0F;
+            if (slope(dd, c, f) > 128) L |= 0x0F;
+
+            // render_height present (offset 10, int16 BE; -1 = unset).
+            auto rh = [&](const uint8_t* p) { return readBE16s(p + 10); };
+            if (rh(a)  != -1) L |= 0x09;
+            if (rh(b)  != -1) L |= 0x03;
+            if (rh(c)  != -1) L |= 0x06;
+            if (rh(dd) != -1) L |= 0x0C;
+
+            // flags16 (offset 4, uint16 BE) bit 0x4000 check.
+            auto fl = [&](const uint8_t* p) { return readBE16u(p + 4); };
+            if (fl(a)  & 0x4000) L |= 0x09; else L |= 0x10;
+            if (fl(b)  & 0x4000) L |= 0x03; else L |= 0x20;
+            if (fl(c)  & 0x4000) L |= 0x06; else L |= 0x40;
+            if (fl(dd) & 0x4000) L |= 0x0C; else L |= 0x80;
+
+            // flags16 bits 0x800 and 0x1000 mapped to LOD high byte.
+            if (fl(a)  & 0x800)  L |= 0x8000;
+            if (fl(a)  & 0x1000) L |= 0x0100;
+            if (fl(b)  & 0x800)  L |= 0x0200;
+            if (fl(b)  & 0x1000) L |= 0x0400;
+            if (fl(c)  & 0x1000) L |= 0x0800;
+            if (fl(c)  & 0x800)  L |= 0x1000;
+            if (fl(dd) & 0x1000) L |= 0x2000;
+            if (fl(dd) & 0x800)  L |= 0x4000;
+
+            // XOR post-pass: mismatched pairs light the corresponding edge bit.
+            if ((L & 0x0100) != (L & 0x0200)) L |= 0x01;
+            if ((L & 0x0400) != (L & 0x0800)) L |= 0x02;
+            if ((L & 0x1000) != (L & 0x2000)) L |= 0x04;
+            if ((L & 0x4000) != (L & 0x8000)) L |= 0x08;
+
+            if ((L & 0xFFF0) == 0xFFF0) L = 0xFFF0;
+            lod[(size_t)ly * (size_t)LW + (size_t)lx] = L;
+        }
+    }
+
+    // Second pass: linear-buffer neighbor propagation (matches Loathing
+    // FUN_004415d0's loop; clamp at buffer boundaries, not 2D grid edges).
+    const size_t total = (size_t)LW * (size_t)LH;
+    for (size_t i = 0; i < total; ++i) {
+        size_t nN = (i >= (size_t)LW) ? i - (size_t)LW : 0;
+        size_t nS = (i + (size_t)LW < total) ? i + (size_t)LW : total - 1;
+        size_t nE = (i + 1 < total) ? i + 1 : total - 1;
+        size_t nW = (i > 0) ? i - 1 : 0;
+        uint16_t v = lod[i];
+        if ((v & 0x01) == 0 && (lod[nN] & 0x04) != 0) v |= 0x01;
+        if ((v & 0x02) == 0 && (lod[nE] & 0x08) != 0) v |= 0x02;
+        if ((v & 0x04) == 0 && (lod[nS] & 0x01) != 0) v |= 0x04;
+        if ((v & 0x08) == 0 && (lod[nW] & 0x02) != 0) v |= 0x08;
+        lod[i] = v;
+    }
+
+    // Pack as BE uint16.
+    out.resize(lod.size() * 2);
+    for (size_t i = 0; i < lod.size(); ++i) {
+        out[i * 2 + 0] = (uint8_t)((lod[i] >> 8) & 0xFF);
+        out[i * 2 + 1] = (uint8_t)(lod[i] & 0xFF);
+    }
+    return out;
+}
+
 static void loadFixedRecords(const std::vector<uint8_t>& bytes, size_t stride, std::vector<SourceInstanceRecord>& out) {
     out.clear();
     if (stride == 0 || bytes.empty() || (bytes.size() % stride) != 0) return;
@@ -680,8 +798,8 @@ int main(int argc, char* argv[]) {
     std::vector<uint8_t> rebuiltConnectorPayload;
     uint32_t rebuiltConnectorCount = 0;
     if (noBlob) {
-        printf("--no-blob: dropping editor appendix and trailing_a; preserving media_coverage and mesh_LOD bytes\n");
-        printf("           (empirical 1.8.5 test: doc's 'engine regenerates these when size=0' claim does NOT hold)\n");
+        printf("--no-blob: dropping editor appendix and trailing_a; preserving media_coverage bytes from source\n");
+        printf("           regenerating mesh_LOD_data from cells (Loathing's algorithm)\n");
         printf("           regenerating fence connectors from assets/terrain/fences.json\n");
         sourceAppendix.clear();
         sourceTrailingOffsetA = 0;
@@ -783,6 +901,37 @@ int main(int argc, char* argv[]) {
     }
     if (!haveSupportCellGrid && sourceMesh.empty()) {
         sourceMesh = readFile(folder + "/raw/mesh_tag.bin");
+    }
+
+    // In --no-blob mode, regenerate mesh_LOD_data from cells (Loathing's algorithm,
+    // FUN_004415d0 + FUN_00440730) and splice it into sourceTail at the existing offset.
+    // Falls back to preserving source LOD bytes if cell records aren't loaded.
+    if (noBlob && sourceMeshLodSize > 0 && !sourceTail.empty() &&
+        sourceMeshLodOffset >= sourceActionOffset + sourceActionSize) {
+        std::vector<SourceCellRecord> lodCells = sourceCellRecords;
+        if (lodCells.empty() && supportCellGrid.size() == (size_t)totalCells * 12) {
+            lodCells.resize((size_t)totalCells);
+            for (size_t i = 0; i < (size_t)totalCells; i++) {
+                lodCells[i].raw.assign(supportCellGrid.begin() + (ptrdiff_t)(i * 12),
+                                       supportCellGrid.begin() + (ptrdiff_t)((i + 1) * 12));
+            }
+        }
+        if (lodCells.size() == (size_t)totalCells) {
+            std::vector<uint8_t> gen = generateMeshLodFromCells(lodCells, cellW, cellH);
+            uint32_t tailBase = sourceActionOffset + sourceActionSize;
+            size_t lodOffInTail = (size_t)(sourceMeshLodOffset - tailBase);
+            if (gen.size() == (size_t)sourceMeshLodSize &&
+                lodOffInTail + gen.size() <= sourceTail.size()) {
+                memcpy(sourceTail.data() + lodOffInTail, gen.data(), gen.size());
+                printf("--no-blob: regenerated mesh_LOD_data (%zu bytes) from cell heights/flags\n",
+                       gen.size());
+            } else {
+                printf("--no-blob: WARNING LOD generator produced %zu bytes (expected %u), keeping source LOD\n",
+                       gen.size(), sourceMeshLodSize);
+            }
+        } else {
+            printf("--no-blob: no cell records available; keeping source mesh_LOD_data bytes\n");
+        }
     }
 
     printf("Mesh: %s, %dx%d cells\n", meshTag.c_str(), cellW, cellH);

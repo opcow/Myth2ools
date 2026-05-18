@@ -99,10 +99,12 @@ When both are present, `build_mesh` prefers:
 `build_mesh --no-blob` is the transitional mode that gets us closest to a fully semantic rebuild today:
 
 - **Dropped:** editor appendix (past `data_size`), `trailing_a` section. Both confirmed safe by [Doc/mesh_post_action_sections.md](mesh_post_action_sections.md).
-- **Regenerated from semantic data:** the 0x120 fence connector payload is rebuilt from `assets/terrain/fences.json`. Each 64-byte record gets its post identifiers written as uint16 BE plus the post count at byte 63; the unknown bytes 48-62 are zeroed.
-- **Preserved from source (transitional):** `media_coverage_region` (~12 KB) and `mesh_LOD_data` (18432 B for le3e). Empirical 1.8.5 testing showed dropping either breaks the engine: LOD drop → black/transparent terrain, MC drop (with LOD also dropped) → crash in `drop_model_for_current_frame`. The Vengeance source / Myth II decomp claim that these are engine-regenerated does NOT hold in gameplay mode.
+- **Regenerated from semantic data:**
+  - The 0x120 fence connector payload is rebuilt from `assets/terrain/fences.json`. Each 64-byte record gets its post identifiers written as uint16 BE plus the post count at byte 63; the unknown bytes 48–62 are zeroed.
+  - `mesh_LOD_data` is regenerated from cell heights and flags using Loathing's algorithm — see [mesh_lod_format.md](mesh_lod_format.md). Validated at 99.83% byte-match against Bungie's shipped LOD; plugin loads cleanly with correct terrain.
+- **Preserved from source (transitional):** `media_coverage_region` (~12 KB for le3e). Empirical 1.8.5 testing shows the engine does not regenerate it when size=0 in gameplay mode. Decoding remains; see the open item in [mesh_post_action_sections.md](mesh_post_action_sections.md).
 
-In `--no-blob` mode, `post_data_appendix.bin` is no longer needed. `post_action_tail.bin` is still needed (as the source of MC and LOD bytes) until we decode those formats.
+In `--no-blob` mode, `post_data_appendix.bin` is no longer needed. `post_action_tail.bin` is still needed only for media_coverage bytes until that section is decoded too.
 
 ## Remaining gap
 
