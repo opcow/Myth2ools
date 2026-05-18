@@ -100,11 +100,11 @@ When both are present, `build_mesh` prefers:
 
 - **Dropped:** editor appendix (past `data_size`), `trailing_a` section. Both confirmed safe by [Doc/mesh_post_action_sections.md](mesh_post_action_sections.md).
 - **Regenerated from semantic data:**
-  - The 0x120 fence connector payload is rebuilt from `assets/terrain/fences.json`. Each 64-byte record gets its post identifiers written as uint16 BE plus the post count at byte 63; the unknown bytes 48–62 are zeroed.
+  - `media_coverage_region` is emitted as `cellH * 16` bytes filled with BE16 `cellW * 8` — the runtime alloc/fill formula from the Ghidra decomp. Empirically validated: the engine ignores any editor-side records past this runtime default.
   - `mesh_LOD_data` is regenerated from cell heights and flags using Loathing's algorithm — see [mesh_lod_format.md](mesh_lod_format.md). Validated at 99.83% byte-match against Bungie's shipped LOD; plugin loads cleanly with correct terrain.
-- **Preserved from source (transitional):** `media_coverage_region` (~12 KB for le3e). Empirical 1.8.5 testing shows the engine does not regenerate it when size=0 in gameplay mode. Decoding remains; see the open item in [mesh_post_action_sections.md](mesh_post_action_sections.md).
+  - The 0x120 fence connector payload is rebuilt from `assets/terrain/fences.json`. Each 64-byte record gets its post identifiers written as uint16 BE plus the post count at byte 63; the unknown bytes 48–62 are zeroed.
 
-In `--no-blob` mode, `post_data_appendix.bin` is no longer needed. `post_action_tail.bin` is still needed only for media_coverage bytes until that section is decoded too.
+In `--no-blob` mode, neither `post_data_appendix.bin` nor `post_action_tail.bin` are read. The only mesh-tag sidecars `build_mesh` consumes are `cell_grid.json` (or `cell_grid.bin`), `unit_types.json`, `source_instances.json`, and `assets/terrain/fences.json`.
 
 ## Remaining gap
 
