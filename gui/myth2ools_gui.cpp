@@ -1023,7 +1023,13 @@ static fs::path actionsJsonPath(const AppState& state) {
 static fs::path terrainPreviewPath(const AppState& state) {
     fs::path repoDir = state.exeDir.parent_path();
     fs::path outFolder = resolveUserPath(repoDir, state.outputFolder.data());
-    return outFolder / "terrain" / "terrain.bmp";
+    const fs::path colorPath = outFolder / "terrain" / "color.bmp";
+    const fs::path legacyPath = outFolder / "terrain" / "terrain.bmp";
+    std::error_code ec;
+    if (fs::exists(colorPath, ec) && !ec) return colorPath;
+    ec.clear();
+    if (fs::exists(legacyPath, ec) && !ec) return legacyPath;
+    return colorPath;
 }
 
 static fs::path shadowPreviewPath(const AppState& state) {
@@ -1169,7 +1175,7 @@ static bool applyShadowmapToPreview(std::vector<uint8_t>& terrainRgba,
         return false;
     }
     if (shadowWidth != terrainWidth || shadowHeight != terrainHeight) {
-        error = "Shadow BMP dimensions do not match terrain preview.";
+        error = "Shadow BMP dimensions do not match color preview.";
         return false;
     }
 
@@ -1611,12 +1617,12 @@ static void reloadMapPreviewTexture(AppState& state) {
 
     std::error_code ec;
     if (state.mapPreviewPath.empty()) {
-        state.mapPreviewStatus = "Choose an output folder to preview its terrain image.";
+        state.mapPreviewStatus = "Choose an output folder to preview its color image.";
         state.mapPreviewNeedsReload = false;
         return;
     }
     if (!fs::exists(state.mapPreviewPath, ec) || ec) {
-        state.mapPreviewStatus = "No terrain preview found at " + state.mapPreviewPath.string();
+        state.mapPreviewStatus = "No color preview found at " + state.mapPreviewPath.string();
         state.mapPreviewNeedsReload = false;
         return;
     }

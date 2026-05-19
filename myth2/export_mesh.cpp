@@ -266,12 +266,13 @@ static bool writeOBJ(const std::string& objPath, const MeshInfo& mesh, float hs,
                      const std::string& folder) {
     std::string mtlPath = dirOf(objPath) + stemOf(objPath) + ".mtl";
 
-    // Copy terrain texture into assets/terrain/textures/ alongside the OBJ
-    std::string texName = "terrain.png";
+    // Copy color texture into assets/terrain/textures/ alongside the OBJ
+    std::string texName = "color.png";
     std::string texDest = dirOf(objPath) + "textures/" + texName;
     std::error_code ec;
     fs::create_directories(dirOf(objPath) + "textures", ec);
-    std::string texSrc = folder + "/layers/01_terrain.png";
+    std::string texSrc = folder + "/layers/01_color.png";
+    if (!fs::exists(texSrc)) texSrc = folder + "/layers/01_terrain.png";
     if (fs::exists(texSrc))
         fs::copy_file(texSrc, texDest, fs::copy_options::overwrite_existing, ec);
     std::string texturePath;

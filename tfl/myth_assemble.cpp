@@ -451,7 +451,7 @@ static bool applyBmpEdits(std::vector<uint8_t>& mesh, const Manifest& m, const s
 }
 
 // ---------------------------------------------------------------------------
-// .256 terrain texture: inject terrain.bmp into tile sections
+// .256 terrain texture: inject color.bmp into tile sections
 //
 // .256 layout (all offsets from tag start):
 //   [0..319]        320-byte header
@@ -483,7 +483,7 @@ static bool injectColor(std::vector<uint8_t>& terrain,
 
     int meshW=bW/256, meshH=bH/256;
     if(meshW*meshH*2 != sections){
-        fprintf(stderr,"  terrain.bmp tile count %dx%d*2=%d != sections %d\n",
+        fprintf(stderr,"  color.bmp tile count %dx%d*2=%d != sections %d\n",
                 meshW,meshH,meshW*meshH*2,sections);
         return false;
     }
@@ -600,17 +600,18 @@ static bool injectColor(std::vector<uint8_t>& terrain,
 static bool applyTerrainEdits(std::vector<uint8_t>& terrain,
                                const std::string& folder, int meshW, int meshH)
 {
-    std::string path=folder+"/terrain/terrain.bmp";
+    std::string path=folder+"/terrain/color.bmp";
+    if(!fileExists(path)) path=folder+"/terrain/terrain.bmp";
     if(!fileExists(path)) return false;
     int bW=0,bH=0;
     auto bmpRaw=readFile(path);          // raw bytes for palette extraction
     auto bmp=readBMP8(path,bW,bH);       // flipped pixel array
     int expW=meshW*256, expH=meshH*256;
     if(bmp.empty()||bW!=expW||bH!=expH){
-        if(!bmp.empty()) fprintf(stderr,"  terrain.bmp: %dx%d != expected %dx%d, skipped\n",bW,bH,expW,expH);
+        if(!bmp.empty()) fprintf(stderr,"  color.bmp: %dx%d != expected %dx%d, skipped\n",bW,bH,expW,expH);
         return false;
     }
-    printf("  terrain.bmp...\n");
+    printf("  color.bmp...\n");
     return injectColor(terrain,bmp,bW,bH,bmpRaw);
 }
 
@@ -867,7 +868,7 @@ int main(int argc, char* argv[])
             if(applyTerrainEdits(terrainEntry->data,folder,m.meshWidth,m.meshHeight))
                 put32be(terrainEntry->plugHdr+52,(uint32_t)terrainEntry->data.size());
             else
-                printf("  (no terrain.bmp found or size mismatch)\n");
+                printf("  (no color.bmp found or size mismatch)\n");
         }
 
         bool anyStli=false;

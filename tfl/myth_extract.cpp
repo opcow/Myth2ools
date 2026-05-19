@@ -11,7 +11,7 @@
 //
 //   manifest.json                -- all mesh header fields, tag references, flags
 //   terrain/
-//     terrain.bmp               -- terrain texture        (8-bit indexed)
+//     color.bmp                 -- color texture          (8-bit indexed)
 //     shadow.bmp                 -- shadow/light map        (8-bit greyscale)
 //     lit.bmp                    -- color * shadow         (24-bit RGB multiply)
 //     height.bmp                 -- height map              (8-bit greyscale, normalised)
@@ -1145,7 +1145,7 @@ int main(int argc, char* argv[])
     // ------------------------------------------------------------------
     printf("Step 3: Assembling color texture (%dx%d)...\n",texW,texH);
     std::vector<uint8_t> colorPx=assembleTiles(art,secs,info.meshWidth,info.meshHeight,0);
-    std::string texPath=tp("terrain.bmp");
+    std::string texPath=tp("color.bmp");
     if(!writeBMPMythPal(texPath.c_str(),texW,texH,pal,colorPx)){fclose(art);return 1;}
     printf("  Done: %s\n\n",texPath.c_str());
 
@@ -1281,7 +1281,7 @@ int main(int argc, char* argv[])
     // ------------------------------------------------------------------
     printf("Done!  Output folder: %s/\n\n", base.c_str());
     printf("  manifest.json\n");
-    printf("  terrain/terrain.bmp          (terrain texture)\n");
+    printf("  terrain/color.bmp            (color texture)\n");
     printf("  terrain/shadow.bmp            (shadow/light)\n");
     printf("  terrain/lit.bmp               (multiply composite)\n");
     printf("  terrain/height.bmp            (height, min=%d max=%d)\n",

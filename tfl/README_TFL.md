@@ -36,7 +36,7 @@ myth_assemble <folder> [output.gor] [--edit] [--obj <input.obj>] [--heightscale 
 - `--edit` reapplies editable assets from the extracted folder before rebuilding.
 - `--obj` imports terrain heights from a Wavefront OBJ and recomputes slope bytes.
 - If `--edit` is used and `--obj` is omitted, the assembler auto-detects `<folder>/<tag>.obj`.
-- When OBJ import is used, `height.bmp` is skipped, but `passability.bmp`, `water.bmp`, `animation.bmp`, and `terrain.bmp` still apply.
+- When OBJ import is used, `height.bmp` is skipped, but `passability.bmp`, `water.bmp`, `animation.bmp`, and `color.bmp` still apply.
 
 ### `myth_mesh`
 

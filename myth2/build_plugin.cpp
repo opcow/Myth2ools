@@ -3300,7 +3300,9 @@ int main(int argc, char* argv[]) {
             } else if (t.groupTag == 0x2E323536u && t.subgroupTag == tagFromString(mf.landscapeTag) && (!editListProvided || editTerrain)) {
                 int bW = 0, bH = 0;
                 std::string bmpPath = firstExistingPath({
+                    folder + "/terrain/color.bmp",
                     folder + "/terrain/terrain.bmp",
+                    folder + "/layers/01_color.bmp",
                     folder + "/layers/01_terrain.bmp"
                 });
                 auto bmpRaw = readFile(bmpPath);

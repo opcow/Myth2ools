@@ -315,7 +315,7 @@ So the current conclusion is:
 
 The Myth II OBJ exporters now use a settled Blender-facing convention:
 
-- terrain OBJ geometry matches the in-game / `terrain.bmp` orientation
+- terrain OBJ geometry matches the in-game / `color.bmp` orientation
 - terrain OBJ uses a horizontally flipped UV convention so the textured playfield reads correctly in Blender
 - water OBJ geometry matches the settled terrain OBJ world orientation
 - water OBJ keeps the water UV convention that makes `water.bmp` align correctly on the water surface

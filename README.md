@@ -59,7 +59,7 @@ assets, and writes to
 `output_folder`, or to `<meshtag>/` when no output folder is supplied:
 
 - `raw/mesh_tag.bin`
-- `terrain/terrain.bmp`
+- `terrain/color.bmp`
 - `terrain/shadow.bmp`
 - `terrain/water.bmp`
 - `terrain/water_mask.bmp`
@@ -91,7 +91,7 @@ diagnostic mask: index `0` is off and any nonzero index is on when imported with
 When `--ora` is enabled, the extractor also writes a layered OpenRaster archive
 containing the terrain-side layer stack:
 
-- terrain
+- color
 - shadow
 - water
 - passability
@@ -130,7 +130,7 @@ packs the mesh plus any extracted terrain, name, and screen tags.
 - `--zero-mesh-lod` experimentally zeroes only the mesh LOD section during
   `--edit` while preserving the rest of the post-action mesh data.
 - `build_plugin` reads editable assets from the canonical extracted paths:
-  - `terrain/terrain.bmp`
+  - `terrain/color.bmp`
   - `terrain/shadow.bmp`
   - `terrain/passability.bmp`
   - `terrain/water.bmp`
@@ -140,7 +140,7 @@ packs the mesh plus any extracted terrain, name, and screen tags.
   - `screens/postgame_collection/`
   - `strings/name.txt`
   - `assets/sprites/units_edited.json`
-- `terrain/terrain.bmp` and `terrain/shadow.bmp` are reinjected into the terrain
+- `terrain/color.bmp` and `terrain/shadow.bmp` are reinjected into the terrain
   `.256` when present.
 - `terrain/passability.bmp` is converted back into Myth II terrain-type flags.
   Indexed BMPs use exact pixel indexes; older RGB BMPs are matched by nearest

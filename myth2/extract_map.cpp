@@ -288,7 +288,7 @@ static bool writeORA(const std::string& base){
         {"terrain/passability.bmp","data/passability.png","Passability", true,  true},
         {"terrain/reflection.bmp", "data/reflection.png", "Reflection",  true,  true},
         {"terrain/animation.bmp",  "data/animation.png",  "Animation",   true,  true},
-        {"terrain/terrain.bmp",    "data/terrain.png",    "Terrain",     false, true}
+        {"terrain/color.bmp",      "data/color.png",      "Color",       false, true}
     };
 
     std::vector<OraEntry> entries;
@@ -387,7 +387,7 @@ static void writeLayerBundle(const std::string& base){
         bool blackTransparent;
     };
     const LayerItem items[] = {
-        {"terrain/terrain.bmp",        "layers/01_terrain.png",      "Terrain texture",           true,  false},
+        {"terrain/color.bmp",          "layers/01_color.png",        "Color texture",             true,  false},
         {"terrain/passability.bmp",    "layers/02_passability.png",  "Passability overlay",       true,  true},
         {"terrain/water.bmp",          "layers/03_water.png",        "Water/media reference only",true,  true},
         {"terrain/water_mask.bmp",     "layers/03_water_mask.png",   "Water OBJ texture mask",    true,  true},
@@ -1787,8 +1787,8 @@ int main(int argc, char* argv[]){
             Myth256Palette pal;
             if(readDot256FromData(terrData,refs.submeshW,refs.submeshH,secs,pal)){
                 std::vector<uint8_t> colorPx=assembleTilesFromData(terrData,secs,refs.submeshW,refs.submeshH,0);
-                if(writeBMPMythPal((base+"/terrain/terrain.bmp").c_str(),refs.submeshW*256,refs.submeshH*256,pal,colorPx))
-                    printf("Extracted terrain terrain.bmp from %s\n",terrain->sourceFile.c_str());
+                if(writeBMPMythPal((base+"/terrain/color.bmp").c_str(),refs.submeshW*256,refs.submeshH*256,pal,colorPx))
+                    printf("Extracted terrain color.bmp from %s\n",terrain->sourceFile.c_str());
                 std::vector<uint8_t> shadowPx=assembleTilesFromData(terrData,secs,refs.submeshW,refs.submeshH,1);
                 if(writeBMPGrey((base+"/terrain/shadow.bmp").c_str(),refs.submeshW*256,refs.submeshH*256,shadowPx))
                     printf("Extracted terrain shadow.bmp from %s\n",terrain->sourceFile.c_str());
