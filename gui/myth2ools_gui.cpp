@@ -618,11 +618,14 @@ struct AppState {
     uint64_t actionsBaselineFingerprint = 0;
     std::vector<uint64_t> actionBaselineFingerprints;
     fs::path mapPreviewPath;
+    fs::path mapPreviewShadowPath;
     fs::path mapPreviewUnitsPath;
     unsigned int mapPreviewTextureId = 0;
     int mapPreviewWidth = 0;
     int mapPreviewHeight = 0;
     bool mapPreviewNeedsReload = true;
+    bool mapPreviewApplyShadow = false;
+    bool mapPreviewShadowAvailable = false;
     std::string mapPreviewStatus;
     float mapPreviewZoom = 1.0f;
     ImVec2 mapPreviewPan = ImVec2(0.0f, 0.0f);
@@ -1023,6 +1026,12 @@ static fs::path terrainPreviewPath(const AppState& state) {
     return outFolder / "terrain" / "terrain.bmp";
 }
 
+static fs::path shadowPreviewPath(const AppState& state) {
+    fs::path repoDir = state.exeDir.parent_path();
+    fs::path outFolder = resolveUserPath(repoDir, state.outputFolder.data());
+    return outFolder / "terrain" / "shadow.bmp";
+}
+
 static fs::path unitsPreviewPath(const AppState& state) {
     fs::path repoDir = state.exeDir.parent_path();
     fs::path outFolder = resolveUserPath(repoDir, state.outputFolder.data());
@@ -1144,6 +1153,36 @@ static bool decodeBmpToRgba(const fs::path& path, std::vector<uint8_t>& rgba, in
             rgba[dst + 2] = b;
             rgba[dst + 3] = a;
         }
+    }
+    return true;
+}
+
+static bool applyShadowmapToPreview(std::vector<uint8_t>& terrainRgba,
+                                    int terrainWidth,
+                                    int terrainHeight,
+                                    const fs::path& shadowPath,
+                                    std::string& error) {
+    std::vector<uint8_t> shadowRgba;
+    int shadowWidth = 0;
+    int shadowHeight = 0;
+    if (!decodeBmpToRgba(shadowPath, shadowRgba, shadowWidth, shadowHeight, error)) {
+        return false;
+    }
+    if (shadowWidth != terrainWidth || shadowHeight != terrainHeight) {
+        error = "Shadow BMP dimensions do not match terrain preview.";
+        return false;
+    }
+
+    const size_t pixelCount = static_cast<size_t>(terrainWidth) * static_cast<size_t>(terrainHeight);
+    for (size_t i = 0; i < pixelCount; ++i) {
+        const size_t o = i * 4u;
+        const uint16_t shade = static_cast<uint16_t>(shadowRgba[o + 0]) +
+                               static_cast<uint16_t>(shadowRgba[o + 1]) +
+                               static_cast<uint16_t>(shadowRgba[o + 2]);
+        const uint8_t shadeValue = static_cast<uint8_t>(shade / 3u);
+        terrainRgba[o + 0] = static_cast<uint8_t>((static_cast<uint16_t>(terrainRgba[o + 0]) * shadeValue) / 255u);
+        terrainRgba[o + 1] = static_cast<uint8_t>((static_cast<uint16_t>(terrainRgba[o + 1]) * shadeValue) / 255u);
+        terrainRgba[o + 2] = static_cast<uint8_t>((static_cast<uint16_t>(terrainRgba[o + 2]) * shadeValue) / 255u);
     }
     return true;
 }
@@ -1592,6 +1631,13 @@ static void reloadMapPreviewTexture(AppState& state) {
         return;
     }
 
+    if (state.mapPreviewApplyShadow && state.mapPreviewShadowAvailable) {
+        std::string shadowError;
+        if (!applyShadowmapToPreview(rgba, width, height, state.mapPreviewShadowPath, shadowError)) {
+            state.mapPreviewStatus = shadowError + " Shadow path: " + state.mapPreviewShadowPath.string();
+        }
+    }
+
     glGenTextures(1, &state.mapPreviewTextureId);
     glBindTexture(GL_TEXTURE_2D, state.mapPreviewTextureId);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1608,10 +1654,18 @@ static void reloadMapPreviewTexture(AppState& state) {
 
 static void syncMapPreviewSource(AppState& state) {
     const fs::path desiredPath = terrainPreviewPath(state);
+    const fs::path desiredShadowPath = shadowPreviewPath(state);
     const fs::path desiredUnitsPath = unitsPreviewPath(state);
-    if (desiredPath != state.mapPreviewPath || desiredUnitsPath != state.mapPreviewUnitsPath) {
+    std::error_code ec;
+    const bool shadowAvailable = !desiredShadowPath.empty() && fs::exists(desiredShadowPath, ec) && !ec;
+    if (desiredPath != state.mapPreviewPath ||
+        desiredShadowPath != state.mapPreviewShadowPath ||
+        desiredUnitsPath != state.mapPreviewUnitsPath) {
         state.mapPreviewPath = desiredPath;
+        state.mapPreviewShadowPath = desiredShadowPath;
         state.mapPreviewUnitsPath = desiredUnitsPath;
+        state.mapPreviewShadowAvailable = shadowAvailable;
+        if (!state.mapPreviewShadowAvailable) state.mapPreviewApplyShadow = false;
         state.mapPreviewNeedsReload = true;
         state.mapPreviewStatus.clear();
         state.mapPreviewUnitMarkers.clear();
@@ -1619,6 +1673,12 @@ static void syncMapPreviewSource(AppState& state) {
         state.mapPreviewDragSelecting = false;
         resetMapPreviewView(state);
         releaseMapPreviewTexture(state);
+    } else if (state.mapPreviewShadowAvailable != shadowAvailable) {
+        state.mapPreviewShadowAvailable = shadowAvailable;
+        if (!state.mapPreviewShadowAvailable && state.mapPreviewApplyShadow) {
+            state.mapPreviewApplyShadow = false;
+            state.mapPreviewNeedsReload = true;
+        }
     }
 }
 
@@ -3977,6 +4037,14 @@ static void drawMapPreviewPanel(AppState& state) {
     if (ImGui::Button("Reset View")) {
         resetMapPreviewView(state);
     }
+    ImGui::SameLine();
+    bool applyShadow = state.mapPreviewApplyShadow;
+    if (!state.mapPreviewShadowAvailable) ImGui::BeginDisabled();
+    if (ImGui::Checkbox("Apply Shadowmap", &applyShadow)) {
+        state.mapPreviewApplyShadow = applyShadow;
+        state.mapPreviewNeedsReload = true;
+    }
+    if (!state.mapPreviewShadowAvailable) ImGui::EndDisabled();
     ImGui::SameLine();
     const bool hasSelection = !state.selectedMapUnitIdentifiers.empty() || state.mapPreviewPickTarget.has_value();
     if (!hasSelection) ImGui::BeginDisabled();
