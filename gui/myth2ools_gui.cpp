@@ -153,6 +153,7 @@ static void popPrimaryButtonStyle();
 static void drawStatusChip(const char* text, const ImVec4& bgColor, const ImVec4& textColor = ImVec4(1, 1, 1, 1));
 static void applyLockedDockWindowClass();
 static ImGuiWindowFlags lockedDockPanelFlags();
+static const char* guiActionTypeLabel(const std::string& fourcc);
 extern ImFont* g_monoFont;
 
 #if defined(_WIN32)
@@ -1264,22 +1265,6 @@ static void collectHighlightedUnitIdentifiersFromAction(const json& actions,
     }
 }
 
-static std::set<uint16_t> highlightedUnitIdentifiersForSelectedAction(const AppState& state) {
-    std::set<uint16_t> identifiers;
-    if (!state.actionsLoaded) return identifiers;
-    if (!state.actionsDoc.contains("actions") || !state.actionsDoc["actions"].is_array()) return identifiers;
-    if (state.selectedActionIndex < 0 || state.selectedActionIndex >= static_cast<int>(state.actionsDoc["actions"].size())) {
-        return identifiers;
-    }
-
-    std::set<int> visitedActionIndices;
-    collectHighlightedUnitIdentifiersFromAction(state.actionsDoc["actions"],
-                                                state.selectedActionIndex,
-                                                identifiers,
-                                                visitedActionIndices);
-    return identifiers;
-}
-
 static bool actionReferencesUnitIdentifierRecursive(const json& actions,
                                                     int actionIndex,
                                                     uint16_t identifier,
@@ -1374,15 +1359,20 @@ static std::string selectedMapUnitLabel(const AppState& state) {
     return std::to_string(state.selectedMapUnitIdentifiers.size()) + " units selected";
 }
 
-static void clearMapUnitAndActionSelection(AppState& state) {
+static void clearMapUnitSelection(AppState& state) {
     state.selectedMapUnitIdentifiers.clear();
     state.mapPreviewDragSelecting = false;
-    state.selectedActionIndex = -1;
+    state.mapPreviewPickTarget.reset();
 }
 
 static void resetMapPreviewView(AppState& state) {
     state.mapPreviewZoom = 1.0f;
     state.mapPreviewPan = ImVec2(0.0f, 0.0f);
+}
+
+static void setSelectedActionIndex(AppState& state, int actionIndex) {
+    state.selectedActionIndex = actionIndex;
+    state.mapPreviewPickTarget.reset();
 }
 
 static bool selectReferencedAction(AppState& state, int actionId) {
@@ -1395,8 +1385,7 @@ static bool selectReferencedAction(AppState& state, int actionId) {
         state.actionsStatus = "Could not find referenced action #" + std::to_string(actionId) + ".";
         return false;
     }
-    state.selectedMapUnitIdentifiers.clear();
-    state.selectedActionIndex = actionIndex;
+    setSelectedActionIndex(state, actionIndex);
     state.actionsStatus = "Selected action #" + std::to_string(actionId) + ".";
     return true;
 }
@@ -1414,6 +1403,33 @@ static bool selectReferencedMapUnit(AppState& state, int identifier) {
     state.selectedMapUnitIdentifiers.clear();
     state.selectedMapUnitIdentifiers.insert(unitIdentifier);
     state.actionsStatus = "Selected unit #" + std::to_string(identifier) + ".";
+    return true;
+}
+
+static bool selectAllReferencedMapUnits(AppState& state, const json& values) {
+    if (!values.is_array()) {
+        state.actionsStatus = "This parameter does not contain a unit list.";
+        return false;
+    }
+
+    std::set<uint16_t> selectedIdentifiers;
+    for (const json& value : values) {
+        if (!value.is_number_integer()) continue;
+        const int identifier = value.get<int>();
+        if (identifier < 0 || identifier > 0xFFFF) continue;
+        const uint16_t unitIdentifier = static_cast<uint16_t>(identifier);
+        if (findMapUnitMarkerByIdentifier(state, unitIdentifier) != nullptr) {
+            selectedIdentifiers.insert(unitIdentifier);
+        }
+    }
+
+    if (selectedIdentifiers.empty()) {
+        state.actionsStatus = "Could not find any referenced preview markers for this parameter.";
+        return false;
+    }
+
+    state.selectedMapUnitIdentifiers.swap(selectedIdentifiers);
+    state.actionsStatus = "Selected " + std::to_string(state.selectedMapUnitIdentifiers.size()) + " referenced unit(s).";
     return true;
 }
 
@@ -1444,6 +1460,51 @@ static bool canFillParameterReferenceFromMap(int typeId) {
     default:
         return false;
     }
+}
+
+static std::string actionReferenceDisplayLabel(const AppState& state, int actionId) {
+    if (!state.actionsLoaded || !state.actionsDoc.contains("actions") || !state.actionsDoc["actions"].is_array()) {
+        return std::string("#") + std::to_string(actionId);
+    }
+    const int actionIndex = findActionIndexById(state.actionsDoc["actions"], actionId);
+    if (actionIndex < 0) {
+        return std::string("#") + std::to_string(actionId) + " (missing)";
+    }
+    const json& action = state.actionsDoc["actions"][static_cast<size_t>(actionIndex)];
+    const std::string name = jsonStringOrEmpty(action, "name");
+    const std::string type = jsonStringOrEmpty(action, "type");
+    const char* typeLabel = guiActionTypeLabel(type);
+    std::string label = "#" + std::to_string(actionId) + "  ";
+    label += name.empty() ? std::string("(unnamed)") : name;
+    label += "  [";
+    if (type.empty()) {
+        label += "container";
+    } else if (typeLabel != nullptr) {
+        label += typeLabel;
+    } else {
+        label += type;
+    }
+    label += "]";
+    return label;
+}
+
+static std::vector<int> selectedUnitIdsToAppend(const AppState& state, const json& values) {
+    std::set<int> existingIds;
+    if (values.is_array()) {
+        for (const json& value : values) {
+            if (value.is_number_integer()) existingIds.insert(value.get<int>());
+        }
+    }
+
+    std::vector<int> toAppend;
+    toAppend.reserve(state.selectedMapUnitIdentifiers.size());
+    for (uint16_t identifier : state.selectedMapUnitIdentifiers) {
+        const int id = static_cast<int>(identifier);
+        if (existingIds.insert(id).second) {
+            toAppend.push_back(id);
+        }
+    }
+    return toAppend;
 }
 
 static bool selectParameterReference(AppState& state, int typeId, int value) {
@@ -1591,7 +1652,7 @@ static bool loadActionsDoc(AppState& state) {
         state.actionsBaselineFingerprint = 0;
         state.actionBaselineFingerprints.clear();
         state.dirtyActionIndices.clear();
-        state.selectedActionIndex = -1;
+        setSelectedActionIndex(state, -1);
         state.actionsDoc = json{};
         return false;
     }
@@ -1606,7 +1667,7 @@ static bool loadActionsDoc(AppState& state) {
             state.actionsBaselineFingerprint = 0;
             state.actionBaselineFingerprints.clear();
             state.dirtyActionIndices.clear();
-            state.selectedActionIndex = -1;
+            setSelectedActionIndex(state, -1);
             state.actionsDoc = json{};
             return false;
         }
@@ -1618,7 +1679,7 @@ static bool loadActionsDoc(AppState& state) {
         state.actionsBaselineFingerprint = 0;
         state.actionBaselineFingerprints.clear();
         state.dirtyActionIndices.clear();
-        state.selectedActionIndex = -1;
+        setSelectedActionIndex(state, -1);
         state.actionsDoc = json{};
         return false;
     }
@@ -1626,7 +1687,7 @@ static bool loadActionsDoc(AppState& state) {
     state.actionsLoaded = true;
     state.actionsDirty = false;
     state.actionsStructureDirty = false;
-    state.selectedActionIndex = state.actionsDoc["actions"].empty() ? -1 : 0;
+    setSelectedActionIndex(state, state.actionsDoc["actions"].empty() ? -1 : 0);
     captureActionsBaseline(state);
     refreshAllActionsDirtyState(state);
     setActionsStatus(state, "Loaded " + std::to_string(state.actionsDoc["actions"].size()) + " actions.");
@@ -2534,21 +2595,57 @@ static bool drawJsonReferenceListEditor(AppState& state, int typeId, int paramIn
     bool changed = false;
     const bool canSelect = canSelectParameterReference(typeId);
     const bool canFillFromMap = canFillParameterReferenceFromMap(typeId);
+    const bool isActionReference = (typeId == GUI_PARAM_ACTION_IDENTIFIER);
+    static std::array<char, 128> actionPickerFilter{};
     for (size_t i = 0; i < values.size(); ++i) {
         ImGui::PushID(static_cast<int>(i));
         int value = values[i].is_number_integer() ? values[i].get<int>() : defaultValue;
-        ImGui::SetNextItemWidth(140.0f);
-        if (ImGui::InputInt("##value", &value, 0, 0)) {
-            values[i] = value;
-            changed = true;
-        }
-        if (canFillFromMap && (ImGui::IsItemActive() || ImGui::IsItemFocused())) {
-            state.mapPreviewPickTarget = MapPreviewPickTarget{
-                state.selectedActionIndex,
-                paramIndex,
-                static_cast<int>(i),
-                typeId
-            };
+        const bool pickActive =
+            state.mapPreviewPickTarget.has_value() &&
+            state.mapPreviewPickTarget->actionIndex == state.selectedActionIndex &&
+            state.mapPreviewPickTarget->paramIndex == paramIndex &&
+            state.mapPreviewPickTarget->valueIndex == static_cast<int>(i) &&
+            state.mapPreviewPickTarget->typeId == typeId;
+        if (isActionReference) {
+            const std::string preview = actionReferenceDisplayLabel(state, value);
+            ImGui::SetNextItemWidth(280.0f);
+            if (ImGui::BeginCombo("##actionRef", preview.c_str())) {
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                ImGui::InputTextWithHint("##actionRefFilter", "Filter actions by name, type, or id",
+                                         actionPickerFilter.data(), actionPickerFilter.size());
+                std::string filterLower = actionPickerFilter.data();
+                for (char& c : filterLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+                if (state.actionsLoaded && state.actionsDoc.contains("actions") && state.actionsDoc["actions"].is_array()) {
+                    for (const json& action : state.actionsDoc["actions"]) {
+                        const int actionId = jsonIntOrDefault(action, "id");
+                        const std::string entry = actionReferenceDisplayLabel(state, actionId);
+                        std::string haystack = entry;
+                        for (char& c : haystack) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                        if (!filterLower.empty() && haystack.find(filterLower) == std::string::npos) continue;
+                        const bool selected = (value == actionId);
+                        if (ImGui::Selectable(entry.c_str(), selected)) {
+                            values[i] = actionId;
+                            value = actionId;
+                            changed = true;
+                        }
+                        if (selected) ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(90.0f);
+            if (ImGui::InputInt("##value", &value, 0, 0)) {
+                values[i] = value;
+                changed = true;
+            }
+        } else {
+            ImGui::SetNextItemWidth(140.0f);
+            if (ImGui::InputInt("##value", &value, 0, 0)) {
+                values[i] = value;
+                changed = true;
+            }
         }
         ImGui::SameLine();
         if (!canSelect) ImGui::BeginDisabled();
@@ -2556,19 +2653,73 @@ static bool drawJsonReferenceListEditor(AppState& state, int typeId, int paramIn
             selectParameterReference(state, typeId, value);
         }
         if (!canSelect) ImGui::EndDisabled();
+        if (canFillFromMap) {
+            ImGui::SameLine();
+            if (ImGui::Button(pickActive ? "Cancel Pick" : "Pick")) {
+                if (pickActive) {
+                    state.mapPreviewPickTarget.reset();
+                    state.actionsStatus = "Map pick cancelled.";
+                } else {
+                    state.mapPreviewPickTarget = MapPreviewPickTarget{
+                        state.selectedActionIndex,
+                        paramIndex,
+                        static_cast<int>(i),
+                        typeId
+                    };
+                    state.actionsStatus = "Click a unit on the map preview to fill this value.";
+                }
+            }
+        }
         ImGui::SameLine();
         if (ImGui::Button("Del")) {
             values.erase(values.begin() + static_cast<ptrdiff_t>(i));
+            if (pickActive) state.mapPreviewPickTarget.reset();
             changed = true;
             ImGui::PopID();
             break;
         }
         ImGui::PopID();
     }
-    if (ImGui::Button(addLabel)) {
-        values.push_back(defaultValue);
+    std::string addButtonLabel = addLabel;
+    std::vector<int> selectedIds;
+    if (canFillFromMap) {
+        selectedIds = selectedUnitIdsToAppend(state, values);
+        if (state.selectedMapUnitIdentifiers.size() > 1) {
+            addButtonLabel = "Add Values";
+        } else if (state.selectedMapUnitIdentifiers.size() == 1) {
+            addButtonLabel = "Add Value (Selected Unit)";
+        }
+    }
+
+    const bool showSelectAll = (typeId == GUI_PARAM_MONSTER_IDENTIFIER);
+    const bool disableAddSelectedUnits = canFillFromMap && !state.selectedMapUnitIdentifiers.empty() && selectedIds.empty();
+    if (showSelectAll) {
+        bool hasAnyReference = false;
+        if (values.is_array()) {
+            for (const json& value : values) {
+                if (value.is_number_integer()) {
+                    hasAnyReference = true;
+                    break;
+                }
+            }
+        }
+        if (!hasAnyReference) ImGui::BeginDisabled();
+        if (ImGui::Button("Select All")) {
+            selectAllReferencedMapUnits(state, values);
+        }
+        if (!hasAnyReference) ImGui::EndDisabled();
+        ImGui::SameLine();
+    }
+    if (disableAddSelectedUnits) ImGui::BeginDisabled();
+    if (ImGui::Button(addButtonLabel.c_str())) {
+        if (canFillFromMap && !state.selectedMapUnitIdentifiers.empty()) {
+            for (int id : selectedIds) values.push_back(id);
+        } else {
+            values.push_back(defaultValue);
+        }
         changed = true;
     }
+    if (disableAddSelectedUnits) ImGui::EndDisabled();
     return changed;
 }
 
@@ -3464,7 +3615,7 @@ static void drawActionsPanel(AppState& state) {
             int insertIndex = actionsToolbar.is_array() ? static_cast<int>(actionsToolbar.size()) : 0;
             remapDirtyIndicesAfterInsert(state, insertIndex);
             actionsToolbar.push_back(makeDefaultActionDoc(actionsToolbar));
-            state.selectedActionIndex = insertIndex;
+            setSelectedActionIndex(state, insertIndex);
             state.actionsStructureDirty = true;
             refreshAllActionsDirtyState(state);
             setActionsStatus(state, "Added action " + std::to_string(jsonIntOrDefault(actionsToolbar[static_cast<size_t>(insertIndex)], "id")));
@@ -3480,7 +3631,7 @@ static void drawActionsPanel(AppState& state) {
             int insertIndex = state.selectedActionIndex + 1;
             remapDirtyIndicesAfterInsert(state, insertIndex);
             actionsToolbar.insert(actionsToolbar.begin() + static_cast<ptrdiff_t>(insertIndex), clone);
-            state.selectedActionIndex = insertIndex;
+            setSelectedActionIndex(state, insertIndex);
             state.actionsStructureDirty = true;
             refreshAllActionsDirtyState(state);
             setActionsStatus(state, "Duplicated action to " + std::to_string(jsonIntOrDefault(clone, "id")));
@@ -3496,11 +3647,11 @@ static void drawActionsPanel(AppState& state) {
             remapDirtyIndicesAfterDelete(state, deleteIndex);
             state.actionsStructureDirty = true;
             if (actionsToolbar.empty()) {
-                state.selectedActionIndex = -1;
+                setSelectedActionIndex(state, -1);
             } else if (deleteIndex >= static_cast<int>(actionsToolbar.size())) {
-                state.selectedActionIndex = static_cast<int>(actionsToolbar.size()) - 1;
+                setSelectedActionIndex(state, static_cast<int>(actionsToolbar.size()) - 1);
             } else {
-                state.selectedActionIndex = deleteIndex;
+                setSelectedActionIndex(state, deleteIndex);
             }
             refreshAllActionsDirtyState(state);
             setActionsStatus(state, "Deleted action " + std::to_string(deletedId));
@@ -3523,7 +3674,6 @@ static void drawActionsPanel(AppState& state) {
     }
 
     json& actions = state.actionsDoc["actions"];
-    state.mapPreviewPickTarget.reset();
     ImGui::InputTextWithHint("##actionFilter", "Filter by name, type, or id", state.actionFilter.data(), state.actionFilter.size());
     std::string filter = state.actionFilter.data();
     std::string filterLower;
@@ -3594,7 +3744,7 @@ static void drawActionsPanel(AppState& state) {
             }
             if (dirty) ImGui::PushStyleColor(ImGuiCol_Text, dirtyColor);
             if (ImGui::Selectable(label.c_str(), selected)) {
-                state.selectedActionIndex = i;
+                setSelectedActionIndex(state, i);
             }
             if (dirty) ImGui::PopStyleColor();
             if (relatedToSelectedUnit) ImGui::PopStyleColor(3);
@@ -3828,10 +3978,10 @@ static void drawMapPreviewPanel(AppState& state) {
         resetMapPreviewView(state);
     }
     ImGui::SameLine();
-    const bool hasSelection = !state.selectedMapUnitIdentifiers.empty() || state.selectedActionIndex >= 0;
+    const bool hasSelection = !state.selectedMapUnitIdentifiers.empty() || state.mapPreviewPickTarget.has_value();
     if (!hasSelection) ImGui::BeginDisabled();
     if (ImGui::Button("Clear Selection")) {
-        clearMapUnitAndActionSelection(state);
+        clearMapUnitSelection(state);
     }
     if (!hasSelection) ImGui::EndDisabled();
     ImGui::Separator();
@@ -3898,43 +4048,35 @@ static void drawMapPreviewPanel(AppState& state) {
         const ImVec2 imageMax = ImGui::GetItemRectMax();
         const bool imageHovered = ImGui::IsItemHovered();
         ImDrawList* drawList = ImGui::GetWindowDrawList();
-        const std::set<uint16_t> highlightedIdentifiers = highlightedUnitIdentifiersForSelectedAction(state);
         const ImU32 markerOutline = IM_COL32(25, 30, 36, 255);
-        const ImU32 highlightOutline = IM_COL32(255, 242, 166, 255);
         const ImU32 selectedUnitOutline = IM_COL32(126, 214, 255, 255);
         const ImVec2 mousePos = ImGui::GetIO().MousePos;
         struct MarkerHitInfo {
             uint16_t identifier = 0;
+            std::string tag;
             float screenX = 0.0f;
             float screenY = 0.0f;
         };
         std::vector<MarkerHitInfo> markerHits;
         markerHits.reserve(state.mapPreviewUnitMarkers.size());
         float clickedBestDistanceSq = FLT_MAX;
+        float hoveredBestDistanceSq = FLT_MAX;
         std::optional<uint16_t> clickedUnitIdentifier;
+        const MapUnitMarker* hoveredMarker = nullptr;
         for (const MapUnitMarker& marker : state.mapPreviewUnitMarkers) {
             const float imageX = static_cast<float>(state.mapPreviewWidth) - (marker.cellX * terrainPreviewPixelsPerCell);
             const float imageY = marker.cellY * terrainPreviewPixelsPerCell;
             const float screenX = imageMin.x + imageX * scale;
             const float screenY = imageMin.y + imageY * scale;
             if (screenX < imageMin.x || screenX > imageMax.x || screenY < imageMin.y || screenY > imageMax.y) continue;
-            markerHits.push_back(MarkerHitInfo{marker.identifier, screenX, screenY});
+            markerHits.push_back(MarkerHitInfo{marker.identifier, marker.tag, screenX, screenY});
 
-            const bool highlighted = highlightedIdentifiers.find(marker.identifier) != highlightedIdentifiers.end();
             const bool selectedMapUnit = state.selectedMapUnitIdentifiers.count(marker.identifier) > 0;
-            const float markerHalfSize = selectedMapUnit ? 5.5f : (highlighted ? 4.5f : 3.0f);
+            const float markerHalfSize = selectedMapUnit ? 5.5f : 3.0f;
             const ImVec2 p0(screenX - markerHalfSize, screenY - markerHalfSize);
             const ImVec2 p1(screenX + markerHalfSize, screenY + markerHalfSize);
             const ImU32 markerFill = previewMarkerColorForUnitTag(marker.tag);
             drawList->AddRectFilled(p0, p1, markerFill, 1.0f);
-            if (highlighted) {
-                drawList->AddRect(ImVec2(p0.x - 1.0f, p0.y - 1.0f),
-                                  ImVec2(p1.x + 1.0f, p1.y + 1.0f),
-                                  highlightOutline,
-                                  1.0f,
-                                  0,
-                                  2.0f);
-            }
             if (selectedMapUnit) {
                 drawList->AddRect(ImVec2(p0.x - 2.0f, p0.y - 2.0f),
                                   ImVec2(p1.x + 2.0f, p1.y + 2.0f),
@@ -3943,7 +4085,7 @@ static void drawMapPreviewPanel(AppState& state) {
                                   0,
                                   2.5f);
             }
-            drawList->AddRect(p0, p1, markerOutline, 1.0f, 0, selectedMapUnit ? 2.5f : (highlighted ? 2.0f : 1.0f));
+            drawList->AddRect(p0, p1, markerOutline, 1.0f, 0, selectedMapUnit ? 2.5f : 1.0f);
 
             const float dx = mousePos.x - screenX;
             const float dy = mousePos.y - screenY;
@@ -3953,46 +4095,65 @@ static void drawMapPreviewPanel(AppState& state) {
                 clickedBestDistanceSq = distanceSq;
                 clickedUnitIdentifier = marker.identifier;
             }
+            if (distanceSq <= hitRadius * hitRadius && distanceSq < hoveredBestDistanceSq) {
+                hoveredBestDistanceSq = distanceSq;
+                hoveredMarker = &marker;
+            }
         }
 
-        if (imageHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-            state.mapPreviewDragSelecting = true;
-            state.mapPreviewDragStart = mousePos;
-            state.mapPreviewDragCurrent = mousePos;
-        }
-        if (state.mapPreviewDragSelecting && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            state.mapPreviewDragCurrent = mousePos;
-        }
-        if (state.mapPreviewDragSelecting && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-            state.mapPreviewDragSelecting = false;
-            const float dragDx = state.mapPreviewDragCurrent.x - state.mapPreviewDragStart.x;
-            const float dragDy = state.mapPreviewDragCurrent.y - state.mapPreviewDragStart.y;
-            const bool isBoxSelection = std::fabs(dragDx) >= 4.0f || std::fabs(dragDy) >= 4.0f;
-            if (isBoxSelection) {
-                const float minX = (std::min)(state.mapPreviewDragStart.x, state.mapPreviewDragCurrent.x);
-                const float minY = (std::min)(state.mapPreviewDragStart.y, state.mapPreviewDragCurrent.y);
-                const float maxX = (std::max)(state.mapPreviewDragStart.x, state.mapPreviewDragCurrent.x);
-                const float maxY = (std::max)(state.mapPreviewDragStart.y, state.mapPreviewDragCurrent.y);
-                std::set<uint16_t> selectedIds;
-                for (const MarkerHitInfo& hit : markerHits) {
-                    if (hit.screenX >= minX && hit.screenX <= maxX &&
-                        hit.screenY >= minY && hit.screenY <= maxY) {
-                        selectedIds.insert(hit.identifier);
+        if (state.mapPreviewPickTarget.has_value()) {
+            if (imageHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                if (clickedUnitIdentifier.has_value()) {
+                    if (applyMapPickedUnitToTarget(state, *clickedUnitIdentifier)) {
+                        state.mapPreviewPickTarget.reset();
                     }
+                    state.selectedMapUnitIdentifiers.clear();
+                    state.selectedMapUnitIdentifiers.insert(*clickedUnitIdentifier);
+                } else {
+                    state.actionsStatus = "Click directly on a unit marker to fill this value.";
                 }
-                state.selectedMapUnitIdentifiers.swap(selectedIds);
-            } else if (clickedUnitIdentifier.has_value()) {
-                bool filledFromMap = false;
-                if (state.mapPreviewPickTarget.has_value()) {
-                    filledFromMap = applyMapPickedUnitToTarget(state, *clickedUnitIdentifier);
+            }
+        } else {
+            if (imageHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                state.mapPreviewDragSelecting = true;
+                state.mapPreviewDragStart = mousePos;
+                state.mapPreviewDragCurrent = mousePos;
+            }
+            if (state.mapPreviewDragSelecting && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                state.mapPreviewDragCurrent = mousePos;
+            }
+            if (state.mapPreviewDragSelecting && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                state.mapPreviewDragSelecting = false;
+                const float dragDx = state.mapPreviewDragCurrent.x - state.mapPreviewDragStart.x;
+                const float dragDy = state.mapPreviewDragCurrent.y - state.mapPreviewDragStart.y;
+                const bool isBoxSelection = std::fabs(dragDx) >= 4.0f || std::fabs(dragDy) >= 4.0f;
+                if (isBoxSelection) {
+                    const float minX = (std::min)(state.mapPreviewDragStart.x, state.mapPreviewDragCurrent.x);
+                    const float minY = (std::min)(state.mapPreviewDragStart.y, state.mapPreviewDragCurrent.y);
+                    const float maxX = (std::max)(state.mapPreviewDragStart.x, state.mapPreviewDragCurrent.x);
+                    const float maxY = (std::max)(state.mapPreviewDragStart.y, state.mapPreviewDragCurrent.y);
+                    std::set<uint16_t> selectedIds = io.KeyShift ? state.selectedMapUnitIdentifiers : std::set<uint16_t>{};
+                    for (const MarkerHitInfo& hit : markerHits) {
+                        if (hit.screenX >= minX && hit.screenX <= maxX &&
+                            hit.screenY >= minY && hit.screenY <= maxY) {
+                            selectedIds.insert(hit.identifier);
+                        }
+                    }
+                    state.selectedMapUnitIdentifiers.swap(selectedIds);
+                } else if (clickedUnitIdentifier.has_value()) {
+                    if (io.KeyShift) {
+                        if (state.selectedMapUnitIdentifiers.count(*clickedUnitIdentifier) > 0) {
+                            state.selectedMapUnitIdentifiers.erase(*clickedUnitIdentifier);
+                        } else {
+                            state.selectedMapUnitIdentifiers.insert(*clickedUnitIdentifier);
+                        }
+                    } else {
+                        state.selectedMapUnitIdentifiers.clear();
+                        state.selectedMapUnitIdentifiers.insert(*clickedUnitIdentifier);
+                    }
+                } else {
+                    if (!io.KeyShift) state.selectedMapUnitIdentifiers.clear();
                 }
-                state.selectedMapUnitIdentifiers.clear();
-                state.selectedMapUnitIdentifiers.insert(*clickedUnitIdentifier);
-                if (filledFromMap) {
-                    state.actionsStatus += " Click another focused field and then a unit to fill again.";
-                }
-            } else {
-                state.selectedMapUnitIdentifiers.clear();
             }
         }
         if (state.mapPreviewDragSelecting) {
@@ -4003,11 +4164,15 @@ static void drawMapPreviewPanel(AppState& state) {
             drawList->AddRectFilled(p0, p1, IM_COL32(90, 156, 232, 36), 2.0f);
             drawList->AddRect(p0, p1, IM_COL32(110, 184, 255, 220), 2.0f, 0, 1.5f);
         }
-        if (canvasHovered) {
+        if (hoveredMarker != nullptr) {
             if (state.mapPreviewPickTarget.has_value()) {
-                ImGui::SetTooltip("Mouse wheel: zoom | Middle drag: pan | Left drag: select multiple | Click unit: fill focused parameter");
+                ImGui::SetTooltip("%s #%u\nClick to fill armed parameter",
+                                  hoveredMarker->tag.c_str(),
+                                  static_cast<unsigned>(hoveredMarker->identifier));
             } else {
-                ImGui::SetTooltip("Mouse wheel: zoom | Middle drag: pan | Left drag: select multiple");
+                ImGui::SetTooltip("%s #%u",
+                                  hoveredMarker->tag.c_str(),
+                                  static_cast<unsigned>(hoveredMarker->identifier));
             }
         }
     } else {
@@ -4063,8 +4228,12 @@ static void drawUnitInfoPanel(AppState& state) {
             label += "  [container]";
         }
         if (ImGui::Selectable((label + "##related" + std::to_string(actionIndex)).c_str(),
-                              actionIndex == state.selectedActionIndex)) {
-            state.selectedActionIndex = actionIndex;
+                              actionIndex == state.selectedActionIndex,
+                              ImGuiSelectableFlags_AllowDoubleClick)) {
+            setSelectedActionIndex(state, actionIndex);
+            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                ImGui::SetWindowFocus("Actions###Actions");
+            }
         }
     }
     ImGui::EndChild();
@@ -4300,6 +4469,12 @@ int main(int argc, char** argv) {
         drawLogPanel(state);
         drawMapPreviewPanel(state);
         drawUnitInfoPanel(state);
+
+        static int workflowStartupFocusFrames = 3;
+        if (workflowStartupFocusFrames > 0) {
+            ImGui::SetWindowFocus("Workflow");
+            --workflowStartupFocusFrames;
+        }
 
         ImGui::Render();
         int display_w, display_h;
