@@ -137,6 +137,8 @@ static bool guiParseHexBytes(const std::string& s, std::vector<uint8_t>& out);
 static void pushPrimaryButtonStyle();
 static void popPrimaryButtonStyle();
 static void drawStatusChip(const char* text, const ImVec4& bgColor, const ImVec4& textColor = ImVec4(1, 1, 1, 1));
+static void applyLockedDockWindowClass();
+static ImGuiWindowFlags lockedDockPanelFlags();
 extern ImFont* g_monoFont;
 
 #if defined(_WIN32)
@@ -575,6 +577,7 @@ struct AppState {
     bool editOnBuild = true;
     bool autoAppendMeshTag = true;
     bool followLog = true;
+    bool lockDockLayout = true;
     int  windowX = INT_MIN;       // INT_MIN = "no saved position; let the OS place the window"
     int  windowY = INT_MIN;
     int  windowW = 1440;
@@ -599,6 +602,12 @@ struct AppState {
     bool actionsStructureDirty = false;
     uint64_t actionsBaselineFingerprint = 0;
     std::vector<uint64_t> actionBaselineFingerprints;
+    fs::path mapPreviewPath;
+    unsigned int mapPreviewTextureId = 0;
+    int mapPreviewWidth = 0;
+    int mapPreviewHeight = 0;
+    bool mapPreviewNeedsReload = true;
+    std::string mapPreviewStatus;
     std::set<int> dirtyActionIndices;
     json actionsDoc;
     ShellRunner runner;
@@ -624,6 +633,30 @@ static uint64_t hashBytesFNV1a64(const char* data, size_t size) {
 static uint64_t hashJsonValue(const json& value) {
     const std::string dumped = value.dump();
     return hashBytesFNV1a64(dumped.data(), dumped.size());
+}
+
+static int countDockedWindowsRecursive(const ImGuiDockNode* node) {
+    if (node == nullptr) return 0;
+    int total = node->Windows.Size;
+    total += countDockedWindowsRecursive(node->ChildNodes[0]);
+    total += countDockedWindowsRecursive(node->ChildNodes[1]);
+    return total;
+}
+
+static uint16_t readLE16u(const uint8_t* b, size_t o) {
+    return static_cast<uint16_t>(static_cast<uint16_t>(b[o]) |
+                                 (static_cast<uint16_t>(b[o + 1]) << 8));
+}
+
+static uint32_t readLE32u(const uint8_t* b, size_t o) {
+    return static_cast<uint32_t>(b[o]) |
+           (static_cast<uint32_t>(b[o + 1]) << 8) |
+           (static_cast<uint32_t>(b[o + 2]) << 16) |
+           (static_cast<uint32_t>(b[o + 3]) << 24);
+}
+
+static int32_t readLE32s(const uint8_t* b, size_t o) {
+    return static_cast<int32_t>(readLE32u(b, o));
 }
 
 static void captureActionsBaseline(AppState& state) {
@@ -855,6 +888,7 @@ static bool saveSettings(AppState& state) {
     out << "editOnBuild=" << (state.editOnBuild ? "1" : "0") << "\n";
     out << "autoAppendMeshTag=" << (state.autoAppendMeshTag ? "1" : "0") << "\n";
     out << "followLog=" << (state.followLog ? "1" : "0") << "\n";
+    out << "lockDockLayout=" << (state.lockDockLayout ? "1" : "0") << "\n";
     out << "windowX=" << state.windowX << "\n";
     out << "windowY=" << state.windowY << "\n";
     out << "windowW=" << state.windowW << "\n";
@@ -896,6 +930,7 @@ static void loadSettings(AppState& state) {
         else if (key == "editOnBuild") state.editOnBuild = (value == "1");
         else if (key == "autoAppendMeshTag") state.autoAppendMeshTag = (value == "1");
         else if (key == "followLog") state.followLog = (value == "1");
+        else if (key == "lockDockLayout") state.lockDockLayout = (value == "1");
         else if (key == "windowX") { try { state.windowX = std::stoi(value); } catch (...) {} }
         else if (key == "windowY") { try { state.windowY = std::stoi(value); } catch (...) {} }
         else if (key == "windowW") { try { int v = std::stoi(value); if (v > 100) state.windowW = v; } catch (...) {} }
@@ -956,6 +991,177 @@ static fs::path actionsJsonPath(const AppState& state) {
     fs::path repoDir = state.exeDir.parent_path();
     fs::path outFolder = resolveUserPath(repoDir, state.outputFolder.data());
     return outFolder / "assets" / "actions" / "actions.json";
+}
+
+static fs::path terrainPreviewPath(const AppState& state) {
+    fs::path repoDir = state.exeDir.parent_path();
+    fs::path outFolder = resolveUserPath(repoDir, state.outputFolder.data());
+    return outFolder / "terrain" / "terrain.bmp";
+}
+
+static void releaseMapPreviewTexture(AppState& state) {
+    if (state.mapPreviewTextureId != 0) {
+        glDeleteTextures(1, &state.mapPreviewTextureId);
+        state.mapPreviewTextureId = 0;
+    }
+    state.mapPreviewWidth = 0;
+    state.mapPreviewHeight = 0;
+}
+
+static bool decodeBmpToRgba(const fs::path& path, std::vector<uint8_t>& rgba, int& width, int& height, std::string& error) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        error = "Could not open preview image.";
+        return false;
+    }
+
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (bytes.size() < 54) {
+        error = "Preview BMP is too small.";
+        return false;
+    }
+    if (bytes[0] != 'B' || bytes[1] != 'M') {
+        error = "Preview image is not a BMP file.";
+        return false;
+    }
+
+    const uint32_t pixelOffset = readLE32u(bytes.data(), 10);
+    const uint32_t dibSize = readLE32u(bytes.data(), 14);
+    if (dibSize < 40 || bytes.size() < 14u + dibSize) {
+        error = "Preview BMP uses an unsupported DIB header.";
+        return false;
+    }
+
+    const int32_t bmpWidth = readLE32s(bytes.data(), 18);
+    const int32_t bmpHeightSigned = readLE32s(bytes.data(), 22);
+    const uint16_t planes = readLE16u(bytes.data(), 26);
+    const uint16_t bpp = readLE16u(bytes.data(), 28);
+    const uint32_t compression = readLE32u(bytes.data(), 30);
+    const uint32_t colorsUsed = readLE32u(bytes.data(), 46);
+    if (planes != 1) {
+        error = "Preview BMP has invalid plane count.";
+        return false;
+    }
+    if (bmpWidth <= 0 || bmpHeightSigned == 0) {
+        error = "Preview BMP has invalid dimensions.";
+        return false;
+    }
+    if (!(bpp == 4 || bpp == 8 || bpp == 24 || bpp == 32) || compression != 0) {
+        error = "Preview BMP format is unsupported.";
+        return false;
+    }
+
+    width = bmpWidth;
+    height = bmpHeightSigned < 0 ? -bmpHeightSigned : bmpHeightSigned;
+    const bool topDown = bmpHeightSigned < 0;
+    const size_t rowStride = ((static_cast<size_t>(width) * bpp + 31u) / 32u) * 4u;
+    if (pixelOffset + rowStride * static_cast<size_t>(height) > bytes.size()) {
+        error = "Preview BMP pixel data is truncated.";
+        return false;
+    }
+
+    size_t paletteCount = 0;
+    size_t paletteOffset = 14u + dibSize;
+    if (bpp <= 8) {
+        paletteCount = colorsUsed ? colorsUsed : (1u << bpp);
+        if (paletteOffset + paletteCount * 4u > bytes.size() || paletteOffset > pixelOffset) {
+            error = "Preview BMP palette is truncated.";
+            return false;
+        }
+    }
+
+    rgba.assign(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0);
+    auto paletteColor = [&](size_t index) -> const uint8_t* {
+        return bytes.data() + paletteOffset + index * 4u;
+    };
+
+    for (int y = 0; y < height; ++y) {
+        const int srcY = topDown ? y : (height - 1 - y);
+        const uint8_t* row = bytes.data() + pixelOffset + rowStride * static_cast<size_t>(srcY);
+        for (int x = 0; x < width; ++x) {
+            uint8_t r = 0, g = 0, b = 0, a = 255;
+            if (bpp == 4) {
+                const uint8_t packed = row[x / 2];
+                const uint8_t index = static_cast<uint8_t>((x & 1) == 0 ? (packed >> 4) : (packed & 0x0F));
+                if (index >= paletteCount) {
+                    error = "Preview BMP palette index is out of range.";
+                    return false;
+                }
+                const uint8_t* c = paletteColor(index);
+                b = c[0]; g = c[1]; r = c[2];
+            } else if (bpp == 8) {
+                const uint8_t index = row[x];
+                if (index >= paletteCount) {
+                    error = "Preview BMP palette index is out of range.";
+                    return false;
+                }
+                const uint8_t* c = paletteColor(index);
+                b = c[0]; g = c[1]; r = c[2];
+            } else if (bpp == 24) {
+                const uint8_t* p = row + static_cast<size_t>(x) * 3u;
+                b = p[0]; g = p[1]; r = p[2];
+            } else {
+                const uint8_t* p = row + static_cast<size_t>(x) * 4u;
+                b = p[0]; g = p[1]; r = p[2]; a = p[3];
+            }
+
+            const size_t dst = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
+            rgba[dst + 0] = r;
+            rgba[dst + 1] = g;
+            rgba[dst + 2] = b;
+            rgba[dst + 3] = a;
+        }
+    }
+    return true;
+}
+
+static void reloadMapPreviewTexture(AppState& state) {
+    releaseMapPreviewTexture(state);
+    state.mapPreviewStatus.clear();
+
+    std::error_code ec;
+    if (state.mapPreviewPath.empty()) {
+        state.mapPreviewStatus = "Choose an output folder to preview its terrain image.";
+        state.mapPreviewNeedsReload = false;
+        return;
+    }
+    if (!fs::exists(state.mapPreviewPath, ec) || ec) {
+        state.mapPreviewStatus = "No terrain preview found at " + state.mapPreviewPath.string();
+        state.mapPreviewNeedsReload = false;
+        return;
+    }
+
+    std::vector<uint8_t> rgba;
+    int width = 0;
+    int height = 0;
+    std::string error;
+    if (!decodeBmpToRgba(state.mapPreviewPath, rgba, width, height, error)) {
+        state.mapPreviewStatus = error + " Path: " + state.mapPreviewPath.string();
+        state.mapPreviewNeedsReload = false;
+        return;
+    }
+
+    glGenTextures(1, &state.mapPreviewTextureId);
+    glBindTexture(GL_TEXTURE_2D, state.mapPreviewTextureId);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    state.mapPreviewWidth = width;
+    state.mapPreviewHeight = height;
+    state.mapPreviewNeedsReload = false;
+}
+
+static void syncMapPreviewSource(AppState& state) {
+    const fs::path desiredPath = terrainPreviewPath(state);
+    if (desiredPath != state.mapPreviewPath) {
+        state.mapPreviewPath = desiredPath;
+        state.mapPreviewNeedsReload = true;
+        state.mapPreviewStatus.clear();
+        releaseMapPreviewTexture(state);
+    }
 }
 
 static std::string normalizeLineEndingsForPlatform(const std::string& text) {
@@ -2200,8 +2406,26 @@ static void drawTopBar(AppState& state) {
     ImGui::SameLine();
     std::string mapChip = std::string("Map ") + (std::strlen(state.meshTag.data()) ? state.meshTag.data() : "----");
     drawStatusChip(mapChip.c_str(), ImVec4(0.32f, 0.23f, 0.14f, 1.0f));
-    ImGui::TextDisabled("Everything stays docked so workflow setup, actions, and logs remain visible together.");
+    ImGui::SameLine();
+    bool lockLayout = state.lockDockLayout;
+    if (ImGui::Checkbox("Lock Layout", &lockLayout)) {
+        state.lockDockLayout = lockLayout;
+        state.settingsStatus = saveSettings(state) ? "Settings saved." : "Failed to save settings.";
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Freeze the current dock arrangement while still allowing splitter resizing.");
+    }
     ImGui::Separator();
+}
+
+static void applyLockedDockWindowClass(bool locked) {
+    (void)locked;
+}
+
+static ImGuiWindowFlags lockedDockPanelFlags(bool locked) {
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+    if (locked) flags |= ImGuiWindowFlags_NoMove;
+    return flags;
 }
 
 template <size_t N>
@@ -2302,7 +2526,8 @@ static void refreshAvailableMeshTags(AppState& state) {
 
 static void drawWorkflowPanel(AppState& state) {
     fs::path repoDir = state.exeDir.parent_path();
-    ImGui::Begin("Workflow");
+    applyLockedDockWindowClass(state.lockDockLayout);
+    ImGui::Begin("Workflow", nullptr, lockedDockPanelFlags(state.lockDockLayout));
     const float availWidth = ImGui::GetContentRegionAvail().x;
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
     const float halfButtonWidth = (availWidth - spacing) * 0.5f;
@@ -2491,7 +2716,8 @@ static void logActionSummary(AppState& state, const json& action, const char* ph
 }
 
 static void drawLogPanel(AppState& state) {
-    ImGui::Begin("Command Log");
+    applyLockedDockWindowClass(state.lockDockLayout);
+    ImGui::Begin("Command Log", nullptr, lockedDockPanelFlags(state.lockDockLayout));
     ImGui::TextDisabled("Live shell output from extraction, plugin build, and action save operations.");
     drawStatusChip(state.runner.running.load() ? "Streaming Output" : "Idle",
                    state.runner.running.load() ? ImVec4(0.18f, 0.54f, 0.35f, 1.0f)
@@ -2612,7 +2838,8 @@ static void drawLogPanel(AppState& state) {
 
 static void drawActionsPanel(AppState& state) {
     const char* actionsWindowTitle = state.actionsDirty ? "Actions *###Actions" : "Actions###Actions";
-    ImGui::Begin(actionsWindowTitle);
+    applyLockedDockWindowClass(state.lockDockLayout);
+    ImGui::Begin(actionsWindowTitle, nullptr, lockedDockPanelFlags(state.lockDockLayout));
 
     int loadedCount = 0;
     if (state.actionsLoaded && state.actionsDoc.contains("actions") && state.actionsDoc["actions"].is_array()) {
@@ -3086,6 +3313,44 @@ static void drawActionsPanel(AppState& state) {
     ImGui::End();
 }
 
+static void drawMapPreviewPanel(AppState& state) {
+    applyLockedDockWindowClass(state.lockDockLayout);
+    ImGui::Begin("Map Preview", nullptr, lockedDockPanelFlags(state.lockDockLayout));
+    syncMapPreviewSource(state);
+
+    if (ImGui::Button("Refresh Preview")) {
+        state.mapPreviewNeedsReload = true;
+    }
+    ImGui::Separator();
+
+    if (state.mapPreviewNeedsReload) {
+        reloadMapPreviewTexture(state);
+    }
+
+    ImGui::BeginChild("##MapPreviewCanvas", ImVec2(0.0f, 0.0f), true, ImGuiWindowFlags_NoScrollbar);
+    if (state.mapPreviewTextureId != 0 && state.mapPreviewWidth > 0 && state.mapPreviewHeight > 0) {
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        const float scaleX = avail.x / static_cast<float>(state.mapPreviewWidth);
+        const float scaleY = avail.y / static_cast<float>(state.mapPreviewHeight);
+        float scale = (std::min)(scaleX, scaleY);
+        if (scale <= 0.0f) scale = 1.0f;
+        ImVec2 imageSize(static_cast<float>(state.mapPreviewWidth) * scale,
+                         static_cast<float>(state.mapPreviewHeight) * scale);
+        ImVec2 cursor = ImGui::GetCursorPos();
+        if (avail.x > imageSize.x) cursor.x += (avail.x - imageSize.x) * 0.5f;
+        if (avail.y > imageSize.y) cursor.y += (avail.y - imageSize.y) * 0.5f;
+        ImGui::SetCursorPos(cursor);
+        ImGui::Image((ImTextureID)(intptr_t)state.mapPreviewTextureId, imageSize);
+    } else {
+        const std::string& message = state.mapPreviewStatus.empty()
+            ? std::string("Terrain preview is not available.")
+            : state.mapPreviewStatus;
+        ImGui::TextWrapped("%s", message.c_str());
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
 static void setupStyle() {
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
@@ -3248,6 +3513,7 @@ int main(int argc, char** argv) {
             state.openDiscardPopup = true;
         }
         syncDerivedPaths(state);
+        io.ConfigDockingAlwaysTabBar = true;
 
         ImGui_ImplOpenGL2_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -3270,46 +3536,46 @@ int main(int argc, char** argv) {
         ImGui::PopStyleVar(3);
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 8.0f));
-        ImGui::BeginChild("##TopBar", ImVec2(0.0f, 64.0f), false, ImGuiWindowFlags_NoScrollbar);
+        ImGui::BeginChild("##TopBar", ImVec2(0.0f, 84.0f), false, ImGuiWindowFlags_NoScrollbar);
         drawTopBar(state);
         ImGui::EndChild();
         ImGui::PopStyleVar();
 
         ImGuiID dockspaceId = ImGui::GetID("MainDockSpace");
-        ImGui::DockSpace(dockspaceId, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
+        ImGuiDockNodeFlags dockspaceFlags = ImGuiDockNodeFlags_PassthruCentralNode;
+        if (state.lockDockLayout) {
+            dockspaceFlags |= ImGuiDockNodeFlags_NoDockingSplit | ImGuiDockNodeFlags_NoUndocking;
+        }
+        ImGui::DockSpace(dockspaceId, ImVec2(0.0f, 0.0f), dockspaceFlags);
 
         static bool dockLayoutInitialized = false;
         if (!dockLayoutInitialized) {
             dockLayoutInitialized = true;
-            if (ImGui::DockBuilderGetNode(dockspaceId) == nullptr) {
+            ImGuiDockNode* existingNode = ImGui::DockBuilderGetNode(dockspaceId);
+            if (existingNode == nullptr) {
                 ImGui::DockBuilderRemoveNode(dockspaceId);
                 ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
                 ImGui::DockBuilderSetNodeSize(dockspaceId, viewport->WorkSize);
+
                 ImGuiID dockMain = dockspaceId;
-                ImGuiID dockLeft = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left, 0.32f, nullptr, &dockMain);
+                ImGuiID dockLeft = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left, 0.30f, nullptr, &dockMain);
+                ImGuiID dockRight = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Right, 0.36f, nullptr, &dockMain);
                 ImGuiID dockBottom = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down, 0.34f, nullptr, &dockMain);
+
                 ImGui::DockBuilderDockWindow("Workflow", dockLeft);
-                ImGui::DockBuilderDockWindow("Actions", dockMain);
+                ImGui::DockBuilderDockWindow("Actions###Actions", dockMain);
                 ImGui::DockBuilderDockWindow("Command Log", dockBottom);
+                ImGui::DockBuilderDockWindow("Map Preview", dockRight);
                 ImGui::DockBuilderFinish(dockspaceId);
             }
         }
 
         ImGui::End();
 
-        // On the first few frames, force Workflow to the front of whatever
-        // tab group it ends up in. SetNextWindowFocus applies to the next
-        // Begin call in the same frame, so this must be the panel drawn first.
-        // Doing it for ~3 frames covers cases where the dock layout reshuffles
-        // after restore.
-        static int focusFramesRemaining = 3;
-        if (focusFramesRemaining > 0) {
-            ImGui::SetNextWindowFocus();
-            focusFramesRemaining--;
-        }
         drawWorkflowPanel(state);
         drawActionsPanel(state);
         drawLogPanel(state);
+        drawMapPreviewPanel(state);
 
         ImGui::Render();
         int display_w, display_h;
@@ -3331,6 +3597,7 @@ int main(int argc, char** argv) {
     glfwGetWindowPos(window, &state.windowX, &state.windowY);
     glfwGetWindowSize(window, &state.windowW, &state.windowH);
 
+    releaseMapPreviewTexture(state);
     ImGui_ImplOpenGL2_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
