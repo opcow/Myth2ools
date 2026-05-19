@@ -92,6 +92,13 @@ struct ShellRunner {
     }
 };
 
+struct MapUnitMarker {
+    std::string tag;
+    uint16_t identifier = 0;
+    float cellX = 0.0f;
+    float cellY = 0.0f;
+};
+
 static std::string quoteArg(const fs::path& path) {
     std::string s = path.string();
     std::string out = "\"";
@@ -603,11 +610,14 @@ struct AppState {
     uint64_t actionsBaselineFingerprint = 0;
     std::vector<uint64_t> actionBaselineFingerprints;
     fs::path mapPreviewPath;
+    fs::path mapPreviewUnitsPath;
     unsigned int mapPreviewTextureId = 0;
     int mapPreviewWidth = 0;
     int mapPreviewHeight = 0;
     bool mapPreviewNeedsReload = true;
     std::string mapPreviewStatus;
+    std::vector<MapUnitMarker> mapPreviewUnitMarkers;
+    std::optional<uint16_t> selectedMapUnitIdentifier;
     std::set<int> dirtyActionIndices;
     json actionsDoc;
     ShellRunner runner;
@@ -999,6 +1009,15 @@ static fs::path terrainPreviewPath(const AppState& state) {
     return outFolder / "terrain" / "terrain.bmp";
 }
 
+static fs::path unitsPreviewPath(const AppState& state) {
+    fs::path repoDir = state.exeDir.parent_path();
+    fs::path outFolder = resolveUserPath(repoDir, state.outputFolder.data());
+    return outFolder / "assets" / "sprites" / "units.json";
+}
+
+static std::string jsonStringOrEmpty(const json& j, const char* key);
+static int jsonIntOrDefault(const json& j, const char* key, int fallback);
+
 static void releaseMapPreviewTexture(AppState& state) {
     if (state.mapPreviewTextureId != 0) {
         glDeleteTextures(1, &state.mapPreviewTextureId);
@@ -1115,8 +1134,296 @@ static bool decodeBmpToRgba(const fs::path& path, std::vector<uint8_t>& rgba, in
     return true;
 }
 
+static void reloadMapPreviewUnitMarkers(AppState& state) {
+    state.mapPreviewUnitMarkers.clear();
+
+    std::error_code ec;
+    if (state.mapPreviewUnitsPath.empty()) return;
+    if (!fs::exists(state.mapPreviewUnitsPath, ec) || ec) return;
+
+    std::ifstream in(state.mapPreviewUnitsPath, std::ios::binary);
+    if (!in) return;
+
+    try {
+        json doc = json::parse(in);
+        if (!doc.contains("units") || !doc["units"].is_array()) return;
+
+        for (const json& unit : doc["units"]) {
+            if (!unit.is_object()) continue;
+            if (!unit.contains("tag") || !unit["tag"].is_string()) continue;
+            if (!unit.contains("identifier") || !unit["identifier"].is_number()) continue;
+            if (!unit.contains("x") || !unit["x"].is_number()) continue;
+            if (!unit.contains("y") || !unit["y"].is_number()) continue;
+
+            MapUnitMarker marker;
+            marker.tag = unit["tag"].get<std::string>();
+            marker.identifier = static_cast<uint16_t>(unit["identifier"].get<unsigned int>());
+            marker.cellX = unit["x"].get<float>();
+            marker.cellY = unit["y"].get<float>();
+            state.mapPreviewUnitMarkers.push_back(marker);
+        }
+    } catch (...) {
+        state.mapPreviewUnitMarkers.clear();
+    }
+}
+
+static ImU32 previewMarkerColorForUnitTag(const std::string& tag) {
+    if (tag == "ghol" || tag == "soul" || tag == "thmy") {
+        return IM_COL32(224, 74, 58, 235);
+    }
+    if (tag == "hawk" || tag == "deer" || tag == "chic" || tag == "frog") {
+        return IM_COL32(232, 194, 88, 235);
+    }
+    return IM_COL32(78, 148, 255, 235);
+}
+
+static int findActionIndexById(const json& actions, int actionId) {
+    for (size_t i = 0; i < actions.size(); ++i) {
+        if (!actions[i].is_object()) continue;
+        if (jsonIntOrDefault(actions[i], "id", -1) == actionId) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+static bool actionParameterLinksToUnitGroup(const std::string& name) {
+    return name == "link" || name == "subj" || name == "obje" || name == "enem" || name == "frie";
+}
+
+static bool actionDirectlyReferencesUnitIdentifier(const json& action, uint16_t identifier) {
+    if (!action.is_object()) return false;
+    if (!action.contains("parameters") || !action["parameters"].is_array()) return false;
+
+    for (const json& param : action["parameters"]) {
+        if (!param.is_object()) continue;
+        if (jsonStringOrEmpty(param, "type") != "monster_identifier") continue;
+        if (!param.contains("values") || !param["values"].is_array()) continue;
+        for (const json& value : param["values"]) {
+            if (!value.is_number()) continue;
+            const int current = value.get<int>();
+            if (current == static_cast<int>(identifier)) return true;
+        }
+    }
+    return false;
+}
+
+static void collectHighlightedUnitIdentifiersFromAction(const json& actions,
+                                                        int actionIndex,
+                                                        std::set<uint16_t>& identifiers,
+                                                        std::set<int>& visitedActionIndices) {
+    if (actionIndex < 0 || actionIndex >= static_cast<int>(actions.size())) return;
+    if (!visitedActionIndices.insert(actionIndex).second) return;
+
+    const json& action = actions[static_cast<size_t>(actionIndex)];
+    if (!action.is_object()) return;
+    if (!action.contains("parameters") || !action["parameters"].is_array()) return;
+
+    for (const json& param : action["parameters"]) {
+        if (!param.is_object()) continue;
+        const std::string paramType = jsonStringOrEmpty(param, "type");
+        const std::string paramName = jsonStringOrEmpty(param, "name");
+
+        if (paramType == "monster_identifier" && param.contains("values") && param["values"].is_array()) {
+            for (const json& value : param["values"]) {
+                if (!value.is_number()) continue;
+                const int identifier = value.get<int>();
+                if (identifier < 0 || identifier > 0xFFFF) continue;
+                identifiers.insert(static_cast<uint16_t>(identifier));
+            }
+            continue;
+        }
+
+        if (paramType == "action_identifier" &&
+            actionParameterLinksToUnitGroup(paramName) &&
+            param.contains("values") &&
+            param["values"].is_array()) {
+            for (const json& value : param["values"]) {
+                if (!value.is_number()) continue;
+                const int linkedActionId = value.get<int>();
+                const int linkedActionIndex = findActionIndexById(actions, linkedActionId);
+                if (linkedActionIndex >= 0) {
+                    collectHighlightedUnitIdentifiersFromAction(actions,
+                                                                linkedActionIndex,
+                                                                identifiers,
+                                                                visitedActionIndices);
+                }
+            }
+        }
+    }
+}
+
+static std::set<uint16_t> highlightedUnitIdentifiersForSelectedAction(const AppState& state) {
+    std::set<uint16_t> identifiers;
+    if (!state.actionsLoaded) return identifiers;
+    if (!state.actionsDoc.contains("actions") || !state.actionsDoc["actions"].is_array()) return identifiers;
+    if (state.selectedActionIndex < 0 || state.selectedActionIndex >= static_cast<int>(state.actionsDoc["actions"].size())) {
+        return identifiers;
+    }
+
+    std::set<int> visitedActionIndices;
+    collectHighlightedUnitIdentifiersFromAction(state.actionsDoc["actions"],
+                                                state.selectedActionIndex,
+                                                identifiers,
+                                                visitedActionIndices);
+    return identifiers;
+}
+
+static bool actionReferencesUnitIdentifierRecursive(const json& actions,
+                                                    int actionIndex,
+                                                    uint16_t identifier,
+                                                    std::vector<int>& memo,
+                                                    std::set<int>& activeStack) {
+    if (actionIndex < 0 || actionIndex >= static_cast<int>(actions.size())) return false;
+    if (memo[static_cast<size_t>(actionIndex)] != -1) {
+        return memo[static_cast<size_t>(actionIndex)] == 1;
+    }
+    if (!activeStack.insert(actionIndex).second) return false;
+
+    bool found = false;
+    const json& action = actions[static_cast<size_t>(actionIndex)];
+    if (actionDirectlyReferencesUnitIdentifier(action, identifier)) {
+        found = true;
+    } else if (action.is_object() && action.contains("parameters") && action["parameters"].is_array()) {
+        for (const json& param : action["parameters"]) {
+            if (!param.is_object()) continue;
+            if (jsonStringOrEmpty(param, "type") != "action_identifier") continue;
+            const std::string paramName = jsonStringOrEmpty(param, "name");
+            if (!actionParameterLinksToUnitGroup(paramName)) continue;
+            if (!param.contains("values") || !param["values"].is_array()) continue;
+
+            for (const json& value : param["values"]) {
+                if (!value.is_number()) continue;
+                const int linkedActionIndex = findActionIndexById(actions, value.get<int>());
+                if (linkedActionIndex >= 0 &&
+                    actionReferencesUnitIdentifierRecursive(actions,
+                                                            linkedActionIndex,
+                                                            identifier,
+                                                            memo,
+                                                            activeStack)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found) break;
+        }
+    }
+
+    activeStack.erase(actionIndex);
+    memo[static_cast<size_t>(actionIndex)] = found ? 1 : 0;
+    return found;
+}
+
+static std::set<int> relatedActionIndicesForUnitIdentifier(const AppState& state, uint16_t identifier) {
+    std::set<int> matches;
+    if (!state.actionsLoaded) return matches;
+    if (!state.actionsDoc.contains("actions") || !state.actionsDoc["actions"].is_array()) return matches;
+
+    const json& actions = state.actionsDoc["actions"];
+    std::vector<int> memo(actions.size(), -1);
+    for (size_t i = 0; i < actions.size(); ++i) {
+        std::set<int> activeStack;
+        if (actionReferencesUnitIdentifierRecursive(actions,
+                                                    static_cast<int>(i),
+                                                    identifier,
+                                                    memo,
+                                                    activeStack)) {
+            matches.insert(static_cast<int>(i));
+        }
+    }
+    return matches;
+}
+
+static std::set<int> relatedActionIndicesForSelectedMapUnit(const AppState& state) {
+    if (!state.selectedMapUnitIdentifier.has_value()) return {};
+    return relatedActionIndicesForUnitIdentifier(state, *state.selectedMapUnitIdentifier);
+}
+
+static const MapUnitMarker* findMapUnitMarkerByIdentifier(const AppState& state, uint16_t identifier) {
+    for (const MapUnitMarker& marker : state.mapPreviewUnitMarkers) {
+        if (marker.identifier == identifier) return &marker;
+    }
+    return nullptr;
+}
+
+static std::string selectedMapUnitLabel(const AppState& state) {
+    if (!state.selectedMapUnitIdentifier.has_value()) return "No unit selected.";
+    const MapUnitMarker* selectedMarker = findMapUnitMarkerByIdentifier(state, *state.selectedMapUnitIdentifier);
+    if (selectedMarker != nullptr) {
+        return selectedMarker->tag + " #" + std::to_string(selectedMarker->identifier);
+    }
+    return std::string("Unit #") + std::to_string(*state.selectedMapUnitIdentifier);
+}
+
+static void clearMapUnitAndActionSelection(AppState& state) {
+    state.selectedMapUnitIdentifier.reset();
+    state.selectedActionIndex = -1;
+}
+
+static bool selectReferencedAction(AppState& state, int actionId) {
+    if (!state.actionsLoaded || !state.actionsDoc.contains("actions") || !state.actionsDoc["actions"].is_array()) {
+        state.actionsStatus = "Actions are not loaded.";
+        return false;
+    }
+    const int actionIndex = findActionIndexById(state.actionsDoc["actions"], actionId);
+    if (actionIndex < 0) {
+        state.actionsStatus = "Could not find referenced action #" + std::to_string(actionId) + ".";
+        return false;
+    }
+    state.selectedMapUnitIdentifier.reset();
+    state.selectedActionIndex = actionIndex;
+    state.actionsStatus = "Selected action #" + std::to_string(actionId) + ".";
+    return true;
+}
+
+static bool selectReferencedMapUnit(AppState& state, int identifier) {
+    if (identifier < 0 || identifier > 0xFFFF) {
+        state.actionsStatus = "Referenced identifier is out of range.";
+        return false;
+    }
+    const uint16_t unitIdentifier = static_cast<uint16_t>(identifier);
+    if (findMapUnitMarkerByIdentifier(state, unitIdentifier) == nullptr) {
+        state.actionsStatus = "Could not find preview marker #" + std::to_string(identifier) + ".";
+        return false;
+    }
+    state.selectedMapUnitIdentifier = unitIdentifier;
+    state.actionsStatus = "Selected unit #" + std::to_string(identifier) + ".";
+    return true;
+}
+
+static bool canSelectParameterReference(int typeId) {
+    switch (typeId) {
+    case 2:
+    case 3:
+    case 15:
+    case 16:
+    case 17:
+    case 19:
+    case 20:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool selectParameterReference(AppState& state, int typeId, int value) {
+    switch (typeId) {
+    case 3:
+        return selectReferencedAction(state, value);
+    case 2:
+    case 15:
+    case 16:
+    case 17:
+    case 19:
+    case 20:
+        return selectReferencedMapUnit(state, value);
+    default:
+        state.actionsStatus = "Selection is not supported for this parameter type.";
+        return false;
+    }
+}
+
 static void reloadMapPreviewTexture(AppState& state) {
     releaseMapPreviewTexture(state);
+    state.mapPreviewUnitMarkers.clear();
     state.mapPreviewStatus.clear();
 
     std::error_code ec;
@@ -1151,15 +1458,20 @@ static void reloadMapPreviewTexture(AppState& state) {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
     state.mapPreviewWidth = width;
     state.mapPreviewHeight = height;
+    reloadMapPreviewUnitMarkers(state);
     state.mapPreviewNeedsReload = false;
 }
 
 static void syncMapPreviewSource(AppState& state) {
     const fs::path desiredPath = terrainPreviewPath(state);
-    if (desiredPath != state.mapPreviewPath) {
+    const fs::path desiredUnitsPath = unitsPreviewPath(state);
+    if (desiredPath != state.mapPreviewPath || desiredUnitsPath != state.mapPreviewUnitsPath) {
         state.mapPreviewPath = desiredPath;
+        state.mapPreviewUnitsPath = desiredUnitsPath;
         state.mapPreviewNeedsReload = true;
         state.mapPreviewStatus.clear();
+        state.mapPreviewUnitMarkers.clear();
+        state.selectedMapUnitIdentifier.reset();
         releaseMapPreviewTexture(state);
     }
 }
@@ -1322,6 +1634,43 @@ enum ActionParamType {
     GUI_PARAM_LOCAL_PROJECTILE_GROUP_IDENTIFIER = 19,
     GUI_PARAM_MODEL_ANIMATION_IDENTIFIER = 20
 };
+
+struct GuiParamTypeOption {
+    int id;
+    const char* typeName;
+    const char* displayLabel;
+};
+
+static const GuiParamTypeOption kGuiParamTypeOptions[] = {
+    {GUI_PARAM_FLAG, "flag", "flag (0)"},
+    {GUI_PARAM_STRING, "string", "string (1)"},
+    {GUI_PARAM_MONSTER_IDENTIFIER, "monster_identifier", "monster_identifier (2)"},
+    {GUI_PARAM_ACTION_IDENTIFIER, "action_identifier", "action_identifier (3)"},
+    {GUI_PARAM_ANGLE, "angle", "angle (4)"},
+    {GUI_PARAM_INTEGER, "integer", "integer (5)"},
+    {GUI_PARAM_WORLD_DISTANCE, "world_distance", "world_distance (6)"},
+    {GUI_PARAM_FIELD_NAME, "field_name", "field_name (7)"},
+    {GUI_PARAM_FIXED, "fixed", "fixed (8)"},
+    {GUI_PARAM_PROJECTILE, "projectile", "projectile (9, prgr)"},
+    {GUI_PARAM_STRING_LIST, "string_list", "string_list (10)"},
+    {GUI_PARAM_SOUND, "sound", "sound (11)"},
+    {GUI_PARAM_PROJECTILE_OR_WORLD_POINT_2D, "projectile", "projectile (12, proj)"},
+    {GUI_PARAM_WORLD_POINT_2D, "world_point_2d", "world_point_2d (13)"},
+    {GUI_PARAM_WORLD_RECTANGLE_2D, "world_rectangle_2d", "world_rectangle_2d (14)"},
+    {GUI_PARAM_OBJECT_IDENTIFIER, "object_identifier", "object_identifier (15)"},
+    {GUI_PARAM_MODEL_IDENTIFIER, "model_identifier", "model_identifier (16)"},
+    {GUI_PARAM_SOUND_SOURCE_IDENTIFIER, "sound_source_identifier", "sound_source_identifier (17)"},
+    {GUI_PARAM_WORLD_POINT_3D, "world_point_3d", "world_point_3d (18)"},
+    {GUI_PARAM_LOCAL_PROJECTILE_GROUP_IDENTIFIER, "local_projectile_group_identifier", "local_projectile_group_identifier (19)"},
+    {GUI_PARAM_MODEL_ANIMATION_IDENTIFIER, "model_animation_identifier", "model_animation_identifier (20)"}
+};
+
+static const GuiParamTypeOption* guiParamTypeOptionById(int typeId) {
+    for (const GuiParamTypeOption& option : kGuiParamTypeOptions) {
+        if (option.id == typeId) return &option;
+    }
+    return nullptr;
+}
 
 static constexpr double GUI_WORLD_POINT_SF = 512.0;
 static constexpr double GUI_FIXED_SF = 65536.0;
@@ -2075,12 +2424,46 @@ static bool drawJsonIntListEditor(json& values, const char* addLabel, int defaul
         ImGui::PushID(static_cast<int>(i));
         int value = values[i].is_number_integer() ? values[i].get<int>() : defaultValue;
         ImGui::SetNextItemWidth(140.0f);
-        if (ImGui::InputInt("##value", &value)) {
+        if (ImGui::InputInt("##value", &value, 0, 0)) {
             values[i] = value;
             changed = true;
         }
         ImGui::SameLine();
-        if (ImGui::Button("-")) {
+        if (ImGui::Button("Del")) {
+            values.erase(values.begin() + static_cast<ptrdiff_t>(i));
+            changed = true;
+            ImGui::PopID();
+            break;
+        }
+        ImGui::PopID();
+    }
+    if (ImGui::Button(addLabel)) {
+        values.push_back(defaultValue);
+        changed = true;
+    }
+    return changed;
+}
+
+static bool drawJsonReferenceListEditor(AppState& state, int typeId, json& values, const char* addLabel, int defaultValue = 0) {
+    if (!values.is_array()) values = json::array();
+    bool changed = false;
+    const bool canSelect = canSelectParameterReference(typeId);
+    for (size_t i = 0; i < values.size(); ++i) {
+        ImGui::PushID(static_cast<int>(i));
+        int value = values[i].is_number_integer() ? values[i].get<int>() : defaultValue;
+        ImGui::SetNextItemWidth(140.0f);
+        if (ImGui::InputInt("##value", &value, 0, 0)) {
+            values[i] = value;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (!canSelect) ImGui::BeginDisabled();
+        if (ImGui::Button("Select")) {
+            selectParameterReference(state, typeId, value);
+        }
+        if (!canSelect) ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Del")) {
             values.erase(values.begin() + static_cast<ptrdiff_t>(i));
             changed = true;
             ImGui::PopID();
@@ -2227,14 +2610,32 @@ static bool drawJsonPoint3ListEditor(json& values) {
     return changed;
 }
 
-static bool drawActionParameterEditor(json& param, size_t paramIndex) {
+static bool drawActionParameterEditor(AppState& state, json& param, size_t paramIndex) {
     (void)paramIndex;
     int typeId = jsonIntOrDefault(param, "type_id", -1);
     if (!param.contains("values")) param["values"] = json::array();
 
-    ImGui::Text("type_id: %d", typeId);
     bool changed = false;
     json& values = param["values"];
+    const GuiParamTypeOption* selectedType = guiParamTypeOptionById(typeId);
+    std::string previewLabel = selectedType != nullptr
+        ? std::string(selectedType->displayLabel)
+        : std::string("Unknown type (") + std::to_string(typeId) + ")";
+
+    ImGui::SetNextItemWidth(260.0f);
+    if (ImGui::BeginCombo("Parameter Type", previewLabel.c_str())) {
+        for (const GuiParamTypeOption& option : kGuiParamTypeOptions) {
+            const bool isSelected = (option.id == typeId);
+            if (ImGui::Selectable(option.displayLabel, isSelected)) {
+                typeId = option.id;
+                param["type_id"] = option.id;
+                param["type"] = option.typeName;
+                changed = true;
+            }
+            if (isSelected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
 
     switch (typeId) {
     case GUI_PARAM_FLAG: {
@@ -2259,6 +2660,15 @@ static bool drawActionParameterEditor(json& param, size_t paramIndex) {
     case GUI_PARAM_PROJECTILE:
     case GUI_PARAM_PROJECTILE_OR_WORLD_POINT_2D:
         changed = drawJsonStringListEditor(values, "Add FourCC", 100);
+        break;
+    case GUI_PARAM_MONSTER_IDENTIFIER:
+    case GUI_PARAM_ACTION_IDENTIFIER:
+    case GUI_PARAM_OBJECT_IDENTIFIER:
+    case GUI_PARAM_MODEL_IDENTIFIER:
+    case GUI_PARAM_SOUND_SOURCE_IDENTIFIER:
+    case GUI_PARAM_LOCAL_PROJECTILE_GROUP_IDENTIFIER:
+    case GUI_PARAM_MODEL_ANIMATION_IDENTIFIER:
+        changed = drawJsonReferenceListEditor(state, typeId, values, "Add Value");
         break;
     case GUI_PARAM_WORLD_POINT_2D:
         changed = drawJsonPoint2ListEditor(values);
@@ -2527,6 +2937,11 @@ static void refreshAvailableMeshTags(AppState& state) {
 static void drawWorkflowPanel(AppState& state) {
     fs::path repoDir = state.exeDir.parent_path();
     applyLockedDockWindowClass(state.lockDockLayout);
+    static bool workflowFocusPending = true;
+    if (workflowFocusPending) {
+        ImGui::SetNextWindowFocus();
+        workflowFocusPending = false;
+    }
     ImGui::Begin("Workflow", nullptr, lockedDockPanelFlags(state.lockDockLayout));
     const float availWidth = ImGui::GetContentRegionAvail().x;
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
@@ -3064,6 +3479,7 @@ static void drawActionsPanel(AppState& state) {
 
     ImGui::BeginChild("actions_list", ImVec2(actionsListWidth, 0.0f), true);
     const ImVec4 dirtyColor(1.0f, 0.75f, 0.35f, 1.0f);
+    const std::set<int> relatedActionIndices = relatedActionIndicesForSelectedMapUnit(state);
     ImGui::TextDisabled("%zu of %zu actions", visibleIndices.size(), actions.size());
     ImGui::Separator();
     ImGuiListClipper clipper;
@@ -3088,14 +3504,21 @@ static void drawActionsPanel(AppState& state) {
             const bool dirty = state.dirtyActionIndices.count(i) > 0;
             std::string label = (dirty ? "* " : "  ") + visibleLabel + "  [" + meta + "]##action" + std::to_string(i);
             const bool selected = (i == state.selectedActionIndex);
+            const bool relatedToSelectedUnit = relatedActionIndices.count(i) > 0;
             const float baseCursorX = ImGui::GetCursorPosX();
             const float indentPixels = static_cast<float>((std::min)(actionIndent, 12)) * 14.0f;
             ImGui::SetCursorPosX(baseCursorX + indentPixels);
+            if (relatedToSelectedUnit) {
+                ImGui::PushStyleColor(ImGuiCol_Header, selected ? ImVec4(0.26f, 0.36f, 0.56f, 0.95f) : ImVec4(0.19f, 0.28f, 0.46f, 0.78f));
+                ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.28f, 0.39f, 0.60f, 0.92f));
+                ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.32f, 0.44f, 0.68f, 0.98f));
+            }
             if (dirty) ImGui::PushStyleColor(ImGuiCol_Text, dirtyColor);
             if (ImGui::Selectable(label.c_str(), selected)) {
                 state.selectedActionIndex = i;
             }
             if (dirty) ImGui::PopStyleColor();
+            if (relatedToSelectedUnit) ImGui::PopStyleColor(3);
         }
     }
     clipper.End();
@@ -3299,7 +3722,7 @@ static void drawActionsPanel(AppState& state) {
             std::string paramName = jsonStringOrEmpty(param, "name");
             std::string paramType = jsonStringOrEmpty(param, "type");
             if (ImGui::TreeNode((paramName + " (" + paramType + ")##param" + std::to_string(pi)).c_str())) {
-                if (drawActionParameterEditor(param, pi)) {
+                if (drawActionParameterEditor(state, param, pi)) {
                     markCurrentActionDirty(state);
                 }
                 ImGui::TreePop();
@@ -3321,6 +3744,13 @@ static void drawMapPreviewPanel(AppState& state) {
     if (ImGui::Button("Refresh Preview")) {
         state.mapPreviewNeedsReload = true;
     }
+    ImGui::SameLine();
+    const bool hasSelection = state.selectedMapUnitIdentifier.has_value() || state.selectedActionIndex >= 0;
+    if (!hasSelection) ImGui::BeginDisabled();
+    if (ImGui::Button("Clear Selection")) {
+        clearMapUnitAndActionSelection(state);
+    }
+    if (!hasSelection) ImGui::EndDisabled();
     ImGui::Separator();
 
     if (state.mapPreviewNeedsReload) {
@@ -3329,6 +3759,7 @@ static void drawMapPreviewPanel(AppState& state) {
 
     ImGui::BeginChild("##MapPreviewCanvas", ImVec2(0.0f, 0.0f), true, ImGuiWindowFlags_NoScrollbar);
     if (state.mapPreviewTextureId != 0 && state.mapPreviewWidth > 0 && state.mapPreviewHeight > 0) {
+        constexpr float terrainPreviewPixelsPerCell = 8.0f;
         const ImVec2 avail = ImGui::GetContentRegionAvail();
         const float scaleX = avail.x / static_cast<float>(state.mapPreviewWidth);
         const float scaleY = avail.y / static_cast<float>(state.mapPreviewHeight);
@@ -3341,11 +3772,115 @@ static void drawMapPreviewPanel(AppState& state) {
         if (avail.y > imageSize.y) cursor.y += (avail.y - imageSize.y) * 0.5f;
         ImGui::SetCursorPos(cursor);
         ImGui::Image((ImTextureID)(intptr_t)state.mapPreviewTextureId, imageSize);
+
+        const ImVec2 imageMin = ImGui::GetItemRectMin();
+        const ImVec2 imageMax = ImGui::GetItemRectMax();
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        const std::set<uint16_t> highlightedIdentifiers = highlightedUnitIdentifiersForSelectedAction(state);
+        const ImU32 markerOutline = IM_COL32(25, 30, 36, 255);
+        const ImU32 highlightOutline = IM_COL32(255, 242, 166, 255);
+        const ImU32 selectedUnitOutline = IM_COL32(126, 214, 255, 255);
+        const ImVec2 mousePos = ImGui::GetIO().MousePos;
+        float clickedBestDistanceSq = FLT_MAX;
+        std::optional<uint16_t> clickedUnitIdentifier;
+        for (const MapUnitMarker& marker : state.mapPreviewUnitMarkers) {
+            const float imageX = static_cast<float>(state.mapPreviewWidth) - (marker.cellX * terrainPreviewPixelsPerCell);
+            const float imageY = marker.cellY * terrainPreviewPixelsPerCell;
+            const float screenX = imageMin.x + imageX * scale;
+            const float screenY = imageMin.y + imageY * scale;
+            if (screenX < imageMin.x || screenX > imageMax.x || screenY < imageMin.y || screenY > imageMax.y) continue;
+
+            const bool highlighted = highlightedIdentifiers.find(marker.identifier) != highlightedIdentifiers.end();
+            const bool selectedMapUnit = state.selectedMapUnitIdentifier.has_value() &&
+                                         *state.selectedMapUnitIdentifier == marker.identifier;
+            const float markerHalfSize = selectedMapUnit ? 5.5f : (highlighted ? 4.5f : 3.0f);
+            const ImVec2 p0(screenX - markerHalfSize, screenY - markerHalfSize);
+            const ImVec2 p1(screenX + markerHalfSize, screenY + markerHalfSize);
+            const ImU32 markerFill = previewMarkerColorForUnitTag(marker.tag);
+            drawList->AddRectFilled(p0, p1, markerFill, 1.0f);
+            if (highlighted) {
+                drawList->AddRect(ImVec2(p0.x - 1.0f, p0.y - 1.0f),
+                                  ImVec2(p1.x + 1.0f, p1.y + 1.0f),
+                                  highlightOutline,
+                                  1.0f,
+                                  0,
+                                  2.0f);
+            }
+            if (selectedMapUnit) {
+                drawList->AddRect(ImVec2(p0.x - 2.0f, p0.y - 2.0f),
+                                  ImVec2(p1.x + 2.0f, p1.y + 2.0f),
+                                  selectedUnitOutline,
+                                  1.0f,
+                                  0,
+                                  2.5f);
+            }
+            drawList->AddRect(p0, p1, markerOutline, 1.0f, 0, selectedMapUnit ? 2.5f : (highlighted ? 2.0f : 1.0f));
+
+            const float dx = mousePos.x - screenX;
+            const float dy = mousePos.y - screenY;
+            const float distanceSq = dx * dx + dy * dy;
+            const float hitRadius = markerHalfSize + 5.0f;
+            if (distanceSq <= hitRadius * hitRadius && distanceSq < clickedBestDistanceSq) {
+                clickedBestDistanceSq = distanceSq;
+                clickedUnitIdentifier = marker.identifier;
+            }
+        }
+
+        if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            state.selectedMapUnitIdentifier = clickedUnitIdentifier;
+        }
     } else {
         const std::string& message = state.mapPreviewStatus.empty()
             ? std::string("Terrain preview is not available.")
             : state.mapPreviewStatus;
         ImGui::TextWrapped("%s", message.c_str());
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+static void drawUnitInfoPanel(AppState& state) {
+    applyLockedDockWindowClass(state.lockDockLayout);
+    ImGui::SetNextWindowDockID(ImGui::GetID("MainDockSpace"), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Unit Info", nullptr, lockedDockPanelFlags(state.lockDockLayout));
+
+    if (!state.selectedMapUnitIdentifier.has_value()) {
+        ImGui::TextWrapped("Click a unit marker on the map preview to inspect it and browse related actions.");
+        ImGui::End();
+        return;
+    }
+
+    const std::set<int> relatedActionIndices = relatedActionIndicesForSelectedMapUnit(state);
+    ImGui::Text("Selected Unit: %s", selectedMapUnitLabel(state).c_str());
+
+    ImGui::SeparatorText("Related Actions");
+    if (relatedActionIndices.empty()) {
+        ImGui::TextDisabled("No matching actions found for this unit.");
+        ImGui::End();
+        return;
+    }
+
+    ImGui::TextDisabled("%zu matching actions", relatedActionIndices.size());
+    ImGui::BeginChild("##RelatedActions", ImVec2(0.0f, 0.0f), true);
+    for (int actionIndex : relatedActionIndices) {
+        if (!state.actionsDoc.contains("actions") || !state.actionsDoc["actions"].is_array()) break;
+        const json& action = state.actionsDoc["actions"][static_cast<size_t>(actionIndex)];
+        const std::string name = jsonStringOrEmpty(action, "name");
+        const std::string type = jsonStringOrEmpty(action, "type");
+        const int actionId = jsonIntOrDefault(action, "id");
+        std::string label = "#" + std::to_string(actionId) + "  ";
+        label += name.empty() ? "(unnamed)" : name;
+        if (!type.empty()) {
+            label += "  [";
+            label += type;
+            label += "]";
+        } else {
+            label += "  [container]";
+        }
+        if (ImGui::Selectable((label + "##related" + std::to_string(actionIndex)).c_str(),
+                              actionIndex == state.selectedActionIndex)) {
+            state.selectedActionIndex = actionIndex;
+        }
     }
     ImGui::EndChild();
     ImGui::End();
@@ -3561,11 +4096,14 @@ int main(int argc, char** argv) {
                 ImGuiID dockLeft = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left, 0.30f, nullptr, &dockMain);
                 ImGuiID dockRight = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Right, 0.36f, nullptr, &dockMain);
                 ImGuiID dockBottom = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down, 0.34f, nullptr, &dockMain);
+                ImGuiID dockRightTop = dockRight;
+                ImGuiID dockRightBottom = ImGui::DockBuilderSplitNode(dockRightTop, ImGuiDir_Down, 0.38f, nullptr, &dockRightTop);
 
                 ImGui::DockBuilderDockWindow("Workflow", dockLeft);
                 ImGui::DockBuilderDockWindow("Actions###Actions", dockMain);
                 ImGui::DockBuilderDockWindow("Command Log", dockBottom);
-                ImGui::DockBuilderDockWindow("Map Preview", dockRight);
+                ImGui::DockBuilderDockWindow("Map Preview", dockRightTop);
+                ImGui::DockBuilderDockWindow("Unit Info", dockRightBottom);
                 ImGui::DockBuilderFinish(dockspaceId);
             }
         }
@@ -3576,6 +4114,7 @@ int main(int argc, char** argv) {
         drawActionsPanel(state);
         drawLogPanel(state);
         drawMapPreviewPanel(state);
+        drawUnitInfoPanel(state);
 
         ImGui::Render();
         int display_w, display_h;
