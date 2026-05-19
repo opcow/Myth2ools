@@ -2547,7 +2547,6 @@ static void drawActionsPanel(AppState& state) {
     const char* actionsWindowTitle = state.actionsDirty ? "Actions *###Actions" : "Actions###Actions";
     ImGui::Begin(actionsWindowTitle);
 
-    ImGui::TextWrapped("This editor is intentionally conservative. Fixed-size action edits are safe, and any edit that would change serialized parameter size is blocked on save.");
     int loadedCount = 0;
     if (state.actionsLoaded && state.actionsDoc.contains("actions") && state.actionsDoc["actions"].is_array()) {
         loadedCount = static_cast<int>(state.actionsDoc["actions"].size());
@@ -2558,11 +2557,6 @@ static void drawActionsPanel(AppState& state) {
     ImGui::SameLine();
     std::string countChip = std::string("Actions ") + std::to_string(loadedCount);
     drawStatusChip(countChip.c_str(), ImVec4(0.29f, 0.24f, 0.46f, 1.0f));
-    ImGui::SameLine();
-    std::string dirtyChip = std::string("Dirty ") + std::to_string(state.dirtyActionIndices.size());
-    drawStatusChip(dirtyChip.c_str(),
-                   state.actionsDirty ? ImVec4(0.70f, 0.42f, 0.12f, 1.0f)
-                                      : ImVec4(0.26f, 0.30f, 0.36f, 1.0f));
     ImGui::Separator();
 
     if (ImGui::Button("Load Actions")) {
