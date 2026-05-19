@@ -597,6 +597,8 @@ struct AppState {
     bool actionsLoaded = false;
     bool actionsDirty = false;
     bool actionsStructureDirty = false;
+    uint64_t actionsBaselineFingerprint = 0;
+    std::vector<uint64_t> actionBaselineFingerprints;
     std::set<int> dirtyActionIndices;
     json actionsDoc;
     ShellRunner runner;
@@ -608,6 +610,52 @@ static std::string selectedMeshChoiceDisplay(const AppState& state) {
         if (choice.tag == currentTag) return meshChoiceDisplay(choice);
     }
     return currentTag.empty() ? std::string("(choose map)") : currentTag;
+}
+
+static uint64_t hashBytesFNV1a64(const char* data, size_t size) {
+    uint64_t hash = 14695981039346656037ull;
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= static_cast<unsigned char>(data[i]);
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+static uint64_t hashJsonValue(const json& value) {
+    const std::string dumped = value.dump();
+    return hashBytesFNV1a64(dumped.data(), dumped.size());
+}
+
+static void captureActionsBaseline(AppState& state) {
+    state.actionBaselineFingerprints.clear();
+    state.actionsBaselineFingerprint = 0;
+    if (!state.actionsLoaded || !state.actionsDoc.contains("actions") || !state.actionsDoc["actions"].is_array()) {
+        return;
+    }
+    state.actionsBaselineFingerprint = hashJsonValue(state.actionsDoc);
+    const json& actions = state.actionsDoc["actions"];
+    state.actionBaselineFingerprints.reserve(actions.size());
+    for (const json& action : actions) {
+        state.actionBaselineFingerprints.push_back(hashJsonValue(action));
+    }
+}
+
+static void refreshAllActionsDirtyState(AppState& state) {
+    if (!state.actionsLoaded || !state.actionsDoc.contains("actions") || !state.actionsDoc["actions"].is_array()) {
+        state.dirtyActionIndices.clear();
+        state.actionsDirty = false;
+        state.actionsStructureDirty = false;
+        return;
+    }
+
+    const json& actions = state.actionsDoc["actions"];
+    state.actionsDirty = hashJsonValue(state.actionsDoc) != state.actionsBaselineFingerprint;
+    if (!state.actionsDirty) {
+        state.dirtyActionIndices.clear();
+        state.actionsStructureDirty = false;
+    } else if (actions.size() != state.actionBaselineFingerprints.size()) {
+        state.actionsStructureDirty = true;
+    }
 }
 
 static bool isPrintableAscii(char c) {
@@ -937,6 +985,8 @@ static bool loadActionsDoc(AppState& state) {
         state.actionsLoaded = false;
         state.actionsDirty = false;
         state.actionsStructureDirty = false;
+        state.actionsBaselineFingerprint = 0;
+        state.actionBaselineFingerprints.clear();
         state.dirtyActionIndices.clear();
         state.selectedActionIndex = -1;
         state.actionsDoc = json{};
@@ -950,6 +1000,8 @@ static bool loadActionsDoc(AppState& state) {
             state.actionsLoaded = false;
             state.actionsDirty = false;
             state.actionsStructureDirty = false;
+            state.actionsBaselineFingerprint = 0;
+            state.actionBaselineFingerprints.clear();
             state.dirtyActionIndices.clear();
             state.selectedActionIndex = -1;
             state.actionsDoc = json{};
@@ -960,6 +1012,8 @@ static bool loadActionsDoc(AppState& state) {
         state.actionsLoaded = false;
         state.actionsDirty = false;
         state.actionsStructureDirty = false;
+        state.actionsBaselineFingerprint = 0;
+        state.actionBaselineFingerprints.clear();
         state.dirtyActionIndices.clear();
         state.selectedActionIndex = -1;
         state.actionsDoc = json{};
@@ -969,8 +1023,9 @@ static bool loadActionsDoc(AppState& state) {
     state.actionsLoaded = true;
     state.actionsDirty = false;
     state.actionsStructureDirty = false;
-    state.dirtyActionIndices.clear();
     state.selectedActionIndex = state.actionsDoc["actions"].empty() ? -1 : 0;
+    captureActionsBaseline(state);
+    refreshAllActionsDirtyState(state);
     setActionsStatus(state, "Loaded " + std::to_string(state.actionsDoc["actions"].size()) + " actions.");
     return true;
 }
@@ -1013,9 +1068,8 @@ static bool saveActionsDoc(AppState& state) {
         setActionsStatus(state, "Failed while writing " + path.string());
         return false;
     }
-    state.actionsDirty = false;
-    state.actionsStructureDirty = false;
-    state.dirtyActionIndices.clear();
+    captureActionsBaseline(state);
+    refreshAllActionsDirtyState(state);
     setActionsStatus(state, "Saved " + path.string());
     for (int dirtyIndex : dirtyIndices) {
         if (dirtyIndex < 0 || dirtyIndex >= static_cast<int>(state.actionsDoc["actions"].size())) continue;
@@ -2020,9 +2074,22 @@ static bool drawActionParameterEditor(json& param, size_t paramIndex) {
 }
 
 static void markCurrentActionDirty(AppState& state) {
-    state.actionsDirty = true;
-    if (state.selectedActionIndex >= 0) {
-        state.dirtyActionIndices.insert(state.selectedActionIndex);
+    if (!state.actionsLoaded || !state.actionsDoc.contains("actions") || !state.actionsDoc["actions"].is_array()) return;
+    if (state.selectedActionIndex < 0 || state.selectedActionIndex >= static_cast<int>(state.actionsDoc["actions"].size())) return;
+
+    const size_t index = static_cast<size_t>(state.selectedActionIndex);
+    const bool changed =
+        index >= state.actionBaselineFingerprints.size() ||
+        hashJsonValue(state.actionsDoc["actions"][index]) != state.actionBaselineFingerprints[index];
+    if (changed) state.dirtyActionIndices.insert(state.selectedActionIndex);
+    else state.dirtyActionIndices.erase(state.selectedActionIndex);
+
+    state.actionsDirty = hashJsonValue(state.actionsDoc) != state.actionsBaselineFingerprint;
+    if (!state.actionsDirty) {
+        state.dirtyActionIndices.clear();
+        state.actionsStructureDirty = false;
+    } else if (state.actionsDoc["actions"].size() != state.actionBaselineFingerprints.size()) {
+        state.actionsStructureDirty = true;
     }
 }
 
@@ -2678,9 +2745,8 @@ static void drawActionsPanel(AppState& state) {
             remapDirtyIndicesAfterInsert(state, insertIndex);
             actionsToolbar.push_back(makeDefaultActionDoc(actionsToolbar));
             state.selectedActionIndex = insertIndex;
-            state.actionsDirty = true;
             state.actionsStructureDirty = true;
-            state.dirtyActionIndices.insert(insertIndex);
+            refreshAllActionsDirtyState(state);
             setActionsStatus(state, "Added action " + std::to_string(jsonIntOrDefault(actionsToolbar[static_cast<size_t>(insertIndex)], "id")));
         }
         ImGui::SameLine();
@@ -2695,9 +2761,8 @@ static void drawActionsPanel(AppState& state) {
             remapDirtyIndicesAfterInsert(state, insertIndex);
             actionsToolbar.insert(actionsToolbar.begin() + static_cast<ptrdiff_t>(insertIndex), clone);
             state.selectedActionIndex = insertIndex;
-            state.actionsDirty = true;
             state.actionsStructureDirty = true;
-            state.dirtyActionIndices.insert(insertIndex);
+            refreshAllActionsDirtyState(state);
             setActionsStatus(state, "Duplicated action to " + std::to_string(jsonIntOrDefault(clone, "id")));
         }
         if (!canDuplicate) ImGui::EndDisabled();
@@ -2709,7 +2774,6 @@ static void drawActionsPanel(AppState& state) {
             int deletedId = jsonIntOrDefault(actionsToolbar[static_cast<size_t>(deleteIndex)], "id");
             actionsToolbar.erase(actionsToolbar.begin() + static_cast<ptrdiff_t>(deleteIndex));
             remapDirtyIndicesAfterDelete(state, deleteIndex);
-            state.actionsDirty = true;
             state.actionsStructureDirty = true;
             if (actionsToolbar.empty()) {
                 state.selectedActionIndex = -1;
@@ -2718,6 +2782,7 @@ static void drawActionsPanel(AppState& state) {
             } else {
                 state.selectedActionIndex = deleteIndex;
             }
+            refreshAllActionsDirtyState(state);
             setActionsStatus(state, "Deleted action " + std::to_string(deletedId));
         }
         if (!canDelete) ImGui::EndDisabled();
