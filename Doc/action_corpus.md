@@ -438,6 +438,80 @@ These are the connective tissue of the graph:
 | `faci` | 487 | facing |
 | `cent` | 473 | center |
 
+## The `radi` parameter — overloaded by host action type
+
+`radi` always describes a **circular** zone, but the binary type and meaning of
+the values depend on which action carries it. This is the cross-corpus tally
+across the 27 solo maps:
+
+| Host action | Param type | Count | Shape of the values |
+|---|---|---:|---|
+| `plmo` | `world_distance` (6) | 191 | **Two world distances** = `(inner, outer)` of an annulus the platoon spreads out into. Common pairs: `(15, 20)`, `(18, 24)`, `(10, 24)`. Controls movement scatter around the waypoint. |
+| `geom` | `world_distance` (6) | 61 | Single radius. Paired with `cent` (world_point_2d) for an absolute circular trigger zone, OR with `cemo` (monster_identifier) for a circular zone centered on a specific monster. |
+| `tuni` | `world_point_2d` (13) | 37 | A circle, encoded in one of two equivalent forms — see below. |
+| `girl` | `world_distance` (6) | 33 | Single radius around an implicit center (the action's subject). |
+| `suic` | `world_distance` (6) | 31 | Single radius — wight detonation range. |
+| `ligh` | `world_distance` (6) | 8  | Single radius — lightning effect range. |
+| `plsc` | `world_distance` (6) | 3  | Single radius. |
+| `wand` | `world_distance` (6) | 2  | Single radius — wandering bound. |
+
+### `tuni` radi: two equivalent circle encodings
+
+`tuni` stores a circular test zone as either form A or form B, never mixed:
+
+| Form | `radi` (world_point_2d) | `crad` (world_distance) | Meaning |
+|---|---|---|---|
+| **A — explicit radius** | `[center]` (1 point) | `[radius]` (present) | Circle at `center` with radius `crad`. |
+| **B — edge handle** | `[center, edge_point]` (2 points) | absent | Circle at `center` with radius = `distance(center, edge_point)`. |
+
+In the corpus: 21 of the 37 `tuni`-with-`radi` use form A, 16 use form B. The
+two forms are geometrically equivalent — Loathing's editor presumably emits
+form B when you drag an edge handle on the map and form A when you type a
+radius value into a number field. Authors should be free to use either; the
+runtime resolves both into the same circle.
+
+**Form-A ordering convention:** `radi` and `crad` are two independent
+parameters in the action's flat list — there is no compound "circle"
+parameter. The runtime looks them up by FourCC, so the order doesn't affect
+behavior. Bungie's editor always emits them with `radi` immediately followed
+by `crad` (21/21 cases, offset +1, no other parameter between them); third-
+party readers/writers should follow the same convention to keep diffs minimal
+and tool roundtrips clean.
+
+### `geom` radi: center sources
+
+When `geom` has a `radi` (single world_distance) it defines a circular trigger
+zone. The center comes from a sibling parameter:
+
+| Center source | Count | Reading |
+|---|---:|---|
+| `cent` (world_point_2d) | 29 | Absolute coordinate — fixed point on the map. |
+| `cemo` (monster_identifier) | 27 | A specific monster — the trigger follows that unit. |
+
+The 32 `geom` actions with `radi` but no `cent` almost all carry `cemo`
+instead. The handful that have neither pair `radi` with a different anchor or
+fall back to the action's subject.
+
+### `plmo` radi: scatter band
+
+A platoon moving to a waypoint receives `radi = [inner, outer]` to scatter its
+units into the annulus between those two radii around the destination. Top
+pairs observed:
+
+| Pair | Count |
+|---|---:|
+| `(15, 20)` | 36 |
+| `(18, 24)` | 23 |
+| `(20, 20)` | 18 |
+| `(18, 22)` | 13 |
+| `(16, 22)` | 13 |
+| `(28, 34)` | 12 |
+
+The `(20, 20)` case collapses the annulus into a circle of fixed radius (zero
+band width). The 21 `plmo` cases with `count=0` carry an empty `radi` value
+list — i.e., the parameter is present but empty, treated as "no scatter
+configured."
+
 ## What this suggests for authoring
 
 The corpus supports a likely authoring model:

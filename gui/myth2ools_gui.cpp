@@ -65,10 +65,99 @@ struct ShellRunner {
         append("$ " + command);
         worker = std::thread([this, command]() {
 #if defined(_WIN32)
-            FILE* pipe = _popen((command + " 2>&1").c_str(), "r");
+            auto appendBufferedOutput = [this](std::string& pending, const char* data, size_t size) {
+                pending.append(data, size);
+                size_t lineStart = 0;
+                for (size_t i = 0; i < pending.size(); ++i) {
+                    if (pending[i] != '\n' && pending[i] != '\r') continue;
+                    append(pending.substr(lineStart, i - lineStart));
+                    if (pending[i] == '\r' && i + 1 < pending.size() && pending[i + 1] == '\n') ++i;
+                    lineStart = i + 1;
+                }
+                if (lineStart > 0) pending.erase(0, lineStart);
+            };
+
+            SECURITY_ATTRIBUTES sa{};
+            sa.nLength = sizeof(sa);
+            sa.bInheritHandle = TRUE;
+
+            HANDLE readPipe = nullptr;
+            HANDLE writePipe = nullptr;
+            if (!CreatePipe(&readPipe, &writePipe, &sa, 0)) {
+                append("Failed to start command.");
+                running = false;
+                return;
+            }
+            SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
+
+            HANDLE nullInput = CreateFileW(L"NUL",
+                                           GENERIC_READ,
+                                           FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                           &sa,
+                                           OPEN_EXISTING,
+                                           FILE_ATTRIBUTE_NORMAL,
+                                           nullptr);
+
+            STARTUPINFOW si{};
+            si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+            si.wShowWindow = SW_HIDE;
+            si.hStdOutput = writePipe;
+            si.hStdError = writePipe;
+            si.hStdInput = (nullInput != INVALID_HANDLE_VALUE) ? nullInput : GetStdHandle(STD_INPUT_HANDLE);
+
+            PROCESS_INFORMATION pi{};
+            const int wideLength = MultiByteToWideChar(CP_UTF8, 0, command.c_str(), -1, nullptr, 0);
+            if (wideLength <= 0) {
+                CloseHandle(readPipe);
+                CloseHandle(writePipe);
+                if (nullInput != INVALID_HANDLE_VALUE) CloseHandle(nullInput);
+                append("Failed to start command.");
+                running = false;
+                return;
+            }
+            std::vector<wchar_t> wideCommand(static_cast<size_t>(wideLength));
+            MultiByteToWideChar(CP_UTF8, 0, command.c_str(), -1, wideCommand.data(), wideLength);
+
+            const BOOL started = CreateProcessW(nullptr,
+                                                wideCommand.data(),
+                                                nullptr,
+                                                nullptr,
+                                                TRUE,
+                                                CREATE_NO_WINDOW,
+                                                nullptr,
+                                                nullptr,
+                                                &si,
+                                                &pi);
+
+            CloseHandle(writePipe);
+            if (nullInput != INVALID_HANDLE_VALUE) CloseHandle(nullInput);
+
+            if (!started) {
+                CloseHandle(readPipe);
+                append("Failed to start command.");
+                running = false;
+                return;
+            }
+
+            std::array<char, 1024> buffer{};
+            std::string pending;
+            DWORD bytesRead = 0;
+            while (ReadFile(readPipe, buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead, nullptr) && bytesRead > 0) {
+                appendBufferedOutput(pending, buffer.data(), static_cast<size_t>(bytesRead));
+            }
+            if (!pending.empty()) append(pending);
+
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            DWORD code = 0;
+            GetExitCodeProcess(pi.hProcess, &code);
+
+            CloseHandle(readPipe);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            append("Exit code: " + std::to_string(static_cast<int>(code)));
 #else
             FILE* pipe = popen((command + " 2>&1").c_str(), "r");
-#endif
             if (!pipe) {
                 append("Failed to start command.");
                 running = false;
@@ -80,12 +169,9 @@ struct ShellRunner {
                 while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
                 append(line);
             }
-#if defined(_WIN32)
-            int code = _pclose(pipe);
-#else
             int code = pclose(pipe);
-#endif
             append("Exit code: " + std::to_string(code));
+#endif
             running = false;
         });
         return true;
@@ -104,6 +190,24 @@ struct MapPreviewPickTarget {
     int paramIndex = -1;
     int valueIndex = -1;
     int typeId = -1;
+};
+
+struct MapPreviewPointPickTarget {
+    int actionIndex = -1;
+    int paramIndex = -1;
+    int valueIndex = -1;
+    bool insertNew = false;
+};
+
+struct SelectedActionPointTarget {
+    int actionIndex = -1;
+    int paramIndex = -1;
+    int valueIndex = -1;
+};
+
+struct ActionsHistorySnapshot {
+    json doc;
+    int selectedActionIndex = -1;
 };
 
 static std::string quoteArg(const fs::path& path) {
@@ -147,6 +251,7 @@ static bool normalizeActionsDocForSave(json& doc, const std::set<int>& dirtyActi
 static bool recomputeActionDocLayout(json& doc, std::string& error);
 static void setActionsStatus(struct AppState& state, const std::string& message, bool writeToLog = true);
 static void logActionSummary(struct AppState& state, const json& action, const char* phase);
+static void setSelectedActionIndex(struct AppState& state, int actionIndex);
 static bool guiParseHexBytes(const std::string& s, std::vector<uint8_t>& out);
 static void pushPrimaryButtonStyle();
 static void popPrimaryButtonStyle();
@@ -635,6 +740,12 @@ struct AppState {
     ImVec2 mapPreviewDragStart = ImVec2(0.0f, 0.0f);
     ImVec2 mapPreviewDragCurrent = ImVec2(0.0f, 0.0f);
     std::optional<MapPreviewPickTarget> mapPreviewPickTarget;
+    std::optional<MapPreviewPointPickTarget> mapPreviewPointPickTarget;
+    std::optional<SelectedActionPointTarget> selectedActionPointTarget;
+    bool mapPreviewDraggingActionPoint = false;
+    bool mapPreviewActionPointHistoryPending = false;
+    std::vector<ActionsHistorySnapshot> actionsUndoHistory;
+    std::vector<ActionsHistorySnapshot> actionsRedoHistory;
     std::set<int> dirtyActionIndices;
     json actionsDoc;
     ShellRunner runner;
@@ -716,6 +827,70 @@ static void refreshAllActionsDirtyState(AppState& state) {
     } else if (actions.size() != state.actionBaselineFingerprints.size()) {
         state.actionsStructureDirty = true;
     }
+}
+
+static ActionsHistorySnapshot captureActionsHistorySnapshot(const AppState& state) {
+    return ActionsHistorySnapshot{state.actionsDoc, state.selectedActionIndex};
+}
+
+static void clearActionsHistory(AppState& state) {
+    state.actionsUndoHistory.clear();
+    state.actionsRedoHistory.clear();
+}
+
+static void pushActionsUndoSnapshot(AppState& state, const ActionsHistorySnapshot& snapshot) {
+    if (!state.actionsLoaded) return;
+    if (!state.actionsUndoHistory.empty()) {
+        const ActionsHistorySnapshot& last = state.actionsUndoHistory.back();
+        if (last.selectedActionIndex == snapshot.selectedActionIndex && last.doc == snapshot.doc) {
+            state.actionsRedoHistory.clear();
+            return;
+        }
+    }
+    state.actionsUndoHistory.push_back(snapshot);
+    constexpr size_t kMaxActionsHistory = 200;
+    if (state.actionsUndoHistory.size() > kMaxActionsHistory) {
+        state.actionsUndoHistory.erase(state.actionsUndoHistory.begin());
+    }
+    state.actionsRedoHistory.clear();
+}
+
+static void applyActionsHistorySnapshot(AppState& state, const ActionsHistorySnapshot& snapshot) {
+    state.actionsDoc = snapshot.doc;
+    int selectedIndex = snapshot.selectedActionIndex;
+    if (!state.actionsDoc.contains("actions") || !state.actionsDoc["actions"].is_array()) {
+        selectedIndex = -1;
+    } else {
+        const int count = static_cast<int>(state.actionsDoc["actions"].size());
+        if (count == 0) {
+            selectedIndex = -1;
+        } else if (selectedIndex < 0 || selectedIndex >= count) {
+            selectedIndex = (std::min)((std::max)(selectedIndex, 0), count - 1);
+        }
+    }
+    setSelectedActionIndex(state, selectedIndex);
+    state.selectedActionPointTarget.reset();
+    refreshAllActionsDirtyState(state);
+}
+
+static bool undoActionsEdit(AppState& state) {
+    if (state.actionsUndoHistory.empty()) return false;
+    state.actionsRedoHistory.push_back(captureActionsHistorySnapshot(state));
+    ActionsHistorySnapshot snapshot = std::move(state.actionsUndoHistory.back());
+    state.actionsUndoHistory.pop_back();
+    applyActionsHistorySnapshot(state, snapshot);
+    setActionsStatus(state, "Undid action edit.");
+    return true;
+}
+
+static bool redoActionsEdit(AppState& state) {
+    if (state.actionsRedoHistory.empty()) return false;
+    state.actionsUndoHistory.push_back(captureActionsHistorySnapshot(state));
+    ActionsHistorySnapshot snapshot = std::move(state.actionsRedoHistory.back());
+    state.actionsRedoHistory.pop_back();
+    applyActionsHistorySnapshot(state, snapshot);
+    setActionsStatus(state, "Redid action edit.");
+    return true;
 }
 
 static bool isPrintableAscii(char c) {
@@ -1408,6 +1583,10 @@ static void clearMapUnitSelection(AppState& state) {
     state.selectedMapUnitIdentifiers.clear();
     state.mapPreviewDragSelecting = false;
     state.mapPreviewPickTarget.reset();
+    state.mapPreviewPointPickTarget.reset();
+    state.selectedActionPointTarget.reset();
+    state.mapPreviewDraggingActionPoint = false;
+    state.mapPreviewActionPointHistoryPending = false;
 }
 
 static void resetMapPreviewView(AppState& state) {
@@ -1415,9 +1594,70 @@ static void resetMapPreviewView(AppState& state) {
     state.mapPreviewPan = ImVec2(0.0f, 0.0f);
 }
 
+static void handleDeletedActionParameterState(AppState& state, int actionIndex, int deletedParamIndex) {
+    auto remapParamTarget = [actionIndex, deletedParamIndex](auto& target) {
+        if (!target.has_value()) return;
+        if (target->actionIndex != actionIndex) return;
+        if (target->paramIndex == deletedParamIndex) {
+            target.reset();
+            return;
+        }
+        if (target->paramIndex > deletedParamIndex) {
+            --target->paramIndex;
+        }
+    };
+
+    remapParamTarget(state.mapPreviewPickTarget);
+    remapParamTarget(state.mapPreviewPointPickTarget);
+    remapParamTarget(state.selectedActionPointTarget);
+
+    if (state.mapPreviewDraggingActionPoint &&
+        state.selectedActionPointTarget.has_value() &&
+        state.selectedActionPointTarget->actionIndex == actionIndex &&
+        state.selectedActionPointTarget->paramIndex == deletedParamIndex) {
+        state.mapPreviewDraggingActionPoint = false;
+        state.mapPreviewActionPointHistoryPending = false;
+    }
+}
+
+static void handleMovedActionParameterState(AppState& state, int actionIndex, int fromParamIndex, int toParamIndex) {
+    if (fromParamIndex == toParamIndex) return;
+
+    auto remapParamTarget = [actionIndex, fromParamIndex, toParamIndex](auto& target) {
+        if (!target.has_value()) return;
+        if (target->actionIndex != actionIndex) return;
+
+        if (target->paramIndex == fromParamIndex) {
+            target->paramIndex = toParamIndex;
+            return;
+        }
+
+        if (fromParamIndex < toParamIndex) {
+            if (target->paramIndex > fromParamIndex && target->paramIndex <= toParamIndex) {
+                --target->paramIndex;
+            }
+        } else {
+            if (target->paramIndex >= toParamIndex && target->paramIndex < fromParamIndex) {
+                ++target->paramIndex;
+            }
+        }
+    };
+
+    remapParamTarget(state.mapPreviewPickTarget);
+    remapParamTarget(state.mapPreviewPointPickTarget);
+    remapParamTarget(state.selectedActionPointTarget);
+}
+
 static void setSelectedActionIndex(AppState& state, int actionIndex) {
     state.selectedActionIndex = actionIndex;
     state.mapPreviewPickTarget.reset();
+    state.mapPreviewPointPickTarget.reset();
+    state.mapPreviewDraggingActionPoint = false;
+    state.mapPreviewActionPointHistoryPending = false;
+    if (state.selectedActionPointTarget.has_value() &&
+        state.selectedActionPointTarget->actionIndex != actionIndex) {
+        state.selectedActionPointTarget.reset();
+    }
 }
 
 static bool selectReferencedAction(AppState& state, int actionId) {
@@ -1552,6 +1792,175 @@ static std::vector<int> selectedUnitIdsToAppend(const AppState& state, const jso
     return toAppend;
 }
 
+struct ActionOverlayPath2D {
+    std::string name;
+    int paramIndex = -1;
+    std::vector<ImVec2> points;
+    bool closed = false;
+    bool showIndices = false;
+    bool drawPolyline = true;
+    ImU32 lineColor = 0;
+    ImU32 fillColor = 0;
+};
+
+struct ActionOverlayCircle2D {
+    std::string name;
+    ImVec2 center = ImVec2(0.0f, 0.0f);
+    float radius = 0.0f;
+    ImU32 lineColor = 0;
+    ImU32 fillColor = 0;
+};
+
+static bool jsonWorldPoint2Value(const json& value, ImVec2& point) {
+    if (!value.is_object()) return false;
+    if (!value.contains("x") || !value.contains("y")) return false;
+    if (!value["x"].is_number() || !value["y"].is_number()) return false;
+    point.x = static_cast<float>(value["x"].get<double>());
+    point.y = static_cast<float>(value["y"].get<double>());
+    return true;
+}
+
+static std::vector<ImVec2> jsonWorldPoint2Array(const json& values) {
+    std::vector<ImVec2> points;
+    if (!values.is_array()) return points;
+    points.reserve(values.size());
+    for (const json& value : values) {
+        ImVec2 point;
+        if (jsonWorldPoint2Value(value, point)) {
+            points.push_back(point);
+        }
+    }
+    return points;
+}
+
+static std::vector<float> jsonWorldDistanceArray(const json& values) {
+    std::vector<float> distances;
+    if (!values.is_array()) return distances;
+    distances.reserve(values.size());
+    for (const json& value : values) {
+        if (value.is_number()) {
+            distances.push_back(static_cast<float>(value.get<double>()));
+        }
+    }
+    return distances;
+}
+
+static void collectSelectedActionMapOverlays(const AppState& state,
+                                             std::vector<ActionOverlayPath2D>& paths,
+                                             std::vector<ActionOverlayCircle2D>& circles) {
+    paths.clear();
+    circles.clear();
+    if (!state.actionsLoaded || !state.actionsDoc.contains("actions") || !state.actionsDoc["actions"].is_array()) return;
+    if (state.selectedActionIndex < 0 || state.selectedActionIndex >= static_cast<int>(state.actionsDoc["actions"].size())) return;
+
+    const json& action = state.actionsDoc["actions"][static_cast<size_t>(state.selectedActionIndex)];
+    if (!action.contains("parameters") || !action["parameters"].is_array()) return;
+
+    std::vector<ImVec2> centPoints;
+    std::vector<ImVec2> waypoints;
+    std::vector<ImVec2> radiPoints;
+    std::vector<float> wayRadii;
+    std::vector<float> actionRadii;
+    std::vector<float> explicitCircleRadii;
+
+    for (size_t paramIndex = 0; paramIndex < action["parameters"].size(); ++paramIndex) {
+        const json& param = action["parameters"][paramIndex];
+        const std::string name = jsonStringOrEmpty(param, "name");
+        const int typeId = jsonIntOrDefault(param, "type_id", -1);
+        if (!param.contains("values")) continue;
+
+        if (typeId == 13) {
+            std::vector<ImVec2> points = jsonWorldPoint2Array(param["values"]);
+            if (points.empty()) continue;
+
+            ActionOverlayPath2D path;
+            path.name = name;
+            path.paramIndex = static_cast<int>(paramIndex);
+            path.points = points;
+            path.fillColor = 0;
+
+            if (name == "wayp") {
+                waypoints = points;
+                path.lineColor = IM_COL32(62, 199, 233, 255);
+                path.showIndices = true;
+            } else if (name == "poly") {
+                path.lineColor = IM_COL32(255, 198, 84, 255);
+                path.fillColor = IM_COL32(255, 198, 84, 44);
+                path.closed = true;
+            } else if (name == "cent") {
+                centPoints = points;
+                path.lineColor = IM_COL32(118, 232, 140, 255);
+            } else if (name == "dest") {
+                path.lineColor = IM_COL32(255, 149, 92, 255);
+            } else if (name == "radi") {
+                radiPoints = points;
+                path.lineColor = IM_COL32(255, 120, 120, 255);
+                path.drawPolyline = false;
+            } else {
+                path.lineColor = IM_COL32(196, 196, 212, 255);
+            }
+            paths.push_back(std::move(path));
+        } else if (typeId == 6) {
+            if (name == "wayr") {
+                wayRadii = jsonWorldDistanceArray(param["values"]);
+            } else if (name == "radi") {
+                actionRadii = jsonWorldDistanceArray(param["values"]);
+            } else if (name == "crad") {
+                explicitCircleRadii = jsonWorldDistanceArray(param["values"]);
+            }
+        }
+    }
+
+    if (!waypoints.empty() && !wayRadii.empty()) {
+        if (wayRadii.size() == waypoints.size()) {
+            for (size_t i = 0; i < waypoints.size(); ++i) {
+                circles.push_back(ActionOverlayCircle2D{"wayr", waypoints[i], wayRadii[i], IM_COL32(62, 199, 233, 150), IM_COL32(62, 199, 233, 36)});
+            }
+        } else if (wayRadii.size() == 1) {
+            for (const ImVec2& point : waypoints) {
+                circles.push_back(ActionOverlayCircle2D{"wayr", point, wayRadii[0], IM_COL32(62, 199, 233, 150), IM_COL32(62, 199, 233, 36)});
+            }
+        }
+    }
+
+    if (!actionRadii.empty()) {
+        if (!centPoints.empty()) {
+            for (const ImVec2& center : centPoints) {
+                for (float radius : actionRadii) {
+                    circles.push_back(ActionOverlayCircle2D{"radi", center, radius, IM_COL32(255, 120, 120, 180), IM_COL32(255, 120, 120, 40)});
+                }
+            }
+        } else if (!waypoints.empty()) {
+            if (actionRadii.size() == waypoints.size()) {
+                for (size_t i = 0; i < waypoints.size(); ++i) {
+                    circles.push_back(ActionOverlayCircle2D{"radi", waypoints[i], actionRadii[i], IM_COL32(255, 120, 120, 180), IM_COL32(255, 120, 120, 40)});
+                }
+            } else if (actionRadii.size() == 1) {
+                for (const ImVec2& point : waypoints) {
+                    circles.push_back(ActionOverlayCircle2D{"radi", point, actionRadii[0], IM_COL32(255, 120, 120, 180), IM_COL32(255, 120, 120, 40)});
+                }
+            }
+        }
+    }
+
+    if (!radiPoints.empty()) {
+        const ImVec2 center = radiPoints.front();
+        if (!explicitCircleRadii.empty()) {
+            for (float radius : explicitCircleRadii) {
+                circles.push_back(ActionOverlayCircle2D{"radi", center, radius, IM_COL32(255, 120, 120, 180), IM_COL32(255, 120, 120, 40)});
+            }
+        } else if (radiPoints.size() >= 2) {
+            const ImVec2 edgePoint = radiPoints[1];
+            const float dx = edgePoint.x - center.x;
+            const float dy = edgePoint.y - center.y;
+            const float radius = std::sqrt(dx * dx + dy * dy);
+            if (radius > 0.0f) {
+                circles.push_back(ActionOverlayCircle2D{"radi", center, radius, IM_COL32(255, 120, 120, 180), IM_COL32(255, 120, 120, 40)});
+            }
+        }
+    }
+}
+
 static bool selectParameterReference(AppState& state, int typeId, int value) {
     switch (typeId) {
     case 3:
@@ -1604,9 +2013,70 @@ static bool applyMapPickedUnitToTarget(AppState& state, uint16_t identifier) {
     if (target.valueIndex < 0 || target.valueIndex >= static_cast<int>(param["values"].size())) return false;
     if (!canFillParameterReferenceFromMap(target.typeId)) return false;
 
+    pushActionsUndoSnapshot(state, captureActionsHistorySnapshot(state));
     param["values"][static_cast<size_t>(target.valueIndex)] = static_cast<int>(identifier);
     markActionIndexDirty(state, target.actionIndex);
     state.actionsStatus = "Filled parameter with unit #" + std::to_string(identifier) + ".";
+    return true;
+}
+
+static bool applyMapPickedPoint2ToTarget(AppState& state, float x, float y) {
+    if (!state.mapPreviewPointPickTarget.has_value()) return false;
+    if (!state.actionsLoaded || !state.actionsDoc.contains("actions") || !state.actionsDoc["actions"].is_array()) return false;
+
+    const MapPreviewPointPickTarget target = *state.mapPreviewPointPickTarget;
+    if (target.actionIndex < 0 || target.actionIndex >= static_cast<int>(state.actionsDoc["actions"].size())) {
+        return false;
+    }
+
+    json& action = state.actionsDoc["actions"][static_cast<size_t>(target.actionIndex)];
+    if (!action.contains("parameters") || !action["parameters"].is_array()) return false;
+    if (target.paramIndex < 0 || target.paramIndex >= static_cast<int>(action["parameters"].size())) return false;
+
+    json& param = action["parameters"][static_cast<size_t>(target.paramIndex)];
+    if (!param.contains("values") || !param["values"].is_array()) return false;
+
+    pushActionsUndoSnapshot(state, captureActionsHistorySnapshot(state));
+    json point = json{{"x", x}, {"y", y}};
+    if (target.insertNew) {
+        param["values"].push_back(point);
+    } else {
+        if (target.valueIndex < 0 || target.valueIndex >= static_cast<int>(param["values"].size())) return false;
+        param["values"][static_cast<size_t>(target.valueIndex)] = point;
+    }
+
+    markActionIndexDirty(state, target.actionIndex);
+    state.actionsStatus = "Filled point from map at (" +
+                          std::to_string(x) + ", " +
+                          std::to_string(y) + ").";
+    return true;
+}
+
+static bool updateSelectedActionPointFromMap(AppState& state, float x, float y) {
+    if (!state.selectedActionPointTarget.has_value()) return false;
+    if (!state.actionsLoaded || !state.actionsDoc.contains("actions") || !state.actionsDoc["actions"].is_array()) return false;
+
+    const SelectedActionPointTarget target = *state.selectedActionPointTarget;
+    if (target.actionIndex < 0 || target.actionIndex >= static_cast<int>(state.actionsDoc["actions"].size())) return false;
+
+    json& action = state.actionsDoc["actions"][static_cast<size_t>(target.actionIndex)];
+    if (!action.contains("parameters") || !action["parameters"].is_array()) return false;
+    if (target.paramIndex < 0 || target.paramIndex >= static_cast<int>(action["parameters"].size())) return false;
+
+    json& param = action["parameters"][static_cast<size_t>(target.paramIndex)];
+    if (!param.contains("values") || !param["values"].is_array()) return false;
+    if (target.valueIndex < 0 || target.valueIndex >= static_cast<int>(param["values"].size())) return false;
+
+    json& value = param["values"][static_cast<size_t>(target.valueIndex)];
+    if (!value.is_object()) value = json{{"x", 0.0}, {"y", 0.0}};
+    const float oldX = value.contains("x") && value["x"].is_number() ? static_cast<float>(value["x"].get<double>()) : 0.0f;
+    const float oldY = value.contains("y") && value["y"].is_number() ? static_cast<float>(value["y"].get<double>()) : 0.0f;
+    if (std::fabs(oldX - x) < 0.0005f && std::fabs(oldY - y) < 0.0005f) return false;
+
+    value["x"] = x;
+    value["y"] = y;
+    markActionIndexDirty(state, target.actionIndex);
+    state.actionsStatus = "Moved point to (" + std::to_string(x) + ", " + std::to_string(y) + ").";
     return true;
 }
 
@@ -1717,6 +2187,7 @@ static bool loadActionsDoc(AppState& state) {
         state.actionsStructureDirty = false;
         state.actionsBaselineFingerprint = 0;
         state.actionBaselineFingerprints.clear();
+        clearActionsHistory(state);
         state.dirtyActionIndices.clear();
         setSelectedActionIndex(state, -1);
         state.actionsDoc = json{};
@@ -1732,6 +2203,7 @@ static bool loadActionsDoc(AppState& state) {
             state.actionsStructureDirty = false;
             state.actionsBaselineFingerprint = 0;
             state.actionBaselineFingerprints.clear();
+            clearActionsHistory(state);
             state.dirtyActionIndices.clear();
             setSelectedActionIndex(state, -1);
             state.actionsDoc = json{};
@@ -1744,6 +2216,7 @@ static bool loadActionsDoc(AppState& state) {
         state.actionsStructureDirty = false;
         state.actionsBaselineFingerprint = 0;
         state.actionBaselineFingerprints.clear();
+        clearActionsHistory(state);
         state.dirtyActionIndices.clear();
         setSelectedActionIndex(state, -1);
         state.actionsDoc = json{};
@@ -1755,6 +2228,7 @@ static bool loadActionsDoc(AppState& state) {
     state.actionsStructureDirty = false;
     setSelectedActionIndex(state, state.actionsDoc["actions"].empty() ? -1 : 0);
     captureActionsBaseline(state);
+    clearActionsHistory(state);
     refreshAllActionsDirtyState(state);
     setActionsStatus(state, "Loaded " + std::to_string(state.actionsDoc["actions"].size()) + " actions.");
     return true;
@@ -2379,6 +2853,9 @@ static bool guiBuildSerializedParameterUsingLayout(std::vector<uint8_t>& out,
         payload[offset + 2] = static_cast<uint8_t>((value >> 8) & 0xFF);
         payload[offset + 3] = static_cast<uint8_t>(value & 0xFF);
     };
+    const auto rebuildWithNewCount = [&]() {
+        return guiBuildSerializedParameter(out, layout.name, layout.typeId, values, error, true);
+    };
 
     switch (layout.typeId) {
     case GUI_PARAM_SOUND:
@@ -2392,8 +2869,7 @@ static bool guiBuildSerializedParameterUsingLayout(std::vector<uint8_t>& out,
             return false;
         }
         if (vals.size() != layout.count) {
-            error = "parameter '" + layout.name + "' cannot change item count yet";
-            return false;
+            return rebuildWithNewCount();
         }
         for (size_t i = 0; i < vals.size(); ++i) {
             for (int j = 0; j < 4; ++j) {
@@ -2405,10 +2881,11 @@ static bool guiBuildSerializedParameterUsingLayout(std::vector<uint8_t>& out,
         break;
     }
     case GUI_PARAM_WORLD_POINT_2D: {
-        if (!values.is_array() || values.size() != layout.count) {
-            error = "parameter '" + layout.name + "' cannot change point count yet";
+        if (!values.is_array()) {
+            error = "world_point_2d parameter '" + layout.name + "' must be an array";
             return false;
         }
+        if (values.size() != layout.count) return rebuildWithNewCount();
         for (size_t i = 0; i < values.size(); ++i) {
             const json& point = values[i];
             if (!point.is_object() || !point.contains("x") || !point.contains("y") ||
@@ -2422,10 +2899,11 @@ static bool guiBuildSerializedParameterUsingLayout(std::vector<uint8_t>& out,
         break;
     }
     case GUI_PARAM_WORLD_POINT_3D: {
-        if (!values.is_array() || values.size() != layout.count) {
-            error = "parameter '" + layout.name + "' cannot change point count yet";
+        if (!values.is_array()) {
+            error = "world_point_3d parameter '" + layout.name + "' must be an array";
             return false;
         }
+        if (values.size() != layout.count) return rebuildWithNewCount();
         for (size_t i = 0; i < values.size(); ++i) {
             const json& point = values[i];
             if (!point.is_object() || !point.contains("x") || !point.contains("y") || !point.contains("z") ||
@@ -2446,8 +2924,7 @@ static bool guiBuildSerializedParameterUsingLayout(std::vector<uint8_t>& out,
             return false;
         }
         if (vals.size() != layout.count) {
-            error = "parameter '" + layout.name + "' cannot change item count yet";
-            return false;
+            return rebuildWithNewCount();
         }
         for (size_t i = 0; i < vals.size(); ++i) {
             writeBE32At(i * 4, static_cast<uint32_t>(vals[i]));
@@ -2462,8 +2939,7 @@ static bool guiBuildSerializedParameterUsingLayout(std::vector<uint8_t>& out,
             return false;
         }
         if (vals.size() != layout.count) {
-            error = "parameter '" + layout.name + "' cannot change item count yet";
-            return false;
+            return rebuildWithNewCount();
         }
         double scale = (layout.typeId == GUI_PARAM_FIXED) ? GUI_FIXED_SF : GUI_WORLD_POINT_SF;
         for (size_t i = 0; i < vals.size(); ++i) {
@@ -2478,8 +2954,7 @@ static bool guiBuildSerializedParameterUsingLayout(std::vector<uint8_t>& out,
             return false;
         }
         if (vals.size() != layout.count) {
-            error = "parameter '" + layout.name + "' cannot change item count yet";
-            return false;
+            return rebuildWithNewCount();
         }
         for (size_t i = 0; i < vals.size(); ++i) {
             writeBE16At(i * 2, static_cast<uint16_t>(std::lround(vals[i] * GUI_ANGLE_SF)));
@@ -2493,8 +2968,7 @@ static bool guiBuildSerializedParameterUsingLayout(std::vector<uint8_t>& out,
             return false;
         }
         if (vals.size() != layout.count) {
-            error = "parameter '" + layout.name + "' cannot change item count yet";
-            return false;
+            return rebuildWithNewCount();
         }
         for (size_t i = 0; i < vals.size(); ++i) {
             writeBE16At(i * 2, static_cast<uint16_t>(vals[i]));
@@ -2844,14 +3318,24 @@ static bool drawJsonStringListEditor(json& values, const char* addLabel, size_t 
     return changed;
 }
 
-static bool drawJsonPoint2ListEditor(json& values) {
+static bool drawJsonPoint2ListEditor(AppState& state, int paramIndex, json& values) {
     if (!values.is_array()) values = json::array();
     bool changed = false;
     for (size_t i = 0; i < values.size(); ++i) {
         if (!values[i].is_object()) values[i] = json{{"x", 0.0}, {"y", 0.0}};
         ImGui::PushID(static_cast<int>(i));
+        const bool pointSelected =
+            state.selectedActionPointTarget.has_value() &&
+            state.selectedActionPointTarget->actionIndex == state.selectedActionIndex &&
+            state.selectedActionPointTarget->paramIndex == paramIndex &&
+            state.selectedActionPointTarget->valueIndex == static_cast<int>(i);
         float x = values[i].contains("x") && values[i]["x"].is_number() ? static_cast<float>(values[i]["x"].get<double>()) : 0.0f;
         float y = values[i].contains("y") && values[i]["y"].is_number() ? static_cast<float>(values[i]["y"].get<double>()) : 0.0f;
+        if (pointSelected) {
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(46, 92, 126, 190));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(58, 110, 148, 220));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(58, 110, 148, 220));
+        }
         ImGui::SetNextItemWidth(110.0f);
         if (ImGui::InputFloat("x", &x, 0.0f, 0.0f, "%.4f")) {
             values[i]["x"] = x;
@@ -2863,18 +3347,65 @@ static bool drawJsonPoint2ListEditor(json& values) {
             values[i]["y"] = y;
             changed = true;
         }
+        if (pointSelected) {
+            ImGui::PopStyleColor(3);
+        }
         ImGui::SameLine();
-        if (ImGui::Button("-")) {
+        const bool pickActive =
+            state.mapPreviewPointPickTarget.has_value() &&
+            state.mapPreviewPointPickTarget->actionIndex == state.selectedActionIndex &&
+            state.mapPreviewPointPickTarget->paramIndex == paramIndex &&
+            state.mapPreviewPointPickTarget->valueIndex == static_cast<int>(i) &&
+            !state.mapPreviewPointPickTarget->insertNew;
+        if (ImGui::Button(pickActive ? "Cancel Pick" : "Pick")) {
+            if (pickActive) {
+                state.mapPreviewPointPickTarget.reset();
+                state.actionsStatus = "Map point pick cancelled.";
+            } else {
+                state.mapPreviewPickTarget.reset();
+                state.mapPreviewPointPickTarget = MapPreviewPointPickTarget{
+                    state.selectedActionIndex,
+                    paramIndex,
+                    static_cast<int>(i),
+                    false
+                };
+                state.actionsStatus = "Click on the map preview to fill this point.";
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Del")) {
             values.erase(values.begin() + static_cast<ptrdiff_t>(i));
+            if (pickActive) state.mapPreviewPointPickTarget.reset();
             changed = true;
             ImGui::PopID();
             break;
         }
         ImGui::PopID();
     }
+    const bool addPickActive =
+        state.mapPreviewPointPickTarget.has_value() &&
+        state.mapPreviewPointPickTarget->actionIndex == state.selectedActionIndex &&
+        state.mapPreviewPointPickTarget->paramIndex == paramIndex &&
+        state.mapPreviewPointPickTarget->insertNew;
     if (ImGui::Button("Add Point")) {
         values.push_back(json{{"x", 0.0}, {"y", 0.0}});
         changed = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(addPickActive ? "Cancel Add From Map" : "Add Point From Map")) {
+        if (addPickActive) {
+            state.mapPreviewPointPickTarget.reset();
+            state.actionsStatus = "Map point add cancelled.";
+        } else {
+            state.mapPreviewPickTarget.reset();
+            state.mapPreviewPointPickTarget = MapPreviewPointPickTarget{
+                state.selectedActionIndex,
+                paramIndex,
+                -1,
+                true
+            };
+            state.actionsStatus = "Click on the map preview to append a point.";
+        }
     }
     return changed;
 }
@@ -2982,7 +3513,7 @@ static bool drawActionParameterEditor(AppState& state, json& param, size_t param
         changed = drawJsonReferenceListEditor(state, typeId, static_cast<int>(paramIndex), values, "Add Value");
         break;
     case GUI_PARAM_WORLD_POINT_2D:
-        changed = drawJsonPoint2ListEditor(values);
+        changed = drawJsonPoint2ListEditor(state, static_cast<int>(paramIndex), values);
         break;
     case GUI_PARAM_WORLD_POINT_3D:
         changed = drawJsonPoint3ListEditor(values);
@@ -2998,6 +3529,25 @@ static bool drawActionParameterEditor(AppState& state, json& param, size_t param
     }
 
     return changed;
+}
+
+static json defaultParameterValuesForType(int typeId) {
+    switch (typeId) {
+    case GUI_PARAM_FLAG:
+        return false;
+    case GUI_PARAM_STRING:
+        return std::string();
+    default:
+        return json::array();
+    }
+}
+
+static bool isValidParameterFourCC(const std::string& name) {
+    if (name.size() != 4) return false;
+    for (char c : name) {
+        if (!isPrintableAscii(c)) return false;
+    }
+    return true;
 }
 
 static void markCurrentActionDirty(AppState& state) {
@@ -3019,6 +3569,39 @@ static void remapDirtyIndicesAfterDelete(AppState& state, int deleteIndex) {
         remapped.insert(idx > deleteIndex ? idx - 1 : idx);
     }
     state.dirtyActionIndices.swap(remapped);
+}
+
+static int remapIndexAfterMove(int index, int fromIndex, int toIndex) {
+    if (index == fromIndex) return toIndex;
+    if (fromIndex < toIndex) {
+        if (index > fromIndex && index <= toIndex) return index - 1;
+    } else if (fromIndex > toIndex) {
+        if (index >= toIndex && index < fromIndex) return index + 1;
+    }
+    return index;
+}
+
+static void remapActionStateAfterMove(AppState& state, int fromIndex, int toIndex) {
+    if (fromIndex == toIndex) return;
+
+    if (state.selectedActionIndex >= 0) {
+        state.selectedActionIndex = remapIndexAfterMove(state.selectedActionIndex, fromIndex, toIndex);
+    }
+    if (state.mapPreviewPickTarget.has_value()) {
+        state.mapPreviewPickTarget->actionIndex = remapIndexAfterMove(state.mapPreviewPickTarget->actionIndex, fromIndex, toIndex);
+    }
+    if (state.mapPreviewPointPickTarget.has_value()) {
+        state.mapPreviewPointPickTarget->actionIndex = remapIndexAfterMove(state.mapPreviewPointPickTarget->actionIndex, fromIndex, toIndex);
+    }
+    if (state.selectedActionPointTarget.has_value()) {
+        state.selectedActionPointTarget->actionIndex = remapIndexAfterMove(state.selectedActionPointTarget->actionIndex, fromIndex, toIndex);
+    }
+
+    std::set<int> remappedDirty;
+    for (int idx : state.dirtyActionIndices) {
+        remappedDirty.insert(remapIndexAfterMove(idx, fromIndex, toIndex));
+    }
+    state.dirtyActionIndices.swap(remappedDirty);
 }
 
 static int nextAvailableActionId(const json& actions) {
@@ -3097,10 +3680,13 @@ static void syncDerivedPaths(AppState& s) {
 }
 
 static void drawTopBar(AppState& state) {
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 10.0f);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6.0f);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Myth2ools");
     ImGui::SameLine();
     ImGui::TextDisabled("Map extraction, plugin builds, and action editing");
+    ImGui::SameLine();
     drawStatusChip(state.runner.running.load() ? "Runner Active" : "Runner Idle",
                    state.runner.running.load() ? ImVec4(0.18f, 0.54f, 0.35f, 1.0f)
                                                : ImVec4(0.26f, 0.30f, 0.36f, 1.0f));
@@ -3550,6 +4136,22 @@ static void drawActionsPanel(AppState& state) {
     const char* actionsWindowTitle = state.actionsDirty ? "Actions *###Actions" : "Actions###Actions";
     applyLockedDockWindowClass(state.lockDockLayout);
     ImGui::Begin(actionsWindowTitle, nullptr, lockedDockPanelFlags(state.lockDockLayout));
+    ImGuiIO& io = ImGui::GetIO();
+
+    if (state.actionsLoaded &&
+        ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        io.KeyCtrl &&
+        !io.WantTextInput) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+            if (io.KeyShift) {
+                redoActionsEdit(state);
+            } else {
+                undoActionsEdit(state);
+            }
+        } else if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) {
+            redoActionsEdit(state);
+        }
+    }
 
     int loadedCount = 0;
     if (state.actionsLoaded && state.actionsDoc.contains("actions") && state.actionsDoc["actions"].is_array()) {
@@ -3587,6 +4189,20 @@ static void drawActionsPanel(AppState& state) {
         state.openDiscardPopup = true;
     }
     if (!canSave) ImGui::EndDisabled();
+    ImGui::SameLine();
+    const bool canUndo = state.actionsLoaded && !state.actionsUndoHistory.empty();
+    if (!canUndo) ImGui::BeginDisabled();
+    if (ImGui::Button("Undo")) {
+        undoActionsEdit(state);
+    }
+    if (!canUndo) ImGui::EndDisabled();
+    ImGui::SameLine();
+    const bool canRedo = state.actionsLoaded && !state.actionsRedoHistory.empty();
+    if (!canRedo) ImGui::BeginDisabled();
+    if (ImGui::Button("Redo")) {
+        redoActionsEdit(state);
+    }
+    if (!canRedo) ImGui::EndDisabled();
     ImGui::SameLine();
     if (state.actionsDirty) {
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "Modified");
@@ -3678,6 +4294,7 @@ static void drawActionsPanel(AppState& state) {
     if (state.actionsLoaded) {
         json& actionsToolbar = state.actionsDoc["actions"];
         if (ImGui::Button("Add Action")) {
+            pushActionsUndoSnapshot(state, captureActionsHistorySnapshot(state));
             int insertIndex = actionsToolbar.is_array() ? static_cast<int>(actionsToolbar.size()) : 0;
             remapDirtyIndicesAfterInsert(state, insertIndex);
             actionsToolbar.push_back(makeDefaultActionDoc(actionsToolbar));
@@ -3690,6 +4307,7 @@ static void drawActionsPanel(AppState& state) {
         bool canDuplicate = state.selectedActionIndex >= 0 && state.selectedActionIndex < static_cast<int>(actionsToolbar.size());
         if (!canDuplicate) ImGui::BeginDisabled();
         if (ImGui::Button("Duplicate Action")) {
+            pushActionsUndoSnapshot(state, captureActionsHistorySnapshot(state));
             json clone = actionsToolbar[static_cast<size_t>(state.selectedActionIndex)];
             clone["id"] = nextAvailableActionId(actionsToolbar);
             std::string name = jsonStringOrEmpty(clone, "name");
@@ -3707,6 +4325,7 @@ static void drawActionsPanel(AppState& state) {
         bool canDelete = canDuplicate;
         if (!canDelete) ImGui::BeginDisabled();
         if (ImGui::Button("Delete Action")) {
+            pushActionsUndoSnapshot(state, captureActionsHistorySnapshot(state));
             int deleteIndex = state.selectedActionIndex;
             int deletedId = jsonIntOrDefault(actionsToolbar[static_cast<size_t>(deleteIndex)], "id");
             actionsToolbar.erase(actionsToolbar.begin() + static_cast<ptrdiff_t>(deleteIndex));
@@ -3779,6 +4398,8 @@ static void drawActionsPanel(AppState& state) {
     ImGui::Separator();
     ImGuiListClipper clipper;
     clipper.Begin(static_cast<int>(visibleIndices.size()));
+    std::optional<std::pair<int, int>> pendingMoveActionIndices;
+    std::string pendingMoveActionName;
     while (clipper.Step()) {
         for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
             int i = visibleIndices[static_cast<size_t>(row)];
@@ -3812,11 +4433,49 @@ static void drawActionsPanel(AppState& state) {
             if (ImGui::Selectable(label.c_str(), selected)) {
                 setSelectedActionIndex(state, i);
             }
+            if (ImGui::BeginPopupContextItem()) {
+                if (state.selectedActionIndex != i) {
+                    setSelectedActionIndex(state, i);
+                }
+                const bool canMoveToTop = (i > 0);
+                const bool canMoveToBottom = (i + 1 < static_cast<int>(actions.size()));
+                if (!canMoveToTop) ImGui::BeginDisabled();
+                if (ImGui::MenuItem("Move to Top")) {
+                    pendingMoveActionIndices = std::make_pair(i, 0);
+                    pendingMoveActionName = visibleLabel;
+                }
+                if (!canMoveToTop) ImGui::EndDisabled();
+                if (!canMoveToBottom) ImGui::BeginDisabled();
+                if (ImGui::MenuItem("Move to Bottom")) {
+                    pendingMoveActionIndices = std::make_pair(i, static_cast<int>(actions.size()) - 1);
+                    pendingMoveActionName = visibleLabel;
+                }
+                if (!canMoveToBottom) ImGui::EndDisabled();
+                ImGui::EndPopup();
+            }
             if (dirty) ImGui::PopStyleColor();
             if (relatedToSelectedUnit) ImGui::PopStyleColor(3);
         }
     }
     clipper.End();
+    if (pendingMoveActionIndices.has_value()) {
+        const int fromIndex = pendingMoveActionIndices->first;
+        const int toIndex = pendingMoveActionIndices->second;
+        if (fromIndex >= 0 &&
+            fromIndex < static_cast<int>(actions.size()) &&
+            toIndex >= 0 &&
+            toIndex < static_cast<int>(actions.size()) &&
+            fromIndex != toIndex) {
+            pushActionsUndoSnapshot(state, captureActionsHistorySnapshot(state));
+            json movedAction = actions[static_cast<size_t>(fromIndex)];
+            actions.erase(actions.begin() + static_cast<ptrdiff_t>(fromIndex));
+            actions.insert(actions.begin() + static_cast<ptrdiff_t>(toIndex), movedAction);
+            remapActionStateAfterMove(state, fromIndex, toIndex);
+            state.actionsStructureDirty = true;
+            refreshAllActionsDirtyState(state);
+            setActionsStatus(state, "Moved action '" + pendingMoveActionName + "'.", false);
+        }
+    }
     ImGui::EndChild();
 
     ImGui::SameLine(0.0f, 0.0f);
@@ -3874,11 +4533,19 @@ static void drawActionsPanel(AppState& state) {
     detailLine += std::to_string(action.contains("parameters") && action["parameters"].is_array() ? action["parameters"].size() : 0);
     detailLine += " parameter(s)";
 
+    std::optional<ActionsHistorySnapshot> pendingEditSnapshot;
+    const auto beginHistoryEdit = [&]() {
+        if (!pendingEditSnapshot.has_value()) {
+            pendingEditSnapshot = captureActionsHistorySnapshot(state);
+        }
+    };
+
     ImGui::TextUnformatted(actionTitle.c_str());
     ImGui::TextDisabled("%s", detailLine.c_str());
     ImGui::Separator();
 
     if (ImGui::InputText("Name", nameBuf.data(), nameBuf.size())) {
+        beginHistoryEdit();
         action["name"] = std::string(nameBuf.data());
         markCurrentActionDirty(state);
     }
@@ -3931,6 +4598,7 @@ static void drawActionsPanel(AppState& state) {
             {
                 bool selected = currentType.empty();
                 if (ImGui::Selectable("(container / no type)", selected)) {
+                    beginHistoryEdit();
                     action["type"] = std::string();
                     copyToBuffer(typeBuf, std::string());
                     markCurrentActionDirty(state);
@@ -3951,6 +4619,7 @@ static void drawActionsPanel(AppState& state) {
                 std::string line = code + "  -  " + lbl;
                 bool selected = (currentType == code);
                 if (ImGui::Selectable(line.c_str(), selected)) {
+                    beginHistoryEdit();
                     action["type"] = code;
                     copyToBuffer(typeBuf, code);
                     markCurrentActionDirty(state);
@@ -3965,6 +4634,7 @@ static void drawActionsPanel(AppState& state) {
                 ImGui::Separator();
                 std::string apply = std::string("Apply custom type: ") + filterStr;
                 if (ImGui::Selectable(apply.c_str())) {
+                    beginHistoryEdit();
                     action["type"] = filterStr;
                     copyToBuffer(typeBuf, filterStr);
                     markCurrentActionDirty(state);
@@ -3984,47 +4654,172 @@ static void drawActionsPanel(AppState& state) {
     };
     if (expirationModeId < 0 || expirationModeId > 4) expirationModeId = 0;
     if (ImGui::Combo("Expiration Mode", &expirationModeId, expirationModes, IM_ARRAYSIZE(expirationModes))) {
+        beginHistoryEdit();
         action["expiration_mode_id"] = expirationModeId;
         action["expiration_mode"] = std::string(guiExpirationModeName(expirationModeId));
         markCurrentActionDirty(state);
     }
     if (ImGui::InputInt("ID", &actionId)) {
+        beginHistoryEdit();
         action["id"] = actionId;
         markCurrentActionDirty(state);
     }
     if (ImGui::InputInt("Indent", &indent)) {
+        beginHistoryEdit();
         action["indent"] = indent;
         markCurrentActionDirty(state);
     }
     if (ImGui::InputInt("Flags Raw", &flagsRaw)) {
+        beginHistoryEdit();
         action["flags_raw"] = flagsRaw;
         syncActionFlagsJson(action);
         markCurrentActionDirty(state);
     }
     if (ImGui::InputFloat("Trigger Lower (s)", &lower, 0.5f, 5.0f, "%.4f")) {
+        beginHistoryEdit();
         action["trigger_time_lower_bound_seconds"] = lower;
         markCurrentActionDirty(state);
     }
     if (ImGui::InputFloat("Trigger Delta (s)", &delta, 0.5f, 5.0f, "%.4f")) {
+        beginHistoryEdit();
         action["trigger_time_delta_seconds"] = delta;
         markCurrentActionDirty(state);
     }
 
     ImGui::SeparatorText("Parameters");
     if (action.contains("parameters") && action["parameters"].is_array()) {
+        std::optional<size_t> deleteParamIndex;
+        std::optional<ActionsHistorySnapshot> deleteParamSnapshot;
+        std::string deletedParamName;
+        std::optional<std::pair<size_t, size_t>> moveParamIndices;
+        std::optional<ActionsHistorySnapshot> moveParamSnapshot;
+        std::string movedParamName;
         for (size_t pi = 0; pi < action["parameters"].size(); ++pi) {
             json& param = action["parameters"][pi];
             std::string paramName = jsonStringOrEmpty(param, "name");
             std::string paramType = jsonStringOrEmpty(param, "type");
-            if (ImGui::TreeNode((paramName + " (" + paramType + ")##param" + std::to_string(pi)).c_str())) {
+            ImGui::SetNextItemAllowOverlap();
+            const bool paramOpen = ImGui::TreeNodeEx((paramName + " (" + paramType + ")##param" + std::to_string(pi)).c_str(),
+                                                     ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_AllowOverlap);
+            ImGui::PushID(static_cast<int>(pi));
+            const bool canMoveUp = (pi > 0);
+            const bool canMoveDown = (pi + 1 < action["parameters"].size());
+            ImGui::SameLine();
+            if (!canMoveUp) ImGui::BeginDisabled();
+            if (ImGui::SmallButton("Up##param_header_up")) {
+                moveParamSnapshot = captureActionsHistorySnapshot(state);
+                moveParamIndices = std::make_pair(pi, pi - 1);
+                movedParamName = paramName;
+            }
+            if (!canMoveUp) ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (!canMoveDown) ImGui::BeginDisabled();
+            if (ImGui::SmallButton("Down##param_header_down")) {
+                moveParamSnapshot = captureActionsHistorySnapshot(state);
+                moveParamIndices = std::make_pair(pi, pi + 1);
+                movedParamName = paramName;
+            }
+            if (!canMoveDown) ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Del##param_header_delete")) {
+                deleteParamSnapshot = captureActionsHistorySnapshot(state);
+                deleteParamIndex = pi;
+                deletedParamName = paramName;
+            }
+            ImGui::PopID();
+            if (deleteParamIndex.has_value() || moveParamIndices.has_value()) {
+                if (paramOpen) ImGui::TreePop();
+                break;
+            }
+            if (paramOpen) {
+                ActionsHistorySnapshot paramEditSnapshot = captureActionsHistorySnapshot(state);
                 if (drawActionParameterEditor(state, param, pi)) {
+                    pushActionsUndoSnapshot(state, paramEditSnapshot);
                     markCurrentActionDirty(state);
                 }
                 ImGui::TreePop();
             }
         }
+        if (moveParamIndices.has_value()) {
+            const size_t fromIndex = moveParamIndices->first;
+            const size_t toIndex = moveParamIndices->second;
+            pushActionsUndoSnapshot(state, *moveParamSnapshot);
+            json movedParam = action["parameters"][fromIndex];
+            action["parameters"].erase(action["parameters"].begin() + static_cast<json::difference_type>(fromIndex));
+            action["parameters"].insert(action["parameters"].begin() + static_cast<json::difference_type>(toIndex), movedParam);
+            handleMovedActionParameterState(state, state.selectedActionIndex, static_cast<int>(fromIndex), static_cast<int>(toIndex));
+            markCurrentActionDirty(state);
+            setActionsStatus(state, "Moved parameter '" + movedParamName + "'.", false);
+        }
+        if (deleteParamIndex.has_value()) {
+            pushActionsUndoSnapshot(state, *deleteParamSnapshot);
+            action["parameters"].erase(action["parameters"].begin() + static_cast<json::difference_type>(*deleteParamIndex));
+            handleDeletedActionParameterState(state, state.selectedActionIndex, static_cast<int>(*deleteParamIndex));
+            markCurrentActionDirty(state);
+            setActionsStatus(state, "Deleted parameter '" + deletedParamName + "'.", false);
+        }
     } else {
         ImGui::TextDisabled("No parameters.");
+    }
+
+    ImGui::Separator();
+    static std::array<char, 16> newParamNameBuf{};
+    static int newParamTypeId = GUI_PARAM_INTEGER;
+    static std::array<char, 64> newParamTypeFilter{};
+    ImGui::TextDisabled("Add a new parameter by FourCC name and type.");
+    ImGui::SetNextItemWidth(90.0f);
+    ImGui::InputTextWithHint("##newParamName", "name", newParamNameBuf.data(), newParamNameBuf.size());
+    ImGui::SameLine();
+    const GuiParamTypeOption* newParamType = guiParamTypeOptionById(newParamTypeId);
+    const char* newParamPreview = newParamType ? newParamType->displayLabel : "Choose type";
+    ImGui::SetNextItemWidth(260.0f);
+    if (ImGui::BeginCombo("##newParamType", newParamPreview)) {
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputTextWithHint("##newParamTypeFilter", "Filter parameter types", newParamTypeFilter.data(), newParamTypeFilter.size());
+        std::string filterLower = newParamTypeFilter.data();
+        for (char& c : filterLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        ImGui::Separator();
+        for (const GuiParamTypeOption& option : kGuiParamTypeOptions) {
+            if (!filterLower.empty()) {
+                std::string haystack = std::string(option.typeName) + " " + option.displayLabel;
+                for (char& c : haystack) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (haystack.find(filterLower) == std::string::npos) continue;
+            }
+            const bool isSelected = (option.id == newParamTypeId);
+            if (ImGui::Selectable(option.displayLabel, isSelected)) {
+                newParamTypeId = option.id;
+            }
+            if (isSelected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    std::string newParamName = newParamNameBuf.data();
+    const bool canAddParameter = isValidParameterFourCC(newParamName);
+    if (!canAddParameter) ImGui::BeginDisabled();
+    if (ImGui::Button("Add Parameter")) {
+        pushActionsUndoSnapshot(state, captureActionsHistorySnapshot(state));
+        if (!action.contains("parameters") || !action["parameters"].is_array()) {
+            action["parameters"] = json::array();
+        }
+        json newParam = json::object();
+        newParam["name"] = newParamName;
+        newParam["type_id"] = newParamTypeId;
+        newParam["type"] = newParamType ? newParamType->typeName : std::string();
+        newParam["values"] = defaultParameterValuesForType(newParamTypeId);
+        action["parameters"].push_back(newParam);
+        state.selectedActionPointTarget.reset();
+        markCurrentActionDirty(state);
+        setActionsStatus(state, "Added parameter '" + newParamName + "'.", false);
+        copyToBuffer(newParamNameBuf, std::string());
+    }
+    if (!canAddParameter) ImGui::EndDisabled();
+    if (!canAddParameter) {
+        ImGui::TextDisabled("Parameter names must be exactly 4 printable characters.");
+    }
+
+    if (pendingEditSnapshot.has_value()) {
+        pushActionsUndoSnapshot(state, *pendingEditSnapshot);
     }
 
     ImGui::EndChild();
@@ -4052,7 +4847,9 @@ static void drawMapPreviewPanel(AppState& state) {
     }
     if (!state.mapPreviewShadowAvailable) ImGui::EndDisabled();
     ImGui::SameLine();
-    const bool hasSelection = !state.selectedMapUnitIdentifiers.empty() || state.mapPreviewPickTarget.has_value();
+    const bool hasSelection = !state.selectedMapUnitIdentifiers.empty() ||
+                              state.mapPreviewPickTarget.has_value() ||
+                              state.mapPreviewPointPickTarget.has_value();
     if (!hasSelection) ImGui::BeginDisabled();
     if (ImGui::Button("Clear Selection")) {
         clearMapUnitSelection(state);
@@ -4125,11 +4922,80 @@ static void drawMapPreviewPanel(AppState& state) {
         const ImU32 markerOutline = IM_COL32(25, 30, 36, 255);
         const ImU32 selectedUnitOutline = IM_COL32(126, 214, 255, 255);
         const ImVec2 mousePos = ImGui::GetIO().MousePos;
+        const auto worldToScreen = [&](const ImVec2& point) -> ImVec2 {
+            const float imageX = static_cast<float>(state.mapPreviewWidth) - (point.x * terrainPreviewPixelsPerCell);
+            const float imageY = point.y * terrainPreviewPixelsPerCell;
+            return ImVec2(imageMin.x + imageX * scale, imageMin.y + imageY * scale);
+        };
+        const auto screenToWorld = [&](const ImVec2& screenPos) -> ImVec2 {
+            float imageX = (screenPos.x - imageMin.x) / scale;
+            float imageY = (screenPos.y - imageMin.y) / scale;
+            imageX = ImClamp(imageX, 0.0f, static_cast<float>(state.mapPreviewWidth));
+            imageY = ImClamp(imageY, 0.0f, static_cast<float>(state.mapPreviewHeight));
+            return ImVec2((static_cast<float>(state.mapPreviewWidth) - imageX) / terrainPreviewPixelsPerCell,
+                          imageY / terrainPreviewPixelsPerCell);
+        };
+        std::vector<ActionOverlayPath2D> overlayPaths;
+        std::vector<ActionOverlayCircle2D> overlayCircles;
+        collectSelectedActionMapOverlays(state, overlayPaths, overlayCircles);
+        for (const ActionOverlayCircle2D& circle : overlayCircles) {
+            if (circle.radius <= 0.0f) continue;
+            const ImVec2 center = worldToScreen(circle.center);
+            const float radiusPixels = (circle.radius * terrainPreviewPixelsPerCell) * scale;
+            if (circle.fillColor != 0) {
+                drawList->AddCircleFilled(center, radiusPixels, circle.fillColor, 48);
+            }
+            drawList->AddCircle(center, radiusPixels, circle.lineColor, 48, 2.0f);
+        }
+        for (const ActionOverlayPath2D& path : overlayPaths) {
+            if (path.points.empty()) continue;
+            std::vector<ImVec2> screenPoints;
+            screenPoints.reserve(path.points.size());
+            for (const ImVec2& point : path.points) {
+                screenPoints.push_back(worldToScreen(point));
+            }
+            if (path.closed && screenPoints.size() >= 3 && path.fillColor != 0) {
+                drawList->AddConvexPolyFilled(screenPoints.data(), static_cast<int>(screenPoints.size()), path.fillColor);
+            }
+            if (path.drawPolyline && screenPoints.size() >= 2) {
+                if (path.closed) {
+                    drawList->AddPolyline(screenPoints.data(), static_cast<int>(screenPoints.size()), path.lineColor, ImDrawFlags_Closed, 2.0f);
+                } else {
+                    drawList->AddPolyline(screenPoints.data(), static_cast<int>(screenPoints.size()), path.lineColor, 0, 2.0f);
+                }
+            }
+            for (size_t i = 0; i < screenPoints.size(); ++i) {
+                const bool pointSelected =
+                    state.selectedActionPointTarget.has_value() &&
+                    state.selectedActionPointTarget->actionIndex == state.selectedActionIndex &&
+                    state.selectedActionPointTarget->paramIndex == path.paramIndex &&
+                    state.selectedActionPointTarget->valueIndex == static_cast<int>(i);
+                drawList->AddCircleFilled(screenPoints[i], 4.0f, path.lineColor, 16);
+                drawList->AddCircle(screenPoints[i], 6.5f, IM_COL32(24, 28, 34, 220), 16, 1.5f);
+                if (pointSelected) {
+                    drawList->AddCircle(screenPoints[i], 10.0f, IM_COL32(255, 255, 255, 235), 20, 2.5f);
+                    drawList->AddCircle(screenPoints[i], 12.5f, IM_COL32(58, 181, 255, 215), 24, 2.0f);
+                }
+                if (path.showIndices) {
+                    drawList->AddText(ImVec2(screenPoints[i].x + 6.0f, screenPoints[i].y - 10.0f),
+                                      IM_COL32(235, 243, 250, 255),
+                                      std::to_string(i + 1).c_str());
+                }
+            }
+        }
         struct MarkerHitInfo {
             uint16_t identifier = 0;
             std::string tag;
             float screenX = 0.0f;
             float screenY = 0.0f;
+        };
+        struct OverlayPointHitInfo {
+            int paramIndex = -1;
+            int valueIndex = -1;
+            std::string name;
+            ImVec2 worldPoint = ImVec2(0.0f, 0.0f);
+            ImVec2 screenPoint = ImVec2(0.0f, 0.0f);
+            ImU32 color = 0;
         };
         std::vector<MarkerHitInfo> markerHits;
         markerHits.reserve(state.mapPreviewUnitMarkers.size());
@@ -4137,6 +5003,10 @@ static void drawMapPreviewPanel(AppState& state) {
         float hoveredBestDistanceSq = FLT_MAX;
         std::optional<uint16_t> clickedUnitIdentifier;
         const MapUnitMarker* hoveredMarker = nullptr;
+        float clickedOverlayBestDistanceSq = FLT_MAX;
+        float hoveredOverlayBestDistanceSq = FLT_MAX;
+        std::optional<OverlayPointHitInfo> clickedOverlayPoint;
+        std::optional<OverlayPointHitInfo> hoveredOverlayPoint;
         for (const MapUnitMarker& marker : state.mapPreviewUnitMarkers) {
             const float imageX = static_cast<float>(state.mapPreviewWidth) - (marker.cellX * terrainPreviewPixelsPerCell);
             const float imageY = marker.cellY * terrainPreviewPixelsPerCell;
@@ -4175,7 +5045,14 @@ static void drawMapPreviewPanel(AppState& state) {
             }
         }
 
-        if (state.mapPreviewPickTarget.has_value()) {
+        if (state.mapPreviewPointPickTarget.has_value()) {
+            if (imageHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                const ImVec2 worldPoint = screenToWorld(mousePos);
+                if (applyMapPickedPoint2ToTarget(state, worldPoint.x, worldPoint.y)) {
+                    state.mapPreviewPointPickTarget.reset();
+                }
+            }
+        } else if (state.mapPreviewPickTarget.has_value()) {
             if (imageHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 if (clickedUnitIdentifier.has_value()) {
                     if (applyMapPickedUnitToTarget(state, *clickedUnitIdentifier)) {
@@ -4188,10 +5065,74 @@ static void drawMapPreviewPanel(AppState& state) {
                 }
             }
         } else {
+            if (state.mapPreviewDraggingActionPoint) {
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    if (imageHovered) {
+                        const ImVec2 worldPoint = screenToWorld(mousePos);
+                        if (state.mapPreviewActionPointHistoryPending) {
+                            ActionsHistorySnapshot dragSnapshot = captureActionsHistorySnapshot(state);
+                            if (updateSelectedActionPointFromMap(state, worldPoint.x, worldPoint.y)) {
+                                pushActionsUndoSnapshot(state, dragSnapshot);
+                                state.mapPreviewActionPointHistoryPending = false;
+                            }
+                        } else {
+                            updateSelectedActionPointFromMap(state, worldPoint.x, worldPoint.y);
+                        }
+                    }
+                } else {
+                    state.mapPreviewDraggingActionPoint = false;
+                    state.mapPreviewActionPointHistoryPending = false;
+                }
+            }
+            for (const ActionOverlayPath2D& path : overlayPaths) {
+                for (size_t i = 0; i < path.points.size(); ++i) {
+                    const ImVec2 screenPoint = worldToScreen(path.points[i]);
+                    const float dx = mousePos.x - screenPoint.x;
+                    const float dy = mousePos.y - screenPoint.y;
+                    const float distanceSq = dx * dx + dy * dy;
+                    const float hitRadius = 9.0f;
+                    if (distanceSq <= hitRadius * hitRadius && distanceSq < clickedOverlayBestDistanceSq) {
+                        clickedOverlayBestDistanceSq = distanceSq;
+                        clickedOverlayPoint = OverlayPointHitInfo{
+                            path.paramIndex,
+                            static_cast<int>(i),
+                            path.name,
+                            path.points[i],
+                            screenPoint,
+                            path.lineColor
+                        };
+                    }
+                    if (distanceSq <= hitRadius * hitRadius && distanceSq < hoveredOverlayBestDistanceSq) {
+                        hoveredOverlayBestDistanceSq = distanceSq;
+                        hoveredOverlayPoint = OverlayPointHitInfo{
+                            path.paramIndex,
+                            static_cast<int>(i),
+                            path.name,
+                            path.points[i],
+                            screenPoint,
+                            path.lineColor
+                        };
+                    }
+                }
+            }
             if (imageHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                state.mapPreviewDragSelecting = true;
-                state.mapPreviewDragStart = mousePos;
-                state.mapPreviewDragCurrent = mousePos;
+                if (clickedOverlayPoint.has_value()) {
+                    state.selectedActionPointTarget = SelectedActionPointTarget{
+                        state.selectedActionIndex,
+                        clickedOverlayPoint->paramIndex,
+                        clickedOverlayPoint->valueIndex
+                    };
+                    state.mapPreviewDraggingActionPoint = true;
+                    state.mapPreviewActionPointHistoryPending = true;
+                    state.actionsStatus = "Selected " + clickedOverlayPoint->name +
+                                          " point " + std::to_string(clickedOverlayPoint->valueIndex + 1) + ".";
+                } else {
+                    state.mapPreviewDragSelecting = true;
+                    state.mapPreviewDragStart = mousePos;
+                    state.mapPreviewDragCurrent = mousePos;
+                    state.mapPreviewDraggingActionPoint = false;
+                    state.mapPreviewActionPointHistoryPending = false;
+                }
             }
             if (state.mapPreviewDragSelecting && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                 state.mapPreviewDragCurrent = mousePos;
@@ -4238,9 +5179,19 @@ static void drawMapPreviewPanel(AppState& state) {
             drawList->AddRectFilled(p0, p1, IM_COL32(90, 156, 232, 36), 2.0f);
             drawList->AddRect(p0, p1, IM_COL32(110, 184, 255, 220), 2.0f, 0, 1.5f);
         }
-        if (hoveredMarker != nullptr) {
+        if (hoveredOverlayPoint.has_value()) {
+            ImGui::SetTooltip("%s point %d\n%.3f, %.3f",
+                              hoveredOverlayPoint->name.c_str(),
+                              hoveredOverlayPoint->valueIndex + 1,
+                              hoveredOverlayPoint->worldPoint.x,
+                              hoveredOverlayPoint->worldPoint.y);
+        } else if (hoveredMarker != nullptr) {
             if (state.mapPreviewPickTarget.has_value()) {
                 ImGui::SetTooltip("%s #%u\nClick to fill armed parameter",
+                                  hoveredMarker->tag.c_str(),
+                                  static_cast<unsigned>(hoveredMarker->identifier));
+            } else if (state.mapPreviewPointPickTarget.has_value()) {
+                ImGui::SetTooltip("%s #%u\nMap point pick is armed",
                                   hoveredMarker->tag.c_str(),
                                   static_cast<unsigned>(hoveredMarker->identifier));
             } else {
@@ -4248,6 +5199,9 @@ static void drawMapPreviewPanel(AppState& state) {
                                   hoveredMarker->tag.c_str(),
                                   static_cast<unsigned>(hoveredMarker->identifier));
             }
+        } else if (imageHovered && state.mapPreviewPointPickTarget.has_value()) {
+            const ImVec2 worldPoint = screenToWorld(mousePos);
+            ImGui::SetTooltip("Point %.3f, %.3f\nClick to fill armed point", worldPoint.x, worldPoint.y);
         }
     } else {
         const std::string& message = state.mapPreviewStatus.empty()
@@ -4499,7 +5453,7 @@ int main(int argc, char** argv) {
         ImGui::PopStyleVar(3);
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 8.0f));
-        ImGui::BeginChild("##TopBar", ImVec2(0.0f, 84.0f), false, ImGuiWindowFlags_NoScrollbar);
+        ImGui::BeginChild("##TopBar", ImVec2(0.0f, 72.0f), false, ImGuiWindowFlags_NoScrollbar);
         drawTopBar(state);
         ImGui::EndChild();
         ImGui::PopStyleVar();
