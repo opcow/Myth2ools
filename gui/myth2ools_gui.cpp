@@ -205,6 +205,32 @@ struct SelectedActionPointTarget {
     int valueIndex = -1;
 };
 
+struct ActionsGraphEdgeRecord {
+    int fromActionIndex = -1;
+    int toActionIndex = -1;
+    std::string kind;
+};
+
+struct ActionsGraphNodeRecord {
+    int actionIndex = -1;
+    int actionId = -1;
+    std::string name;
+    std::string typeFourCC;
+    std::string typeLabel;
+    int expirationModeId = 0;
+    bool container = false;
+    bool dirty = false;
+    bool selected = false;
+    bool initiallyActive = false;
+    std::vector<int> outgoingEdgeIndices;
+    std::vector<int> incomingEdgeIndices;
+};
+
+struct ActionsGraphData {
+    std::vector<ActionsGraphNodeRecord> nodes;
+    std::vector<ActionsGraphEdgeRecord> edges;
+};
+
 struct ActionsHistorySnapshot {
     json doc;
     int selectedActionIndex = -1;
@@ -252,6 +278,7 @@ static bool recomputeActionDocLayout(json& doc, std::string& error);
 static void setActionsStatus(struct AppState& state, const std::string& message, bool writeToLog = true);
 static void logActionSummary(struct AppState& state, const json& action, const char* phase);
 static void setSelectedActionIndex(struct AppState& state, int actionIndex);
+static void drawActionsGraphPanel(struct AppState& state);
 static bool guiParseHexBytes(const std::string& s, std::vector<uint8_t>& out);
 static void pushPrimaryButtonStyle();
 static void popPrimaryButtonStyle();
@@ -712,6 +739,9 @@ struct AppState {
     std::array<char, 128> actionFilter{};
     std::array<char, 128> logFilter{};
     int selectedActionIndex = -1;
+    bool actionsGraphShowFull = false;
+    int actionsGraphFocusDepth = 1;
+    ImGuiID actionsGraphDefaultDockId = 0;
     enum PendingDiscard { PENDING_NONE = 0, PENDING_RELOAD = 1, PENDING_QUIT = 2, PENDING_RUN = 3 };
     PendingDiscard pendingDiscard = PENDING_NONE;
     bool openDiscardPopup = false;
@@ -1557,6 +1587,179 @@ static std::set<int> relatedActionIndicesForSelectedMapUnit(const AppState& stat
         matches.insert(unitMatches.begin(), unitMatches.end());
     }
     return matches;
+}
+
+static bool isActionsGraphFlowParamName(const std::string& name) {
+    return name == "acos" || name == "acof" || name == "acoa" ||
+           name == "deac" || name == "acti" || name == "resu";
+}
+
+static ImU32 actionsGraphEdgeColor(const std::string& kind) {
+    if (kind == "acos") return IM_COL32(92, 214, 120, 220);
+    if (kind == "acof") return IM_COL32(238, 113, 113, 220);
+    if (kind == "acoa") return IM_COL32(98, 185, 255, 220);
+    if (kind == "deac") return IM_COL32(170, 170, 182, 210);
+    if (kind == "acti") return IM_COL32(255, 204, 92, 220);
+    if (kind == "resu") return IM_COL32(191, 138, 255, 220);
+    return IM_COL32(180, 188, 206, 210);
+}
+
+static std::string actionsGraphNodeTitle(const std::string& name) {
+    const std::string title = name.empty() ? std::string("Untitled Action") : name;
+    constexpr size_t kMax = 34;
+    if (title.size() <= kMax) return title;
+    return title.substr(0, kMax - 3) + "...";
+}
+
+static ActionsGraphData buildActionsGraphData(const AppState& state) {
+    ActionsGraphData graph;
+    if (!state.actionsLoaded || !state.actionsDoc.contains("actions") || !state.actionsDoc["actions"].is_array()) {
+        return graph;
+    }
+
+    const json& actions = state.actionsDoc["actions"];
+    graph.nodes.resize(actions.size());
+    for (size_t i = 0; i < actions.size(); ++i) {
+        const json& action = actions[i];
+        ActionsGraphNodeRecord node;
+        node.actionIndex = static_cast<int>(i);
+        node.actionId = jsonIntOrDefault(action, "id", -1);
+        node.name = jsonStringOrEmpty(action, "name");
+        node.typeFourCC = jsonStringOrEmpty(action, "type");
+        if (node.typeFourCC.empty()) {
+            node.typeLabel = "Container";
+        } else {
+            const char* typeLabel = guiActionTypeLabel(node.typeFourCC);
+            node.typeLabel = typeLabel ? std::string(typeLabel) : node.typeFourCC;
+        }
+        node.expirationModeId = jsonIntOrDefault(action, "expiration_mode_id", 0);
+        node.container = node.typeFourCC.empty();
+        node.dirty = state.dirtyActionIndices.count(static_cast<int>(i)) > 0;
+        node.selected = static_cast<int>(i) == state.selectedActionIndex;
+        node.initiallyActive = (jsonIntOrDefault(action, "flags_raw", 0) & 1) != 0;
+        graph.nodes[i] = std::move(node);
+    }
+
+    for (size_t i = 0; i < actions.size(); ++i) {
+        const json& action = actions[i];
+        if (!action.is_object() || !action.contains("parameters") || !action["parameters"].is_array()) continue;
+        for (const json& param : action["parameters"]) {
+            if (!param.is_object()) continue;
+            if (jsonStringOrEmpty(param, "type") != "action_identifier") continue;
+            const std::string paramName = jsonStringOrEmpty(param, "name");
+            if (!isActionsGraphFlowParamName(paramName)) continue;
+            if (!param.contains("values") || !param["values"].is_array()) continue;
+
+            for (const json& value : param["values"]) {
+                if (!value.is_number_integer()) continue;
+                const int targetIndex = findActionIndexById(actions, value.get<int>());
+                if (targetIndex < 0) continue;
+                const int edgeIndex = static_cast<int>(graph.edges.size());
+                graph.edges.push_back(ActionsGraphEdgeRecord{static_cast<int>(i), targetIndex, paramName});
+                graph.nodes[i].outgoingEdgeIndices.push_back(edgeIndex);
+                graph.nodes[static_cast<size_t>(targetIndex)].incomingEdgeIndices.push_back(edgeIndex);
+            }
+        }
+    }
+
+    return graph;
+}
+
+static ImVec2 actionsGraphNodeSizeForTitle(const std::string& title) {
+    const ImVec2 titleSize = ImGui::CalcTextSize(title.c_str());
+    return ImVec2((std::max)(220.0f, titleSize.x + 36.0f), 112.0f);
+}
+
+static void drawActionsGraphChip(ImDrawList* drawList,
+                                 ImVec2& cursor,
+                                 const char* text,
+                                 ImU32 bgColor,
+                                 ImU32 textColor) {
+    const ImVec2 textSize = ImGui::CalcTextSize(text);
+    const ImVec2 pad(6.0f, 2.0f);
+    const ImVec2 size(textSize.x + pad.x * 2.0f, textSize.y + pad.y * 2.0f);
+    drawList->AddRectFilled(cursor, ImVec2(cursor.x + size.x, cursor.y + size.y), bgColor, 4.0f);
+    drawList->AddText(ImVec2(cursor.x + pad.x, cursor.y + pad.y - 1.0f), textColor, text);
+    cursor.x += size.x + 6.0f;
+}
+
+static void drawActionsGraphLegendChip(const char* text, ImU32 color) {
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->AddLine(ImVec2(start.x, start.y + 9.0f), ImVec2(start.x + 16.0f, start.y + 9.0f), color, 2.5f);
+    ImGui::Dummy(ImVec2(18.0f, 0.0f));
+    ImGui::SameLine(0.0f, 4.0f);
+    ImGui::TextDisabled("%s", text);
+}
+
+static void drawActionsGraphArrow(ImDrawList* drawList,
+                                  const ImVec2& from,
+                                  const ImVec2& to,
+                                  ImU32 color) {
+    ImVec2 direction(to.x - from.x, to.y - from.y);
+    const float length = std::sqrt(direction.x * direction.x + direction.y * direction.y);
+    if (length <= 0.001f) return;
+    direction.x /= length;
+    direction.y /= length;
+    const ImVec2 perp(-direction.y, direction.x);
+    const ImVec2 tip = to;
+    const ImVec2 base = ImVec2(tip.x - direction.x * 10.0f, tip.y - direction.y * 10.0f);
+    drawList->AddTriangleFilled(tip,
+                                ImVec2(base.x + perp.x * 4.5f, base.y + perp.y * 4.5f),
+                                ImVec2(base.x - perp.x * 4.5f, base.y - perp.y * 4.5f),
+                                color);
+}
+
+static std::string actionsGraphEdgeKindsSummary(const ActionsGraphData& graph,
+                                                const std::vector<int>& edgeIndices,
+                                                bool outgoing) {
+    static const char* kOrder[] = {"acos", "acof", "acoa", "deac", "acti", "resu"};
+    std::set<std::string> kinds;
+    for (int edgeIndex : edgeIndices) {
+        if (edgeIndex < 0 || edgeIndex >= static_cast<int>(graph.edges.size())) continue;
+        const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(edgeIndex)];
+        if (outgoing && edge.fromActionIndex < 0) continue;
+        if (!outgoing && edge.toActionIndex < 0) continue;
+        kinds.insert(edge.kind);
+    }
+    if (kinds.empty()) return outgoing ? "Out: -" : "In: -";
+
+    std::string text = outgoing ? "Out: " : "In: ";
+    bool first = true;
+    for (const char* kind : kOrder) {
+        if (kinds.count(kind) == 0) continue;
+        if (!first) text += " ";
+        text += kind;
+        first = false;
+    }
+    for (const std::string& kind : kinds) {
+        bool inOrder = false;
+        for (const char* ordered : kOrder) {
+            if (kind == ordered) {
+                inOrder = true;
+                break;
+            }
+        }
+        if (inOrder) continue;
+        if (!first) text += " ";
+        text += kind;
+        first = false;
+    }
+    return text;
+}
+
+static std::string actionsGraphClipTextToWidth(const std::string& text, float maxWidth) {
+    if (text.empty()) return text;
+    if (ImGui::CalcTextSize(text.c_str()).x <= maxWidth) return text;
+
+    static const char* kEllipsis = "...";
+    std::string clipped = text;
+    while (!clipped.empty()) {
+        clipped.pop_back();
+        const std::string candidate = clipped + kEllipsis;
+        if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth) return candidate;
+    }
+    return kEllipsis;
 }
 
 static const MapUnitMarker* findMapUnitMarkerByIdentifier(const AppState& state, uint16_t identifier) {
@@ -5213,6 +5416,312 @@ static void drawMapPreviewPanel(AppState& state) {
     ImGui::End();
 }
 
+static void drawActionsGraphPanel(AppState& state) {
+    if (state.actionsGraphDefaultDockId != 0) {
+        ImGui::SetNextWindowDockID(state.actionsGraphDefaultDockId, ImGuiCond_FirstUseEver);
+    }
+    applyLockedDockWindowClass(state.lockDockLayout);
+    ImGui::Begin("Actions Graph", nullptr, lockedDockPanelFlags(state.lockDockLayout));
+
+    if (!state.actionsLoaded) {
+        ImGui::TextWrapped("Load the extracted map's actions.json to visualize flow between actions.");
+        ImGui::End();
+        return;
+    }
+
+    const bool hasSelection = state.selectedActionIndex >= 0 &&
+                              state.actionsDoc.contains("actions") &&
+                              state.actionsDoc["actions"].is_array() &&
+                              state.selectedActionIndex < static_cast<int>(state.actionsDoc["actions"].size());
+
+    if (!hasSelection) ImGui::BeginDisabled();
+    if (ImGui::Button("Refocus Selection")) {
+        state.actionsGraphShowFull = false;
+    }
+    if (!hasSelection) ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SliderInt("Depth", &state.actionsGraphFocusDepth, 1, 4);
+    ImGui::SameLine();
+    ImGui::Checkbox("Show Full Graph", &state.actionsGraphShowFull);
+    ImGui::Separator();
+
+    ActionsGraphData graph = buildActionsGraphData(state);
+    if (graph.nodes.empty()) {
+        ImGui::TextDisabled("No actions loaded.");
+        ImGui::End();
+        return;
+    }
+
+    int focusActionIndex = hasSelection ? state.selectedActionIndex : 0;
+    const bool showFullGraph = state.actionsGraphShowFull || !hasSelection;
+    const int focusDepth = (std::max)(1, (std::min)(state.actionsGraphFocusDepth, 4));
+
+    std::set<int> visibleActionIndices;
+    std::vector<int> layerByAction(graph.nodes.size(), INT_MAX);
+    if (focusActionIndex >= 0 && focusActionIndex < static_cast<int>(graph.nodes.size())) {
+        visibleActionIndices.insert(focusActionIndex);
+        layerByAction[static_cast<size_t>(focusActionIndex)] = 0;
+
+        std::deque<std::pair<int, int>> successorQueue;
+        successorQueue.push_back(std::make_pair(focusActionIndex, 0));
+        while (!successorQueue.empty()) {
+            const std::pair<int, int> item = successorQueue.front();
+            successorQueue.pop_front();
+            if (!showFullGraph && item.second >= focusDepth) continue;
+            const ActionsGraphNodeRecord& node = graph.nodes[static_cast<size_t>(item.first)];
+            for (int edgeIndex : node.outgoingEdgeIndices) {
+                const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(edgeIndex)];
+                const int nextDepth = item.second + 1;
+                visibleActionIndices.insert(edge.toActionIndex);
+                const int candidateLayer = nextDepth;
+                int& currentLayer = layerByAction[static_cast<size_t>(edge.toActionIndex)];
+                if (currentLayer == INT_MAX || std::abs(candidateLayer) < std::abs(currentLayer)) {
+                    currentLayer = candidateLayer;
+                }
+                successorQueue.push_back(std::make_pair(edge.toActionIndex, nextDepth));
+            }
+        }
+
+        std::deque<std::pair<int, int>> predecessorQueue;
+        predecessorQueue.push_back(std::make_pair(focusActionIndex, 0));
+        while (!predecessorQueue.empty()) {
+            const std::pair<int, int> item = predecessorQueue.front();
+            predecessorQueue.pop_front();
+            if (!showFullGraph && item.second >= focusDepth) continue;
+            const ActionsGraphNodeRecord& node = graph.nodes[static_cast<size_t>(item.first)];
+            for (int edgeIndex : node.incomingEdgeIndices) {
+                const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(edgeIndex)];
+                const int nextDepth = item.second + 1;
+                visibleActionIndices.insert(edge.fromActionIndex);
+                const int candidateLayer = -nextDepth;
+                int& currentLayer = layerByAction[static_cast<size_t>(edge.fromActionIndex)];
+                if (currentLayer == INT_MAX || std::abs(candidateLayer) < std::abs(currentLayer)) {
+                    currentLayer = candidateLayer;
+                }
+                predecessorQueue.push_back(std::make_pair(edge.fromActionIndex, nextDepth));
+            }
+        }
+    }
+
+    if (showFullGraph) {
+        int maxAssignedLayer = 0;
+        for (int layer : layerByAction) {
+            if (layer != INT_MAX) maxAssignedLayer = (std::max)(maxAssignedLayer, layer);
+        }
+        int disconnectedIndex = 0;
+        for (size_t i = 0; i < graph.nodes.size(); ++i) {
+            visibleActionIndices.insert(static_cast<int>(i));
+            if (layerByAction[i] == INT_MAX) {
+                layerByAction[i] = maxAssignedLayer + 1 + (disconnectedIndex / 10);
+                ++disconnectedIndex;
+            }
+        }
+    }
+
+    std::vector<int> visibleNodes(visibleActionIndices.begin(), visibleActionIndices.end());
+    std::sort(visibleNodes.begin(), visibleNodes.end(), [&](int a, int b) {
+        const int layerA = layerByAction[static_cast<size_t>(a)];
+        const int layerB = layerByAction[static_cast<size_t>(b)];
+        if (layerA != layerB) return layerA < layerB;
+        return graph.nodes[static_cast<size_t>(a)].actionId < graph.nodes[static_cast<size_t>(b)].actionId;
+    });
+
+    if (visibleNodes.empty()) {
+        ImGui::TextDisabled("Select an action to see its local graph.");
+        ImGui::End();
+        return;
+    }
+
+    std::vector<int> uniqueLayers;
+    uniqueLayers.reserve(visibleNodes.size());
+    for (int actionIndex : visibleNodes) {
+        const int layer = layerByAction[static_cast<size_t>(actionIndex)];
+        if (uniqueLayers.empty() || uniqueLayers.back() != layer) uniqueLayers.push_back(layer);
+    }
+
+    std::vector<int> nodeColumnRank(graph.nodes.size(), -1);
+    for (size_t i = 0; i < uniqueLayers.size(); ++i) {
+        for (int actionIndex : visibleNodes) {
+            if (layerByAction[static_cast<size_t>(actionIndex)] == uniqueLayers[i]) {
+                nodeColumnRank[static_cast<size_t>(actionIndex)] = static_cast<int>(i);
+            }
+        }
+    }
+
+    std::vector<ImVec2> nodePositions(graph.nodes.size(), ImVec2(-1.0f, -1.0f));
+    std::vector<ImVec2> nodeSizes(graph.nodes.size(), ImVec2(0.0f, 0.0f));
+    const float layerStride = 320.0f;
+    const float rowStride = 134.0f;
+    const float marginX = 28.0f;
+    const float marginY = 24.0f;
+    float maxColumnHeight = 0.0f;
+    for (size_t layerIdx = 0; layerIdx < uniqueLayers.size(); ++layerIdx) {
+        std::vector<int> nodesInLayer;
+        for (int actionIndex : visibleNodes) {
+            if (layerByAction[static_cast<size_t>(actionIndex)] == uniqueLayers[layerIdx]) {
+                nodesInLayer.push_back(actionIndex);
+            }
+        }
+        std::sort(nodesInLayer.begin(), nodesInLayer.end(), [&](int a, int b) {
+            return graph.nodes[static_cast<size_t>(a)].actionId < graph.nodes[static_cast<size_t>(b)].actionId;
+        });
+        for (size_t row = 0; row < nodesInLayer.size(); ++row) {
+            const int actionIndex = nodesInLayer[row];
+            const std::string title = actionsGraphNodeTitle(graph.nodes[static_cast<size_t>(actionIndex)].name);
+            const ImVec2 size = actionsGraphNodeSizeForTitle(title);
+            nodeSizes[static_cast<size_t>(actionIndex)] = size;
+            nodePositions[static_cast<size_t>(actionIndex)] = ImVec2(marginX + layerStride * static_cast<float>(layerIdx),
+                                                                     marginY + rowStride * static_cast<float>(row));
+            maxColumnHeight = (std::max)(maxColumnHeight, marginY + rowStride * static_cast<float>(row) + size.y);
+        }
+    }
+
+    std::vector<int> visibleEdgeIndices;
+    visibleEdgeIndices.reserve(graph.edges.size());
+    for (size_t i = 0; i < graph.edges.size(); ++i) {
+        const ActionsGraphEdgeRecord& edge = graph.edges[i];
+        if (visibleActionIndices.count(edge.fromActionIndex) == 0) continue;
+        if (visibleActionIndices.count(edge.toActionIndex) == 0) continue;
+        visibleEdgeIndices.push_back(static_cast<int>(i));
+    }
+
+    ImGui::TextDisabled("%zu nodes, %zu edges shown", visibleNodes.size(), visibleEdgeIndices.size());
+    ImGui::BeginChild("##ActionsGraphCanvas",
+                      ImVec2(0.0f, 0.0f),
+                      true,
+                      ImGuiWindowFlags_HorizontalScrollbar);
+
+    const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
+    const ImVec2 contentSize((std::max)(ImGui::GetContentRegionAvail().x, marginX * 2.0f + layerStride * static_cast<float>(uniqueLayers.size()) + 60.0f),
+                             (std::max)(ImGui::GetContentRegionAvail().y, maxColumnHeight + marginY));
+    ImGui::Dummy(contentSize);
+
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    const float scrollX = ImGui::GetScrollX();
+    const float scrollY = ImGui::GetScrollY();
+    const auto toScreen = [&](const ImVec2& local) {
+        return ImVec2(canvasOrigin.x + local.x - scrollX,
+                      canvasOrigin.y + local.y - scrollY);
+    };
+
+    int hoveredNodeIndex = -1;
+    int clickedNodeIndex = -1;
+    for (int actionIndex : visibleNodes) {
+        const ImVec2 localPos = nodePositions[static_cast<size_t>(actionIndex)];
+        const ImVec2 size = nodeSizes[static_cast<size_t>(actionIndex)];
+        const ImVec2 screenMin = toScreen(localPos);
+        ImGui::SetCursorScreenPos(screenMin);
+        ImGui::PushID(actionIndex);
+        ImGui::InvisibleButton("##graph_node_hit", size);
+        if (ImGui::IsItemHovered()) hoveredNodeIndex = actionIndex;
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) clickedNodeIndex = actionIndex;
+        ImGui::PopID();
+    }
+    if (clickedNodeIndex >= 0) {
+        setSelectedActionIndex(state, clickedNodeIndex);
+    }
+
+    for (int edgeIndex : visibleEdgeIndices) {
+        const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(edgeIndex)];
+        const ImVec2 fromPos = nodePositions[static_cast<size_t>(edge.fromActionIndex)];
+        const ImVec2 toPos = nodePositions[static_cast<size_t>(edge.toActionIndex)];
+        if (fromPos.x < 0.0f || toPos.x < 0.0f) continue;
+        const ImVec2 fromSize = nodeSizes[static_cast<size_t>(edge.fromActionIndex)];
+        const ImVec2 toSize = nodeSizes[static_cast<size_t>(edge.toActionIndex)];
+        const ImVec2 start = toScreen(ImVec2(fromPos.x + fromSize.x, fromPos.y + fromSize.y * 0.5f));
+        const ImVec2 endTip = toScreen(ImVec2(toPos.x, toPos.y + toSize.y * 0.5f));
+        const ImVec2 arrowBase(endTip.x - 10.0f, endTip.y);
+        const ImVec2 bendPoint(arrowBase.x - 18.0f, arrowBase.y);
+        const float controlOffset = (std::max)(44.0f, std::abs(bendPoint.x - start.x) * 0.32f);
+        const ImVec2 cp1(start.x + controlOffset, start.y);
+        const ImVec2 cp2(bendPoint.x - (std::max)(30.0f, controlOffset * 0.45f), bendPoint.y);
+        const bool edgeTouchesSelection =
+            edge.fromActionIndex == state.selectedActionIndex || edge.toActionIndex == state.selectedActionIndex;
+        const bool edgeTouchesHover =
+            hoveredNodeIndex >= 0 && (edge.fromActionIndex == hoveredNodeIndex || edge.toActionIndex == hoveredNodeIndex);
+        const bool emphasizeEdge = edgeTouchesSelection || edgeTouchesHover;
+        ImU32 edgeColor = actionsGraphEdgeColor(edge.kind);
+        if (!emphasizeEdge && state.selectedActionIndex >= 0) {
+            edgeColor = IM_COL32((edgeColor >> IM_COL32_R_SHIFT) & 0xFF,
+                                 (edgeColor >> IM_COL32_G_SHIFT) & 0xFF,
+                                 (edgeColor >> IM_COL32_B_SHIFT) & 0xFF,
+                                 96);
+        }
+        drawList->AddBezierCubic(start, cp1, cp2, bendPoint, edgeColor, 2.25f, 24);
+        drawList->AddLine(bendPoint, arrowBase, edgeColor, 2.25f);
+        drawActionsGraphArrow(drawList, arrowBase, endTip, edgeColor);
+    }
+
+    for (int actionIndex : visibleNodes) {
+        const ActionsGraphNodeRecord& node = graph.nodes[static_cast<size_t>(actionIndex)];
+        const ImVec2 localPos = nodePositions[static_cast<size_t>(actionIndex)];
+        const ImVec2 size = nodeSizes[static_cast<size_t>(actionIndex)];
+        const ImVec2 screenMin = toScreen(localPos);
+        const ImVec2 screenMax(screenMin.x + size.x, screenMin.y + size.y);
+
+        const bool hovered = hoveredNodeIndex == actionIndex;
+        const bool selected = actionIndex == state.selectedActionIndex;
+        const ImU32 bgColor = selected
+            ? IM_COL32(34, 76, 125, 238)
+            : (node.container ? IM_COL32(34, 38, 46, hovered ? 238 : 222)
+                              : IM_COL32(26, 30, 36, hovered ? 236 : 222));
+        const ImU32 borderColor = selected
+            ? IM_COL32(110, 186, 255, 255)
+            : (hovered ? IM_COL32(90, 106, 126, 245) : IM_COL32(56, 66, 82, 230));
+
+        drawList->AddRectFilled(screenMin, screenMax, bgColor, 8.0f);
+        drawList->AddRect(screenMin, screenMax, borderColor, 8.0f, 0, selected ? 2.4f : 1.6f);
+        if (node.dirty) {
+            drawList->AddCircleFilled(ImVec2(screenMax.x - 13.0f, screenMin.y + 13.0f), 4.2f, IM_COL32(255, 195, 86, 255), 12);
+        }
+
+        const std::string title = actionsGraphNodeTitle(node.name);
+        const float textWidth = size.x - 24.0f;
+        const float flowColumnWidth = (size.x - 36.0f) * 0.5f;
+        const std::string metaLine = actionsGraphClipTextToWidth("#" + std::to_string(node.actionId) + "  " + node.typeLabel,
+                                                                 textWidth);
+        const std::string outgoingSummary =
+            actionsGraphClipTextToWidth(actionsGraphEdgeKindsSummary(graph, node.outgoingEdgeIndices, true), flowColumnWidth);
+        const std::string incomingSummary =
+            actionsGraphClipTextToWidth(actionsGraphEdgeKindsSummary(graph, node.incomingEdgeIndices, false), flowColumnWidth);
+
+        drawList->PushClipRect(screenMin, screenMax, true);
+        drawList->AddText(ImVec2(screenMin.x + 12.0f, screenMin.y + 10.0f),
+                          IM_COL32(242, 246, 252, 255),
+                          title.c_str());
+        drawList->AddText(ImVec2(screenMin.x + 12.0f, screenMin.y + 30.0f),
+                          IM_COL32(176, 188, 204, 255),
+                          metaLine.c_str());
+        drawList->AddText(ImVec2(screenMin.x + 12.0f, screenMin.y + 54.0f),
+                          IM_COL32(255, 194, 136, 255),
+                          incomingSummary.c_str());
+        const ImVec2 outgoingSize = ImGui::CalcTextSize(outgoingSummary.c_str());
+        drawList->AddText(ImVec2(screenMax.x - 12.0f - outgoingSize.x, screenMin.y + 54.0f),
+                          IM_COL32(140, 208, 255, 255),
+                          outgoingSummary.c_str());
+
+        std::string modeChip = "Trig";
+        if (node.expirationModeId == 1) modeChip = "Exec";
+        else if (node.expirationModeId == 2) modeChip = "Succ";
+        else if (node.expirationModeId == 3) modeChip = "Never";
+        else if (node.expirationModeId == 4) modeChip = "Fail";
+
+        ImVec2 chipCursor(screenMin.x + 12.0f, screenMin.y + 82.0f);
+        drawActionsGraphChip(drawList, chipCursor, modeChip.c_str(), IM_COL32(54, 66, 86, 220), IM_COL32(235, 242, 250, 255));
+        if (node.initiallyActive) {
+            drawActionsGraphChip(drawList, chipCursor, "Init", IM_COL32(52, 122, 94, 220), IM_COL32(240, 250, 244, 255));
+        }
+        if (node.dirty) {
+            drawActionsGraphChip(drawList, chipCursor, "Dirty", IM_COL32(142, 98, 34, 230), IM_COL32(255, 245, 222, 255));
+        }
+        drawList->PopClipRect();
+    }
+
+    ImGui::EndChild();
+    ImGui::End();
+}
+
 static void drawUnitInfoPanel(AppState& state) {
     applyLockedDockWindowClass(state.lockDockLayout);
     ImGui::SetNextWindowDockID(ImGui::GetID("MainDockSpace"), ImGuiCond_FirstUseEver);
@@ -5480,13 +5989,19 @@ int main(int argc, char** argv) {
                 ImGuiID dockBottom = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down, 0.34f, nullptr, &dockMain);
                 ImGuiID dockRightTop = dockRight;
                 ImGuiID dockRightBottom = ImGui::DockBuilderSplitNode(dockRightTop, ImGuiDir_Down, 0.38f, nullptr, &dockRightTop);
+                ImGuiID dockRightGraph = dockRightBottom;
+                ImGuiID dockRightUnitInfo = ImGui::DockBuilderSplitNode(dockRightGraph, ImGuiDir_Down, 0.44f, nullptr, &dockRightGraph);
 
                 ImGui::DockBuilderDockWindow("Workflow", dockLeft);
                 ImGui::DockBuilderDockWindow("Actions###Actions", dockMain);
                 ImGui::DockBuilderDockWindow("Command Log", dockBottom);
                 ImGui::DockBuilderDockWindow("Map Preview", dockRightTop);
-                ImGui::DockBuilderDockWindow("Unit Info", dockRightBottom);
+                ImGui::DockBuilderDockWindow("Actions Graph", dockRightGraph);
+                ImGui::DockBuilderDockWindow("Unit Info", dockRightUnitInfo);
+                state.actionsGraphDefaultDockId = dockRightGraph;
                 ImGui::DockBuilderFinish(dockspaceId);
+            } else if (state.actionsGraphDefaultDockId == 0) {
+                state.actionsGraphDefaultDockId = existingNode->ID;
             }
         }
 
@@ -5494,6 +6009,7 @@ int main(int argc, char** argv) {
 
         drawWorkflowPanel(state);
         drawActionsPanel(state);
+        drawActionsGraphPanel(state);
         drawLogPanel(state);
         drawMapPreviewPanel(state);
         drawUnitInfoPanel(state);
