@@ -7,6 +7,7 @@
 *.so
 *.pdb
 *.tar.gz
+*.7z
 tools/*
 !tools/import_animations.py
 !tools/create_blend.py
