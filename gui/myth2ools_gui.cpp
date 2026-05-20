@@ -27,6 +27,10 @@
 #include <filesystem>
 #include <fstream>
 #include <set>
+#include <map>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -745,6 +749,9 @@ struct AppState {
     std::set<std::string> actionsGraphHiddenEdgeKinds;
     std::array<char, 128> actionsGraphSearchBuf{};
     int actionsGraphPendingCenterIndex = -1;
+    bool actionsGraphColorBlindPalette = false;
+    bool actionsGraphShowMinimap = true;
+    bool actionsGraphMinimapDragging = false;
     ImGuiID actionsGraphDefaultDockId = 0;
     enum PendingDiscard { PENDING_NONE = 0, PENDING_RELOAD = 1, PENDING_QUIT = 2, PENDING_RUN = 3 };
     PendingDiscard pendingDiscard = PENDING_NONE;
@@ -1141,6 +1148,8 @@ static bool saveSettings(AppState& state) {
         }
         out << "actionsGraphHiddenKinds=" << joined << "\n";
     }
+    out << "actionsGraphColorBlind=" << (state.actionsGraphColorBlindPalette ? "1" : "0") << "\n";
+    out << "actionsGraphShowMinimap=" << (state.actionsGraphShowMinimap ? "1" : "0") << "\n";
     if (!out.good()) return false;
 
     const std::string blender = state.blenderPath.data();
@@ -1197,6 +1206,8 @@ static void loadSettings(AppState& state) {
                 start = comma + 1;
             }
         }
+        else if (key == "actionsGraphColorBlind") state.actionsGraphColorBlindPalette = (value == "1");
+        else if (key == "actionsGraphShowMinimap") state.actionsGraphShowMinimap = (value == "1");
     }
 
     if (std::string(state.blenderPath.data()).empty()) {
@@ -1623,7 +1634,17 @@ static bool isActionsGraphFlowParamName(const std::string& name) {
            name == "deac" || name == "acti" || name == "resu";
 }
 
-static ImU32 actionsGraphEdgeColor(const std::string& kind) {
+static ImU32 actionsGraphEdgeColor(const std::string& kind, bool colorBlindSafe = false) {
+    if (colorBlindSafe) {
+        // Wong (Nature 2011) palette — distinguishable under common color-vision deficiencies.
+        if (kind == "acos") return IM_COL32(0,   158, 115, 220); // bluish green
+        if (kind == "acof") return IM_COL32(213, 94,  0,   220); // vermillion
+        if (kind == "acoa") return IM_COL32(86,  180, 233, 220); // sky blue
+        if (kind == "deac") return IM_COL32(153, 153, 153, 210); // gray
+        if (kind == "acti") return IM_COL32(240, 228, 66,  225); // yellow
+        if (kind == "resu") return IM_COL32(204, 121, 167, 220); // reddish purple
+        return IM_COL32(180, 188, 206, 210);
+    }
     if (kind == "acos") return IM_COL32(92, 214, 120, 220);
     if (kind == "acof") return IM_COL32(238, 113, 113, 220);
     if (kind == "acoa") return IM_COL32(98, 185, 255, 220);
@@ -1669,6 +1690,14 @@ static ActionsGraphData buildActionsGraphData(const AppState& state) {
         graph.nodes[i] = std::move(node);
     }
 
+    // O(1) id -> action index lookup; replaces the O(N) linear scan that used to run
+    // inside the edge build loop and made buildActionsGraphData O(N * edges).
+    std::unordered_map<int, int> idToIndex;
+    idToIndex.reserve(graph.nodes.size() * 2);
+    for (size_t i = 0; i < graph.nodes.size(); ++i) {
+        idToIndex.emplace(graph.nodes[i].actionId, static_cast<int>(i));
+    }
+
     for (size_t i = 0; i < actions.size(); ++i) {
         const json& action = actions[i];
         if (!action.is_object() || !action.contains("parameters") || !action["parameters"].is_array()) continue;
@@ -1681,8 +1710,9 @@ static ActionsGraphData buildActionsGraphData(const AppState& state) {
 
             for (const json& value : param["values"]) {
                 if (!value.is_number_integer()) continue;
-                const int targetIndex = findActionIndexById(actions, value.get<int>());
-                if (targetIndex < 0) continue;
+                auto it = idToIndex.find(value.get<int>());
+                if (it == idToIndex.end()) continue;
+                const int targetIndex = it->second;
                 const int edgeIndex = static_cast<int>(graph.edges.size());
                 graph.edges.push_back(ActionsGraphEdgeRecord{static_cast<int>(i), targetIndex, paramName});
                 graph.nodes[i].outgoingEdgeIndices.push_back(edgeIndex);
@@ -5521,7 +5551,7 @@ static void drawActionsGraphPanel(AppState& state) {
     for (const char* kind : kLegendKinds) {
         ImGui::SameLine(0.0f, 8.0f);
         const bool active = state.actionsGraphHiddenEdgeKinds.count(kind) == 0;
-        if (drawActionsGraphLegendChip(kind, actionsGraphEdgeColor(kind), active)) {
+        if (drawActionsGraphLegendChip(kind, actionsGraphEdgeColor(kind, state.actionsGraphColorBlindPalette), active)) {
             if (active) state.actionsGraphHiddenEdgeKinds.insert(kind);
             else state.actionsGraphHiddenEdgeKinds.erase(kind);
         }
@@ -5530,6 +5560,12 @@ static void drawActionsGraphPanel(AppState& state) {
         ImGui::SameLine(0.0f, 12.0f);
         if (ImGui::SmallButton("All")) state.actionsGraphHiddenEdgeKinds.clear();
     }
+    ImGui::SameLine(0.0f, 16.0f);
+    ImGui::Checkbox("CB", &state.actionsGraphColorBlindPalette);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Color-blind-safe palette");
+    ImGui::SameLine();
+    ImGui::Checkbox("Mini", &state.actionsGraphShowMinimap);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show minimap overlay");
     ImGui::Separator();
 
     ActionsGraphData graph = buildActionsGraphData(state);
@@ -5572,12 +5608,14 @@ static void drawActionsGraphPanel(AppState& state) {
     const bool showFullGraph = state.actionsGraphShowFull || !hasSelection;
     const int focusDepth = (std::max)(1, (std::min)(state.actionsGraphFocusDepth, 4));
 
-    std::set<int> visibleActionIndices;
+    std::unordered_set<int> visibleActionIndices;
+    visibleActionIndices.reserve(graph.nodes.size() * 2);
     std::vector<int> layerByAction(graph.nodes.size(), INT_MAX);
     if (focusActionIndex >= 0 && focusActionIndex < static_cast<int>(graph.nodes.size())) {
         visibleActionIndices.insert(focusActionIndex);
         layerByAction[static_cast<size_t>(focusActionIndex)] = 0;
 
+        // Successor BFS — proper visited check so cyclic graphs terminate.
         std::deque<std::pair<int, int>> successorQueue;
         successorQueue.push_back(std::make_pair(focusActionIndex, 0));
         while (!successorQueue.empty()) {
@@ -5587,17 +5625,18 @@ static void drawActionsGraphPanel(AppState& state) {
             const ActionsGraphNodeRecord& node = graph.nodes[static_cast<size_t>(item.first)];
             for (int edgeIndex : node.outgoingEdgeIndices) {
                 const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(edgeIndex)];
-                const int nextDepth = item.second + 1;
-                visibleActionIndices.insert(edge.toActionIndex);
-                const int candidateLayer = nextDepth;
-                int& currentLayer = layerByAction[static_cast<size_t>(edge.toActionIndex)];
-                if (currentLayer == INT_MAX || std::abs(candidateLayer) < std::abs(currentLayer)) {
-                    currentLayer = candidateLayer;
-                }
-                successorQueue.push_back(std::make_pair(edge.toActionIndex, nextDepth));
+                const int target = edge.toActionIndex;
+                int& targetLayer = layerByAction[static_cast<size_t>(target)];
+                if (targetLayer != INT_MAX) continue; // already discovered at <= this depth
+                targetLayer = item.second + 1;
+                visibleActionIndices.insert(target);
+                successorQueue.push_back(std::make_pair(target, item.second + 1));
             }
         }
 
+        // Predecessor BFS — same visited guard. May claim a node that successor BFS
+        // already placed on the right; in that case successor's positive layer wins,
+        // which is harmless for visualization.
         std::deque<std::pair<int, int>> predecessorQueue;
         predecessorQueue.push_back(std::make_pair(focusActionIndex, 0));
         while (!predecessorQueue.empty()) {
@@ -5607,14 +5646,12 @@ static void drawActionsGraphPanel(AppState& state) {
             const ActionsGraphNodeRecord& node = graph.nodes[static_cast<size_t>(item.first)];
             for (int edgeIndex : node.incomingEdgeIndices) {
                 const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(edgeIndex)];
-                const int nextDepth = item.second + 1;
-                visibleActionIndices.insert(edge.fromActionIndex);
-                const int candidateLayer = -nextDepth;
-                int& currentLayer = layerByAction[static_cast<size_t>(edge.fromActionIndex)];
-                if (currentLayer == INT_MAX || std::abs(candidateLayer) < std::abs(currentLayer)) {
-                    currentLayer = candidateLayer;
-                }
-                predecessorQueue.push_back(std::make_pair(edge.fromActionIndex, nextDepth));
+                const int source = edge.fromActionIndex;
+                int& sourceLayer = layerByAction[static_cast<size_t>(source)];
+                if (sourceLayer != INT_MAX) continue;
+                sourceLayer = -(item.second + 1);
+                visibleActionIndices.insert(source);
+                predecessorQueue.push_back(std::make_pair(source, item.second + 1));
             }
         }
     }
@@ -5662,13 +5699,15 @@ static void drawActionsGraphPanel(AppState& state) {
         if (uniqueLayers.empty() || uniqueLayers.back() != layer) uniqueLayers.push_back(layer);
     }
 
-    // Collect node lists per layer for barycenter ordering.
+    // Collect node lists per layer for barycenter ordering (O(N) with a layer->index map).
+    std::unordered_map<int, size_t> layerToIndex;
+    layerToIndex.reserve(uniqueLayers.size() * 2);
+    for (size_t i = 0; i < uniqueLayers.size(); ++i) layerToIndex.emplace(uniqueLayers[i], i);
     std::vector<std::vector<int>> nodesPerLayer(uniqueLayers.size());
     for (int actionIndex : visibleNodes) {
         const int layer = layerByAction[static_cast<size_t>(actionIndex)];
-        for (size_t i = 0; i < uniqueLayers.size(); ++i) {
-            if (uniqueLayers[i] == layer) { nodesPerLayer[i].push_back(actionIndex); break; }
-        }
+        auto it = layerToIndex.find(layer);
+        if (it != layerToIndex.end()) nodesPerLayer[it->second].push_back(actionIndex);
     }
 
     // Initial ordering within each layer by actionId — stable seed for barycenter.
@@ -5781,8 +5820,8 @@ static void drawActionsGraphPanel(AppState& state) {
     }
 
     // Reachable subtree from selection (both directions, traversing only visible edges).
-    std::set<int> downstreamFromSel;
-    std::set<int> upstreamFromSel;
+    std::unordered_set<int> downstreamFromSel;
+    std::unordered_set<int> upstreamFromSel;
     if (hasSelection && state.selectedActionIndex >= 0 &&
         visibleActionIndices.count(state.selectedActionIndex) > 0) {
         const int sel = state.selectedActionIndex;
@@ -5881,6 +5920,31 @@ static void drawActionsGraphPanel(AppState& state) {
                              (std::max)(ImGui::GetContentRegionAvail().y, maxColumnHeight + marginY));
     ImGui::Dummy(contentSize);
 
+    // Compute minimap viewport rectangle (in screen coords) up-front so we can suppress
+    // pan / zoom / node-hit while the cursor is over it. We deliberately do NOT use an
+    // ImGui InvisibleButton here: that placed an item whose window-local position drifts
+    // with scroll, which kept expanding the child's content extents every frame and made
+    // the scrollbar lurch to the right on every click.
+    const ImVec2 canvasSize = ImGui::GetWindowSize();
+    const float miniW = 220.0f;
+    const float miniH = 140.0f;
+    const float miniPad = 12.0f;
+    const ImVec2 miniMin(canvasOrigin.x + canvasSize.x - miniW - miniPad,
+                         canvasOrigin.y + canvasSize.y - miniH - miniPad);
+    const ImVec2 miniMax(miniMin.x + miniW, miniMin.y + miniH);
+    const ImVec2 mousePosForMini = ImGui::GetIO().MousePos;
+    const bool windowHovered = ImGui::IsWindowHovered();
+    const bool miniHovered = state.actionsGraphShowMinimap && windowHovered &&
+                             mousePosForMini.x >= miniMin.x && mousePosForMini.x < miniMax.x &&
+                             mousePosForMini.y >= miniMin.y && mousePosForMini.y < miniMax.y;
+    if (miniHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        state.actionsGraphMinimapDragging = true;
+    }
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        state.actionsGraphMinimapDragging = false;
+    }
+    const bool miniActive = state.actionsGraphMinimapDragging;
+
     // If a search result was just clicked, center the viewport on that node.
     if (state.actionsGraphPendingCenterIndex >= 0 &&
         state.actionsGraphPendingCenterIndex < static_cast<int>(nodePositions.size())) {
@@ -5897,14 +5961,14 @@ static void drawActionsGraphPanel(AppState& state) {
         }
     }
 
-    // Pan with middle mouse drag.
-    if (ImGui::IsWindowHovered() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
+    // Pan with middle mouse drag (skip when interacting with the minimap).
+    if (!miniHovered && windowHovered && ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
         const ImVec2 delta = ImGui::GetIO().MouseDelta;
         ImGui::SetScrollX(ImGui::GetScrollX() - delta.x);
         ImGui::SetScrollY(ImGui::GetScrollY() - delta.y);
     }
-    // Zoom with mouse wheel; keep the point under the cursor stationary.
-    if (ImGui::IsWindowHovered()) {
+    // Zoom with mouse wheel; keep the point under the cursor stationary. Skip over the minimap.
+    if (!miniHovered && windowHovered) {
         const float wheel = ImGui::GetIO().MouseWheel;
         if (wheel != 0.0f) {
             const float oldZoom = state.actionsGraphZoom;
@@ -5930,10 +5994,33 @@ static void drawActionsGraphPanel(AppState& state) {
                       canvasOrigin.y + local.y - scrollY);
     };
 
-    // Hit testing.
+    // Precompute visible viewport bounds in canvas-local coords for culling.
+    const float viewportLeft = scrollX;
+    const float viewportTop = scrollY;
+    const float viewportRight = scrollX + ImGui::GetWindowWidth();
+    const float viewportBottom = scrollY + ImGui::GetWindowHeight();
+    auto nodeInViewport = [&](int actionIndex) -> bool {
+        const ImVec2 lp = nodePositions[static_cast<size_t>(actionIndex)];
+        const ImVec2 sz = nodeSizes[static_cast<size_t>(actionIndex)];
+        if (lp.x + sz.x < viewportLeft || lp.x > viewportRight) return false;
+        if (lp.y + sz.y < viewportTop || lp.y > viewportBottom) return false;
+        return true;
+    };
+
+    // Build a list of nodes actually visible on screen — skip off-screen entries for hit
+    // testing, ImGui item creation, and node rendering. Drops the per-frame cost from
+    // O(N) to O(visible_in_viewport) which matters a lot for "Show Full Graph".
+    std::vector<int> onScreenNodes;
+    onScreenNodes.reserve(visibleNodes.size());
+    for (int actionIndex : visibleNodes) {
+        if (nodeInViewport(actionIndex)) onScreenNodes.push_back(actionIndex);
+    }
+
+    // Hit testing (only on-screen nodes; skip entirely while the minimap is being used).
     int hoveredNodeIndex = -1;
     int clickedNodeIndex = -1;
-    for (int actionIndex : visibleNodes) {
+    for (int actionIndex : onScreenNodes) {
+        if (miniHovered) break;
         const ImVec2 localPos = nodePositions[static_cast<size_t>(actionIndex)];
         const ImVec2 size = nodeSizes[static_cast<size_t>(actionIndex)];
         const ImVec2 screenMin = toScreen(localPos);
@@ -5948,7 +6035,35 @@ static void drawActionsGraphPanel(AppState& state) {
         setSelectedActionIndex(state, clickedNodeIndex);
     }
 
-    // Column headers (scroll with content; remain at top of canvas).
+    // Disconnected separator line (drawn first so headers paint over it).
+    float disconnectedSepX = -1.0f;
+    if (firstDisconnectedLayer != INT_MAX) {
+        size_t firstIdx = 0;
+        bool found = false;
+        for (size_t i = 0; i < uniqueLayers.size(); ++i) {
+            if (uniqueLayers[i] >= firstDisconnectedLayer) { firstIdx = i; found = true; break; }
+        }
+        if (found && firstIdx > 0) {
+            const float prevX = layerXCenter[firstIdx - 1];
+            const float prevHalf = nodeSizes[static_cast<size_t>(nodesPerLayer[firstIdx - 1].front())].x * 0.5f;
+            const float thisX = layerXCenter[firstIdx];
+            const float thisHalf = nodeSizes[static_cast<size_t>(nodesPerLayer[firstIdx].front())].x * 0.5f;
+            disconnectedSepX = (prevX + prevHalf + thisX - thisHalf) * 0.5f;
+            const ImVec2 a = toScreen(ImVec2(disconnectedSepX, headerY - 6.0f * zoom));
+            const ImVec2 b = toScreen(ImVec2(disconnectedSepX, maxColumnHeight + 12.0f * zoom));
+            drawList->AddLine(a, b, IM_COL32(70, 78, 92, 200), 1.0f);
+        }
+    }
+
+    // Sticky column headers — pinned to the top of the visible canvas while panning vertically.
+    const float stickyStripHeight = 22.0f * zoom;
+    const ImVec2 stripMin(canvasOrigin.x, canvasOrigin.y);
+    const ImVec2 stripMax(canvasOrigin.x + ImGui::GetWindowWidth(), canvasOrigin.y + stickyStripHeight);
+    drawList->AddRectFilled(stripMin, stripMax, IM_COL32(18, 22, 28, 230));
+    drawList->AddLine(ImVec2(stripMin.x, stripMax.y),
+                      ImVec2(stripMax.x, stripMax.y),
+                      IM_COL32(52, 60, 72, 200), 1.0f);
+    const float headerTextBaseY = canvasOrigin.y + (stickyStripHeight - ImGui::GetTextLineHeight()) * 0.5f;
     for (size_t i = 0; i < uniqueLayers.size(); ++i) {
         if (nodesPerLayer[i].empty()) continue;
         const int layer = uniqueLayers[i];
@@ -5964,33 +6079,15 @@ static void drawActionsGraphPanel(AppState& state) {
             char tmp[16]; snprintf(tmp, sizeof(tmp), "+%d", layer); label = tmp;
         }
         const ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
-        const float cx = layerXCenter[i];
-        const ImVec2 pos = toScreen(ImVec2(cx - textSize.x * 0.5f, headerY));
-        drawList->AddText(pos, IM_COL32(150, 162, 180, 230), label.c_str());
+        const float cxScreen = canvasOrigin.x + layerXCenter[i] - scrollX;
+        drawList->AddText(ImVec2(cxScreen - textSize.x * 0.5f, headerTextBaseY),
+                          IM_COL32(150, 162, 180, 230), label.c_str());
     }
-
-    // Disconnected separator line.
-    if (firstDisconnectedLayer != INT_MAX) {
-        size_t firstIdx = 0;
-        bool found = false;
-        for (size_t i = 0; i < uniqueLayers.size(); ++i) {
-            if (uniqueLayers[i] >= firstDisconnectedLayer) { firstIdx = i; found = true; break; }
-        }
-        if (found && firstIdx > 0) {
-            const float prevX = layerXCenter[firstIdx - 1];
-            const float prevHalf = nodeSizes[static_cast<size_t>(nodesPerLayer[firstIdx - 1].front())].x * 0.5f;
-            const float thisX = layerXCenter[firstIdx];
-            const float thisHalf = nodeSizes[static_cast<size_t>(nodesPerLayer[firstIdx].front())].x * 0.5f;
-            const float sepX = (prevX + prevHalf + thisX - thisHalf) * 0.5f;
-            const ImVec2 a = toScreen(ImVec2(sepX, headerY - 6.0f * zoom));
-            const ImVec2 b = toScreen(ImVec2(sepX, maxColumnHeight + 12.0f * zoom));
-            drawList->AddLine(a, b, IM_COL32(70, 78, 92, 200), 1.0f);
-            const char* dlabel = "Disconnected";
-            const ImVec2 lsize = ImGui::CalcTextSize(dlabel);
-            const ImVec2 lp = toScreen(ImVec2(sepX + 6.0f * zoom, headerY));
-            drawList->AddText(lp, IM_COL32(120, 132, 150, 230), dlabel);
-            (void)lsize;
-        }
+    if (disconnectedSepX > 0.0f) {
+        const char* dlabel = "Disconnected";
+        const float sepScreenX = canvasOrigin.x + disconnectedSepX - scrollX;
+        drawList->AddText(ImVec2(sepScreenX + 6.0f * zoom, headerTextBaseY),
+                          IM_COL32(120, 132, 150, 230), dlabel);
     }
 
     // Edges.
@@ -6007,6 +6104,35 @@ static void drawActionsGraphPanel(AppState& state) {
         endTip = ImVec2(toPos.x, endY);
     };
 
+    // Bundle parallel edges between the same layer pair so their mid-segments fan out
+    // instead of stacking on a single column / row.
+    std::map<std::tuple<int, int, int>, std::vector<int>> edgeBundles;
+    for (int edgeIndex : visibleEdgeIndices) {
+        const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(edgeIndex)];
+        const int fl = layerByAction[static_cast<size_t>(edge.fromActionIndex)];
+        const int tl = layerByAction[static_cast<size_t>(edge.toActionIndex)];
+        const int fwd = (tl > fl) ? 1 : 0;
+        edgeBundles[std::make_tuple(fl, tl, fwd)].push_back(edgeIndex);
+    }
+    std::vector<int> bundleSlot(graph.edges.size(), 0);
+    std::vector<int> bundleCount(graph.edges.size(), 1);
+    for (auto& kv : edgeBundles) {
+        auto& edges = kv.second;
+        std::sort(edges.begin(), edges.end(), [&](int a, int b) {
+            const ActionsGraphEdgeRecord& ea = graph.edges[static_cast<size_t>(a)];
+            const ActionsGraphEdgeRecord& eb = graph.edges[static_cast<size_t>(b)];
+            const int ra = rowInLayer[static_cast<size_t>(ea.fromActionIndex)];
+            const int rb = rowInLayer[static_cast<size_t>(eb.fromActionIndex)];
+            if (ra != rb) return ra < rb;
+            return rowInLayer[static_cast<size_t>(ea.toActionIndex)] <
+                   rowInLayer[static_cast<size_t>(eb.toActionIndex)];
+        });
+        for (size_t i = 0; i < edges.size(); ++i) {
+            bundleSlot[static_cast<size_t>(edges[i])] = static_cast<int>(i);
+            bundleCount[static_cast<size_t>(edges[i])] = static_cast<int>(edges.size());
+        }
+    }
+
     // Precompute screen-space polylines so we can hit-test before drawing.
     struct EdgePolyline { std::vector<ImVec2> pts; bool forward; bool valid; };
     std::vector<EdgePolyline> edgePolylines(graph.edges.size());
@@ -6017,9 +6143,14 @@ static void drawActionsGraphPanel(AppState& state) {
         EdgePolyline& pl = edgePolylines[static_cast<size_t>(edgeIndex)];
         pl.valid = true;
         pl.forward = endLocal.x > startLocal.x + 8.0f;
+        const int bSlot = bundleSlot[static_cast<size_t>(edgeIndex)];
+        const int bCount = bundleCount[static_cast<size_t>(edgeIndex)];
+        const float bandCenter = (static_cast<float>(bCount) - 1.0f) * 0.5f;
         if (pl.forward) {
             const float arrowGap = 8.0f * zoom;
-            const float midX = (startLocal.x + endLocal.x) * 0.5f;
+            const float spacing = 5.0f * zoom;
+            const float midX = (startLocal.x + endLocal.x) * 0.5f
+                             + (static_cast<float>(bSlot) - bandCenter) * spacing;
             pl.pts.push_back(toScreen(startLocal));
             pl.pts.push_back(toScreen(ImVec2(midX, startLocal.y)));
             pl.pts.push_back(toScreen(ImVec2(midX, endLocal.y)));
@@ -6033,7 +6164,8 @@ static void drawActionsGraphPanel(AppState& state) {
             const float arrowGap = 8.0f * zoom;
             const float minNodeTop = (std::min)(fromPos.y, toPos.y);
             const float detourMargin = 22.0f * zoom;
-            float detourY = minNodeTop - detourMargin;
+            const float backSpacing = 8.0f * zoom;
+            float detourY = minNodeTop - detourMargin - static_cast<float>(bSlot) * backSpacing;
             const float minDetourY = headerY + 10.0f * zoom;
             if (detourY < minDetourY) detourY = minDetourY;
             pl.pts.push_back(toScreen(startLocal));
@@ -6046,9 +6178,9 @@ static void drawActionsGraphPanel(AppState& state) {
         }
     }
 
-    // Edge hit test (only when no node is hovered).
+    // Edge hit test (only when no node is hovered and not over the minimap).
     int hoveredEdgeIndex = -1;
-    if (hoveredNodeIndex < 0 && ImGui::IsWindowHovered()) {
+    if (hoveredNodeIndex < 0 && !miniHovered && ImGui::IsWindowHovered()) {
         const ImVec2 mp = ImGui::GetIO().MousePos;
         float best = 7.0f;
         for (int edgeIndex : visibleEdgeIndices) {
@@ -6093,7 +6225,7 @@ static void drawActionsGraphPanel(AppState& state) {
         const bool inSub = selectionActive && edgeInSubtree(edge);
         const bool emphasize = isHoveredEdge || touchesSel || touchesHover;
 
-        ImU32 edgeColor = actionsGraphEdgeColor(edge.kind);
+        ImU32 edgeColor = actionsGraphEdgeColor(edge.kind, state.actionsGraphColorBlindPalette);
         float thickness = 2.0f;
         if (emphasize) {
             edgeColor = applyAlpha(edgeColor, 255);
@@ -6124,8 +6256,8 @@ static void drawActionsGraphPanel(AppState& state) {
         }
     }
 
-    // Nodes.
-    for (int actionIndex : visibleNodes) {
+    // Nodes (only those actually inside the viewport).
+    for (int actionIndex : onScreenNodes) {
         const ActionsGraphNodeRecord& node = graph.nodes[static_cast<size_t>(actionIndex)];
         const ImVec2 localPos = nodePositions[static_cast<size_t>(actionIndex)];
         const ImVec2 size = nodeSizes[static_cast<size_t>(actionIndex)];
@@ -6233,7 +6365,7 @@ static void drawActionsGraphPanel(AppState& state) {
             const float y = slotY(localPos.y, size.y, sl.slotIndex, sl.slotCount);
             const ImVec2 c = toScreen(ImVec2(localPos.x + size.x, y));
             const int a = dotAlpha(edge);
-            drawList->AddCircleFilled(c, dotR, applyAlpha(actionsGraphEdgeColor(edge.kind), a), 12);
+            drawList->AddCircleFilled(c, dotR, applyAlpha(actionsGraphEdgeColor(edge.kind, state.actionsGraphColorBlindPalette), a), 12);
             drawList->AddCircle(c, dotR, IM_COL32(20, 24, 30, a), 12, 1.0f);
         }
         for (int e : node.incomingEdgeIndices) {
@@ -6243,9 +6375,78 @@ static void drawActionsGraphPanel(AppState& state) {
             const float y = slotY(localPos.y, size.y, sl.slotIndex, sl.slotCount);
             const ImVec2 c = toScreen(ImVec2(localPos.x, y));
             const int a = dotAlpha(edge);
-            drawList->AddCircleFilled(c, dotR, applyAlpha(actionsGraphEdgeColor(edge.kind), a), 12);
+            drawList->AddCircleFilled(c, dotR, applyAlpha(actionsGraphEdgeColor(edge.kind, state.actionsGraphColorBlindPalette), a), 12);
             drawList->AddCircle(c, dotR, IM_COL32(20, 24, 30, a), 12, 1.0f);
         }
+    }
+
+    // Minimap overlay (fixed in bottom-right of the canvas viewport).
+    if (state.actionsGraphShowMinimap) {
+        // miniMin / miniMax / miniHovered / miniActive were computed up-front before
+        // pan/zoom so the minimap doesn't fight them.
+        const float contentW = (std::max)(contentSize.x, 1.0f);
+        const float contentH = (std::max)(contentSize.y, 1.0f);
+        const float plotInset = 6.0f;
+        const float scaleX = (miniW - plotInset * 2.0f) / contentW;
+        const float scaleY = (miniH - plotInset * 2.0f) / contentH;
+        const float miniScale = (std::min)(scaleX, scaleY);
+        const float plotW = contentW * miniScale;
+        const float plotH = contentH * miniScale;
+        const ImVec2 plotMin(miniMin.x + (miniW - plotW) * 0.5f,
+                             miniMin.y + (miniH - plotH) * 0.5f);
+
+        if (miniActive) {
+            const ImVec2 mp = ImGui::GetIO().MousePos;
+            const float relX = (mp.x - plotMin.x) / miniScale;
+            const float relY = (mp.y - plotMin.y) / miniScale;
+            const float vw = ImGui::GetWindowWidth();
+            const float vh = ImGui::GetWindowHeight();
+            const float maxScrollX = (std::max)(0.0f, contentW - vw);
+            const float maxScrollY = (std::max)(0.0f, contentH - vh);
+            ImGui::SetScrollX((std::max)(0.0f, (std::min)(maxScrollX, relX - vw * 0.5f)));
+            ImGui::SetScrollY((std::max)(0.0f, (std::min)(maxScrollY, relY - vh * 0.5f)));
+        }
+
+        drawList->AddRectFilled(miniMin, miniMax, IM_COL32(14, 18, 24, 235), 6.0f);
+        drawList->AddRect(miniMin, miniMax,
+                          miniHovered ? IM_COL32(120, 134, 156, 230) : IM_COL32(58, 68, 82, 220),
+                          6.0f, 0, 1.5f);
+        drawList->PushClipRect(miniMin, miniMax, true);
+
+        for (int actionIndex : visibleNodes) {
+            const ImVec2 lp = nodePositions[static_cast<size_t>(actionIndex)];
+            const ImVec2 sz = nodeSizes[static_cast<size_t>(actionIndex)];
+            if (lp.x < 0.0f) continue;
+            const ImVec2 nmin(plotMin.x + lp.x * miniScale, plotMin.y + lp.y * miniScale);
+            ImVec2 nmax(nmin.x + sz.x * miniScale, nmin.y + sz.y * miniScale);
+            if (nmax.x - nmin.x < 2.0f) nmax.x = nmin.x + 2.0f;
+            if (nmax.y - nmin.y < 1.5f) nmax.y = nmin.y + 1.5f;
+            const ActionsGraphNodeRecord& node = graph.nodes[static_cast<size_t>(actionIndex)];
+            const bool selectedN = (actionIndex == state.selectedActionIndex);
+            const bool subN = selectionActive && inSubtree(actionIndex);
+            ImU32 nodeCol;
+            if (selectedN) nodeCol = IM_COL32(140, 200, 255, 240);
+            else if (subN) nodeCol = node.container ? IM_COL32(118, 158, 214, 220)
+                                                    : IM_COL32(214, 168, 92, 220);
+            else if (selectionActive) nodeCol = IM_COL32(80, 88, 102, 160);
+            else nodeCol = node.container ? IM_COL32(118, 158, 214, 200)
+                                          : IM_COL32(214, 168, 92, 200);
+            drawList->AddRectFilled(nmin, nmax, nodeCol);
+            if (selectedN) drawList->AddRect(ImVec2(nmin.x - 1, nmin.y - 1),
+                                             ImVec2(nmax.x + 1, nmax.y + 1),
+                                             IM_COL32(255, 255, 255, 230), 0.0f, 0, 1.0f);
+        }
+
+        // Viewport rectangle.
+        const float vw = ImGui::GetWindowWidth();
+        const float vh = ImGui::GetWindowHeight();
+        const ImVec2 vmin(plotMin.x + scrollX * miniScale, plotMin.y + scrollY * miniScale);
+        const ImVec2 vmax(plotMin.x + (scrollX + vw) * miniScale,
+                          plotMin.y + (scrollY + vh) * miniScale);
+        drawList->AddRectFilled(vmin, vmax, IM_COL32(220, 232, 250, 30));
+        drawList->AddRect(vmin, vmax, IM_COL32(220, 232, 250, 230), 0.0f, 0, 1.4f);
+
+        drawList->PopClipRect();
     }
 
     // Hover tooltip (node takes priority over edge).
@@ -6269,7 +6470,7 @@ static void drawActionsGraphPanel(AppState& state) {
         const ActionsGraphNodeRecord& fromN = graph.nodes[static_cast<size_t>(edge.fromActionIndex)];
         const ActionsGraphNodeRecord& toN = graph.nodes[static_cast<size_t>(edge.toActionIndex)];
         ImGui::BeginTooltip();
-        const ImU32 col = actionsGraphEdgeColor(edge.kind);
+        const ImU32 col = actionsGraphEdgeColor(edge.kind, state.actionsGraphColorBlindPalette);
         const ImVec4 c4(((col >> IM_COL32_R_SHIFT) & 0xFF) / 255.0f,
                         ((col >> IM_COL32_G_SHIFT) & 0xFF) / 255.0f,
                         ((col >> IM_COL32_B_SHIFT) & 0xFF) / 255.0f,
