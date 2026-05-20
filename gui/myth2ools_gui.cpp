@@ -743,6 +743,8 @@ struct AppState {
     int actionsGraphFocusDepth = 1;
     float actionsGraphZoom = 1.0f;
     std::set<std::string> actionsGraphHiddenEdgeKinds;
+    std::array<char, 128> actionsGraphSearchBuf{};
+    int actionsGraphPendingCenterIndex = -1;
     ImGuiID actionsGraphDefaultDockId = 0;
     enum PendingDiscard { PENDING_NONE = 0, PENDING_RELOAD = 1, PENDING_QUIT = 2, PENDING_RUN = 3 };
     PendingDiscard pendingDiscard = PENDING_NONE;
@@ -1128,6 +1130,17 @@ static bool saveSettings(AppState& state) {
     out << "windowW=" << state.windowW << "\n";
     out << "windowH=" << state.windowH << "\n";
     out << "windowMaximized=" << (state.windowMaximized ? "1" : "0") << "\n";
+    out << "actionsGraphZoom=" << state.actionsGraphZoom << "\n";
+    out << "actionsGraphFocusDepth=" << state.actionsGraphFocusDepth << "\n";
+    out << "actionsGraphShowFull=" << (state.actionsGraphShowFull ? "1" : "0") << "\n";
+    {
+        std::string joined;
+        for (const std::string& kind : state.actionsGraphHiddenEdgeKinds) {
+            if (!joined.empty()) joined += ",";
+            joined += kind;
+        }
+        out << "actionsGraphHiddenKinds=" << joined << "\n";
+    }
     if (!out.good()) return false;
 
     const std::string blender = state.blenderPath.data();
@@ -1170,6 +1183,20 @@ static void loadSettings(AppState& state) {
         else if (key == "windowW") { try { int v = std::stoi(value); if (v > 100) state.windowW = v; } catch (...) {} }
         else if (key == "windowH") { try { int v = std::stoi(value); if (v > 100) state.windowH = v; } catch (...) {} }
         else if (key == "windowMaximized") state.windowMaximized = (value == "1");
+        else if (key == "actionsGraphZoom") { try { float z = std::stof(value); if (z >= 0.3f && z <= 3.0f) state.actionsGraphZoom = z; } catch (...) {} }
+        else if (key == "actionsGraphFocusDepth") { try { int d = std::stoi(value); if (d >= 1 && d <= 4) state.actionsGraphFocusDepth = d; } catch (...) {} }
+        else if (key == "actionsGraphShowFull") state.actionsGraphShowFull = (value == "1");
+        else if (key == "actionsGraphHiddenKinds") {
+            state.actionsGraphHiddenEdgeKinds.clear();
+            size_t start = 0;
+            while (start <= value.size()) {
+                size_t comma = value.find(',', start);
+                std::string token = value.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+                if (!token.empty()) state.actionsGraphHiddenEdgeKinds.insert(token);
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+        }
     }
 
     if (std::string(state.blenderPath.data()).empty()) {
@@ -5476,6 +5503,19 @@ static void drawActionsGraphPanel(AppState& state) {
     }
     ImGui::SameLine();
     ImGui::TextDisabled("(%.0f%%)", state.actionsGraphZoom * 100.0f);
+    ImGui::SameLine(0.0f, 16.0f);
+    ImGui::SetNextItemWidth(200.0f);
+    ImGui::InputTextWithHint("##actionsGraphSearch",
+                             "Find by name or #id...",
+                             state.actionsGraphSearchBuf.data(),
+                             state.actionsGraphSearchBuf.size());
+    const std::string searchQuery = state.actionsGraphSearchBuf.data();
+    if (!searchQuery.empty()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("X##clearSearch")) {
+            state.actionsGraphSearchBuf.fill(0);
+        }
+    }
 
     static const char* kLegendKinds[] = {"acos", "acof", "acoa", "deac", "acti", "resu"};
     for (const char* kind : kLegendKinds) {
@@ -5497,6 +5537,35 @@ static void drawActionsGraphPanel(AppState& state) {
         ImGui::TextDisabled("No actions loaded.");
         ImGui::End();
         return;
+    }
+
+    if (!searchQuery.empty()) {
+        std::string lowered;
+        lowered.reserve(searchQuery.size());
+        for (char c : searchQuery) lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        ImGui::BeginChild("##actionsGraphSearchResults", ImVec2(0.0f, 124.0f), true);
+        int shown = 0;
+        for (const ActionsGraphNodeRecord& n : graph.nodes) {
+            if (shown >= 30) break;
+            const std::string idStr = "#" + std::to_string(n.actionId);
+            std::string nameLower = n.name;
+            for (char& c : nameLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            const bool matchName = nameLower.find(lowered) != std::string::npos;
+            const bool matchId = idStr.find(searchQuery) != std::string::npos;
+            if (!matchName && !matchId) continue;
+            std::string label = idStr + "  ";
+            label += n.name.empty() ? "(unnamed)" : n.name;
+            if (!n.typeFourCC.empty()) { label += "  ["; label += n.typeFourCC; label += "]"; }
+            label += "##search" + std::to_string(n.actionIndex);
+            if (ImGui::Selectable(label.c_str(), n.actionIndex == state.selectedActionIndex)) {
+                setSelectedActionIndex(state, n.actionIndex);
+                state.actionsGraphPendingCenterIndex = n.actionIndex;
+                state.actionsGraphShowFull = true; // ensure the target is visible
+            }
+            ++shown;
+        }
+        if (shown == 0) ImGui::TextDisabled("No matches.");
+        ImGui::EndChild();
     }
 
     int focusActionIndex = hasSelection ? state.selectedActionIndex : 0;
@@ -5812,6 +5881,22 @@ static void drawActionsGraphPanel(AppState& state) {
                              (std::max)(ImGui::GetContentRegionAvail().y, maxColumnHeight + marginY));
     ImGui::Dummy(contentSize);
 
+    // If a search result was just clicked, center the viewport on that node.
+    if (state.actionsGraphPendingCenterIndex >= 0 &&
+        state.actionsGraphPendingCenterIndex < static_cast<int>(nodePositions.size())) {
+        const ImVec2 localPos = nodePositions[static_cast<size_t>(state.actionsGraphPendingCenterIndex)];
+        const ImVec2 size = nodeSizes[static_cast<size_t>(state.actionsGraphPendingCenterIndex)];
+        if (localPos.x >= 0.0f) {
+            const float viewportW = ImGui::GetWindowWidth();
+            const float viewportH = ImGui::GetWindowHeight();
+            const float targetX = localPos.x + size.x * 0.5f - viewportW * 0.5f;
+            const float targetY = localPos.y + size.y * 0.5f - viewportH * 0.5f;
+            ImGui::SetScrollX((std::max)(0.0f, targetX));
+            ImGui::SetScrollY((std::max)(0.0f, targetY));
+            state.actionsGraphPendingCenterIndex = -1;
+        }
+    }
+
     // Pan with middle mouse drag.
     if (ImGui::IsWindowHovered() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
         const ImVec2 delta = ImGui::GetIO().MouseDelta;
@@ -5941,19 +6026,23 @@ static void drawActionsGraphPanel(AppState& state) {
             pl.pts.push_back(toScreen(ImVec2(endLocal.x - arrowGap, endLocal.y)));
             pl.pts.push_back(toScreen(endLocal));
         } else {
-            const ImVec2 startScreen = toScreen(startLocal);
-            const ImVec2 endScreen = toScreen(endLocal);
-            const float bend = 60.0f * zoom;
-            const ImVec2 cp1(startScreen.x + bend, startScreen.y);
-            const ImVec2 cp2(endScreen.x - bend, endScreen.y);
-            const int samples = 22;
-            for (int i = 0; i <= samples; ++i) {
-                const float t = static_cast<float>(i) / static_cast<float>(samples);
-                const float u = 1.0f - t;
-                const float x = u*u*u*startScreen.x + 3*u*u*t*cp1.x + 3*u*t*t*cp2.x + t*t*t*endScreen.x;
-                const float y = u*u*u*startScreen.y + 3*u*u*t*cp1.y + 3*u*t*t*cp2.y + t*t*t*endScreen.y;
-                pl.pts.emplace_back(x, y);
-            }
+            // Backward / sideways: orthogonal up-and-over detour.
+            const ImVec2 fromPos = nodePositions[static_cast<size_t>(edge.fromActionIndex)];
+            const ImVec2 toPos = nodePositions[static_cast<size_t>(edge.toActionIndex)];
+            const float stub = 16.0f * zoom;
+            const float arrowGap = 8.0f * zoom;
+            const float minNodeTop = (std::min)(fromPos.y, toPos.y);
+            const float detourMargin = 22.0f * zoom;
+            float detourY = minNodeTop - detourMargin;
+            const float minDetourY = headerY + 10.0f * zoom;
+            if (detourY < minDetourY) detourY = minDetourY;
+            pl.pts.push_back(toScreen(startLocal));
+            pl.pts.push_back(toScreen(ImVec2(startLocal.x + stub, startLocal.y)));
+            pl.pts.push_back(toScreen(ImVec2(startLocal.x + stub, detourY)));
+            pl.pts.push_back(toScreen(ImVec2(endLocal.x - stub, detourY)));
+            pl.pts.push_back(toScreen(ImVec2(endLocal.x - stub, endLocal.y)));
+            pl.pts.push_back(toScreen(ImVec2(endLocal.x - arrowGap, endLocal.y)));
+            pl.pts.push_back(toScreen(endLocal));
         }
     }
 
