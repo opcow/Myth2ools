@@ -741,6 +741,7 @@ struct AppState {
     int selectedActionIndex = -1;
     bool actionsGraphShowFull = false;
     int actionsGraphFocusDepth = 1;
+    float actionsGraphZoom = 1.0f;
     ImGuiID actionsGraphDefaultDockId = 0;
     enum PendingDiscard { PENDING_NONE = 0, PENDING_RELOAD = 1, PENDING_QUIT = 2, PENDING_RUN = 3 };
     PendingDiscard pendingDiscard = PENDING_NONE;
@@ -1667,7 +1668,7 @@ static ActionsGraphData buildActionsGraphData(const AppState& state) {
 
 static ImVec2 actionsGraphNodeSizeForTitle(const std::string& title) {
     const ImVec2 titleSize = ImGui::CalcTextSize(title.c_str());
-    return ImVec2((std::max)(220.0f, titleSize.x + 36.0f), 112.0f);
+    return ImVec2((std::max)(208.0f, titleSize.x + 36.0f), 88.0f);
 }
 
 static void drawActionsGraphChip(ImDrawList* drawList,
@@ -5444,6 +5445,18 @@ static void drawActionsGraphPanel(AppState& state) {
     ImGui::SliderInt("Depth", &state.actionsGraphFocusDepth, 1, 4);
     ImGui::SameLine();
     ImGui::Checkbox("Show Full Graph", &state.actionsGraphShowFull);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Reset View")) {
+        state.actionsGraphZoom = 1.0f;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%.0f%%)", state.actionsGraphZoom * 100.0f);
+
+    static const char* kLegendKinds[] = {"acos", "acof", "acoa", "deac", "acti", "resu"};
+    for (const char* kind : kLegendKinds) {
+        ImGui::SameLine(0.0f, 12.0f);
+        drawActionsGraphLegendChip(kind, actionsGraphEdgeColor(kind));
+    }
     ImGui::Separator();
 
     ActionsGraphData graph = buildActionsGraphData(state);
@@ -5504,16 +5517,23 @@ static void drawActionsGraphPanel(AppState& state) {
         }
     }
 
-    if (showFullGraph) {
-        int maxAssignedLayer = 0;
-        for (int layer : layerByAction) {
-            if (layer != INT_MAX) maxAssignedLayer = (std::max)(maxAssignedLayer, layer);
+    int maxConnectedLayer = 0;
+    bool anyConnected = false;
+    for (int layer : layerByAction) {
+        if (layer != INT_MAX) {
+            if (!anyConnected) { maxConnectedLayer = layer; anyConnected = true; }
+            else maxConnectedLayer = (std::max)(maxConnectedLayer, layer);
         }
+    }
+    int firstDisconnectedLayer = INT_MAX;
+    if (showFullGraph) {
         int disconnectedIndex = 0;
         for (size_t i = 0; i < graph.nodes.size(); ++i) {
             visibleActionIndices.insert(static_cast<int>(i));
             if (layerByAction[i] == INT_MAX) {
-                layerByAction[i] = maxAssignedLayer + 1 + (disconnectedIndex / 10);
+                const int assigned = (anyConnected ? maxConnectedLayer + 1 : 0) + (disconnectedIndex / 10);
+                layerByAction[i] = assigned;
+                if (firstDisconnectedLayer == INT_MAX) firstDisconnectedLayer = assigned;
                 ++disconnectedIndex;
             }
         }
@@ -5540,40 +5560,107 @@ static void drawActionsGraphPanel(AppState& state) {
         if (uniqueLayers.empty() || uniqueLayers.back() != layer) uniqueLayers.push_back(layer);
     }
 
-    std::vector<int> nodeColumnRank(graph.nodes.size(), -1);
-    for (size_t i = 0; i < uniqueLayers.size(); ++i) {
-        for (int actionIndex : visibleNodes) {
-            if (layerByAction[static_cast<size_t>(actionIndex)] == uniqueLayers[i]) {
-                nodeColumnRank[static_cast<size_t>(actionIndex)] = static_cast<int>(i);
-            }
+    // Collect node lists per layer for barycenter ordering.
+    std::vector<std::vector<int>> nodesPerLayer(uniqueLayers.size());
+    for (int actionIndex : visibleNodes) {
+        const int layer = layerByAction[static_cast<size_t>(actionIndex)];
+        for (size_t i = 0; i < uniqueLayers.size(); ++i) {
+            if (uniqueLayers[i] == layer) { nodesPerLayer[i].push_back(actionIndex); break; }
         }
     }
 
-    std::vector<ImVec2> nodePositions(graph.nodes.size(), ImVec2(-1.0f, -1.0f));
-    std::vector<ImVec2> nodeSizes(graph.nodes.size(), ImVec2(0.0f, 0.0f));
-    const float layerStride = 320.0f;
-    const float rowStride = 134.0f;
-    const float marginX = 28.0f;
-    const float marginY = 24.0f;
-    float maxColumnHeight = 0.0f;
-    for (size_t layerIdx = 0; layerIdx < uniqueLayers.size(); ++layerIdx) {
-        std::vector<int> nodesInLayer;
-        for (int actionIndex : visibleNodes) {
-            if (layerByAction[static_cast<size_t>(actionIndex)] == uniqueLayers[layerIdx]) {
-                nodesInLayer.push_back(actionIndex);
-            }
-        }
-        std::sort(nodesInLayer.begin(), nodesInLayer.end(), [&](int a, int b) {
+    // Initial ordering within each layer by actionId — stable seed for barycenter.
+    for (auto& layerNodes : nodesPerLayer) {
+        std::sort(layerNodes.begin(), layerNodes.end(), [&](int a, int b) {
             return graph.nodes[static_cast<size_t>(a)].actionId < graph.nodes[static_cast<size_t>(b)].actionId;
         });
-        for (size_t row = 0; row < nodesInLayer.size(); ++row) {
-            const int actionIndex = nodesInLayer[row];
+    }
+
+    std::vector<int> rowInLayer(graph.nodes.size(), 0);
+    auto refreshRows = [&]() {
+        for (const auto& layerNodes : nodesPerLayer) {
+            for (size_t r = 0; r < layerNodes.size(); ++r) {
+                rowInLayer[static_cast<size_t>(layerNodes[r])] = static_cast<int>(r);
+            }
+        }
+    };
+    refreshRows();
+
+    // Find focus layer (layer == 0); place anchor for sweeps.
+    int focusLayerIdx = 0;
+    for (size_t i = 0; i < uniqueLayers.size(); ++i) {
+        if (uniqueLayers[i] == 0) { focusLayerIdx = static_cast<int>(i); break; }
+    }
+
+    auto barycenter = [&](int actionIndex, bool useIncoming) -> float {
+        const ActionsGraphNodeRecord& node = graph.nodes[static_cast<size_t>(actionIndex)];
+        const std::vector<int>& edges = useIncoming ? node.incomingEdgeIndices : node.outgoingEdgeIndices;
+        float sum = 0.0f;
+        int count = 0;
+        for (int edgeIndex : edges) {
+            const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(edgeIndex)];
+            const int neighbor = useIncoming ? edge.fromActionIndex : edge.toActionIndex;
+            if (visibleActionIndices.count(neighbor) == 0) continue;
+            sum += static_cast<float>(rowInLayer[static_cast<size_t>(neighbor)]);
+            ++count;
+        }
+        if (count == 0) return static_cast<float>(rowInLayer[static_cast<size_t>(actionIndex)]);
+        return sum / static_cast<float>(count);
+    };
+
+    // Several barycenter passes — forward (right of focus), backward (left of focus), repeat.
+    for (int pass = 0; pass < 4; ++pass) {
+        for (int i = focusLayerIdx + 1; i < static_cast<int>(nodesPerLayer.size()); ++i) {
+            auto& layerNodes = nodesPerLayer[static_cast<size_t>(i)];
+            std::vector<std::pair<float, int>> keyed;
+            keyed.reserve(layerNodes.size());
+            for (int a : layerNodes) keyed.emplace_back(barycenter(a, true), a);
+            std::stable_sort(keyed.begin(), keyed.end(),
+                             [](const std::pair<float,int>& x, const std::pair<float,int>& y) { return x.first < y.first; });
+            for (size_t r = 0; r < keyed.size(); ++r) layerNodes[r] = keyed[r].second;
+            refreshRows();
+        }
+        for (int i = focusLayerIdx - 1; i >= 0; --i) {
+            auto& layerNodes = nodesPerLayer[static_cast<size_t>(i)];
+            std::vector<std::pair<float, int>> keyed;
+            keyed.reserve(layerNodes.size());
+            for (int a : layerNodes) keyed.emplace_back(barycenter(a, false), a);
+            std::stable_sort(keyed.begin(), keyed.end(),
+                             [](const std::pair<float,int>& x, const std::pair<float,int>& y) { return x.first < y.first; });
+            for (size_t r = 0; r < keyed.size(); ++r) layerNodes[r] = keyed[r].second;
+            refreshRows();
+        }
+    }
+
+    // Apply zoom to layout strides.
+    const float zoom = (std::max)(0.4f, (std::min)(state.actionsGraphZoom, 2.5f));
+    const float layerStride = 300.0f * zoom;
+    const float rowStride = 108.0f * zoom;
+    const float marginX = 28.0f * zoom;
+    const float marginY = 34.0f * zoom; // extra room for column headers
+    const float headerY = marginY - 22.0f * zoom;
+
+    std::vector<ImVec2> nodePositions(graph.nodes.size(), ImVec2(-1.0f, -1.0f));
+    std::vector<ImVec2> nodeSizes(graph.nodes.size(), ImVec2(0.0f, 0.0f));
+    std::vector<float> layerXCenter(uniqueLayers.size(), 0.0f);
+    float maxColumnHeight = 0.0f;
+    for (size_t layerIdx = 0; layerIdx < nodesPerLayer.size(); ++layerIdx) {
+        const auto& layerNodes = nodesPerLayer[layerIdx];
+        for (size_t row = 0; row < layerNodes.size(); ++row) {
+            const int actionIndex = layerNodes[row];
             const std::string title = actionsGraphNodeTitle(graph.nodes[static_cast<size_t>(actionIndex)].name);
-            const ImVec2 size = actionsGraphNodeSizeForTitle(title);
+            ImVec2 size = actionsGraphNodeSizeForTitle(title);
+            size.x *= zoom;
+            size.y *= zoom;
             nodeSizes[static_cast<size_t>(actionIndex)] = size;
-            nodePositions[static_cast<size_t>(actionIndex)] = ImVec2(marginX + layerStride * static_cast<float>(layerIdx),
-                                                                     marginY + rowStride * static_cast<float>(row));
-            maxColumnHeight = (std::max)(maxColumnHeight, marginY + rowStride * static_cast<float>(row) + size.y);
+            const float x = marginX + layerStride * static_cast<float>(layerIdx);
+            const float y = marginY + rowStride * static_cast<float>(row);
+            nodePositions[static_cast<size_t>(actionIndex)] = ImVec2(x, y);
+            maxColumnHeight = (std::max)(maxColumnHeight, y + size.y);
+        }
+        if (!layerNodes.empty()) {
+            const ImVec2 size = nodeSizes[static_cast<size_t>(layerNodes[0])];
+            layerXCenter[layerIdx] = marginX + layerStride * static_cast<float>(layerIdx) + size.x * 0.5f;
         }
     }
 
@@ -5586,6 +5673,56 @@ static void drawActionsGraphPanel(AppState& state) {
         visibleEdgeIndices.push_back(static_cast<int>(i));
     }
 
+    // Group outgoing/incoming edges per node, ordered by neighbor row so attach points fan
+    // out predictably along the right/left edges.
+    struct EdgeEndpointSlot { int edgeIndex; int slotIndex; int slotCount; };
+    std::vector<EdgeEndpointSlot> outSlot(graph.edges.size(), {-1, 0, 0});
+    std::vector<EdgeEndpointSlot> inSlot(graph.edges.size(), {-1, 0, 0});
+    for (int actionIndex : visibleNodes) {
+        const ActionsGraphNodeRecord& node = graph.nodes[static_cast<size_t>(actionIndex)];
+        std::vector<int> outs;
+        for (int e : node.outgoingEdgeIndices) {
+            const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(e)];
+            if (visibleActionIndices.count(edge.toActionIndex) == 0) continue;
+            outs.push_back(e);
+        }
+        std::sort(outs.begin(), outs.end(), [&](int a, int b) {
+            const int la = layerByAction[static_cast<size_t>(graph.edges[static_cast<size_t>(a)].toActionIndex)];
+            const int lb = layerByAction[static_cast<size_t>(graph.edges[static_cast<size_t>(b)].toActionIndex)];
+            if (la != lb) return la < lb;
+            const int ra = rowInLayer[static_cast<size_t>(graph.edges[static_cast<size_t>(a)].toActionIndex)];
+            const int rb = rowInLayer[static_cast<size_t>(graph.edges[static_cast<size_t>(b)].toActionIndex)];
+            return ra < rb;
+        });
+        for (size_t i = 0; i < outs.size(); ++i) {
+            outSlot[static_cast<size_t>(outs[i])] = {outs[i], static_cast<int>(i), static_cast<int>(outs.size())};
+        }
+        std::vector<int> ins;
+        for (int e : node.incomingEdgeIndices) {
+            const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(e)];
+            if (visibleActionIndices.count(edge.fromActionIndex) == 0) continue;
+            ins.push_back(e);
+        }
+        std::sort(ins.begin(), ins.end(), [&](int a, int b) {
+            const int la = layerByAction[static_cast<size_t>(graph.edges[static_cast<size_t>(a)].fromActionIndex)];
+            const int lb = layerByAction[static_cast<size_t>(graph.edges[static_cast<size_t>(b)].fromActionIndex)];
+            if (la != lb) return la < lb;
+            const int ra = rowInLayer[static_cast<size_t>(graph.edges[static_cast<size_t>(a)].fromActionIndex)];
+            const int rb = rowInLayer[static_cast<size_t>(graph.edges[static_cast<size_t>(b)].fromActionIndex)];
+            return ra < rb;
+        });
+        for (size_t i = 0; i < ins.size(); ++i) {
+            inSlot[static_cast<size_t>(ins[i])] = {ins[i], static_cast<int>(i), static_cast<int>(ins.size())};
+        }
+    }
+
+    auto slotY = [](float topY, float height, int slotIndex, int slotCount) -> float {
+        const float inset = (std::min)(14.0f, height * 0.25f);
+        const float usable = (std::max)(2.0f, height - inset * 2.0f);
+        if (slotCount <= 1) return topY + height * 0.5f;
+        return topY + inset + usable * (static_cast<float>(slotIndex) / static_cast<float>(slotCount - 1));
+    };
+
     ImGui::TextDisabled("%zu nodes, %zu edges shown", visibleNodes.size(), visibleEdgeIndices.size());
     ImGui::BeginChild("##ActionsGraphCanvas",
                       ImVec2(0.0f, 0.0f),
@@ -5593,9 +5730,34 @@ static void drawActionsGraphPanel(AppState& state) {
                       ImGuiWindowFlags_HorizontalScrollbar);
 
     const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
-    const ImVec2 contentSize((std::max)(ImGui::GetContentRegionAvail().x, marginX * 2.0f + layerStride * static_cast<float>(uniqueLayers.size()) + 60.0f),
+    const ImVec2 contentSize((std::max)(ImGui::GetContentRegionAvail().x, marginX * 2.0f + layerStride * static_cast<float>(uniqueLayers.size()) + 60.0f * zoom),
                              (std::max)(ImGui::GetContentRegionAvail().y, maxColumnHeight + marginY));
     ImGui::Dummy(contentSize);
+
+    // Pan with middle mouse drag.
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
+        const ImVec2 delta = ImGui::GetIO().MouseDelta;
+        ImGui::SetScrollX(ImGui::GetScrollX() - delta.x);
+        ImGui::SetScrollY(ImGui::GetScrollY() - delta.y);
+    }
+    // Zoom with mouse wheel; keep the point under the cursor stationary.
+    if (ImGui::IsWindowHovered()) {
+        const float wheel = ImGui::GetIO().MouseWheel;
+        if (wheel != 0.0f) {
+            const float oldZoom = state.actionsGraphZoom;
+            float newZoom = oldZoom * (1.0f + wheel * 0.12f);
+            newZoom = (std::max)(0.4f, (std::min)(newZoom, 2.5f));
+            if (newZoom != oldZoom) {
+                const ImVec2 mouse = ImGui::GetIO().MousePos;
+                const float mx = mouse.x - canvasOrigin.x + ImGui::GetScrollX();
+                const float my = mouse.y - canvasOrigin.y + ImGui::GetScrollY();
+                const float ratio = newZoom / oldZoom;
+                state.actionsGraphZoom = newZoom;
+                ImGui::SetScrollX(mx * ratio - (mouse.x - canvasOrigin.x));
+                ImGui::SetScrollY(my * ratio - (mouse.y - canvasOrigin.y));
+            }
+        }
+    }
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     const float scrollX = ImGui::GetScrollX();
@@ -5605,6 +5767,7 @@ static void drawActionsGraphPanel(AppState& state) {
                       canvasOrigin.y + local.y - scrollY);
     };
 
+    // Hit testing.
     int hoveredNodeIndex = -1;
     int clickedNodeIndex = -1;
     for (int actionIndex : visibleNodes) {
@@ -5622,20 +5785,70 @@ static void drawActionsGraphPanel(AppState& state) {
         setSelectedActionIndex(state, clickedNodeIndex);
     }
 
-    for (int edgeIndex : visibleEdgeIndices) {
-        const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(edgeIndex)];
+    // Column headers (scroll with content; remain at top of canvas).
+    for (size_t i = 0; i < uniqueLayers.size(); ++i) {
+        if (nodesPerLayer[i].empty()) continue;
+        const int layer = uniqueLayers[i];
+        std::string label;
+        const bool isDisconnected = showFullGraph && firstDisconnectedLayer != INT_MAX && layer >= firstDisconnectedLayer;
+        if (isDisconnected) {
+            label = "Orphan";
+        } else if (layer == 0) {
+            label = hasSelection ? "Selected" : "Start";
+        } else if (layer < 0) {
+            char tmp[16]; snprintf(tmp, sizeof(tmp), "%d", layer); label = tmp;
+        } else {
+            char tmp[16]; snprintf(tmp, sizeof(tmp), "+%d", layer); label = tmp;
+        }
+        const ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
+        const float cx = layerXCenter[i];
+        const ImVec2 pos = toScreen(ImVec2(cx - textSize.x * 0.5f, headerY));
+        drawList->AddText(pos, IM_COL32(150, 162, 180, 230), label.c_str());
+    }
+
+    // Disconnected separator line.
+    if (firstDisconnectedLayer != INT_MAX) {
+        size_t firstIdx = 0;
+        bool found = false;
+        for (size_t i = 0; i < uniqueLayers.size(); ++i) {
+            if (uniqueLayers[i] >= firstDisconnectedLayer) { firstIdx = i; found = true; break; }
+        }
+        if (found && firstIdx > 0) {
+            const float prevX = layerXCenter[firstIdx - 1];
+            const float prevHalf = nodeSizes[static_cast<size_t>(nodesPerLayer[firstIdx - 1].front())].x * 0.5f;
+            const float thisX = layerXCenter[firstIdx];
+            const float thisHalf = nodeSizes[static_cast<size_t>(nodesPerLayer[firstIdx].front())].x * 0.5f;
+            const float sepX = (prevX + prevHalf + thisX - thisHalf) * 0.5f;
+            const ImVec2 a = toScreen(ImVec2(sepX, headerY - 6.0f * zoom));
+            const ImVec2 b = toScreen(ImVec2(sepX, maxColumnHeight + 12.0f * zoom));
+            drawList->AddLine(a, b, IM_COL32(70, 78, 92, 200), 1.0f);
+            const char* dlabel = "Disconnected";
+            const ImVec2 lsize = ImGui::CalcTextSize(dlabel);
+            const ImVec2 lp = toScreen(ImVec2(sepX + 6.0f * zoom, headerY));
+            drawList->AddText(lp, IM_COL32(120, 132, 150, 230), dlabel);
+            (void)lsize;
+        }
+    }
+
+    // Edges.
+    auto computeEdgeEndpoints = [&](const ActionsGraphEdgeRecord& edge, int edgeIndex, ImVec2& start, ImVec2& endTip) {
         const ImVec2 fromPos = nodePositions[static_cast<size_t>(edge.fromActionIndex)];
         const ImVec2 toPos = nodePositions[static_cast<size_t>(edge.toActionIndex)];
-        if (fromPos.x < 0.0f || toPos.x < 0.0f) continue;
         const ImVec2 fromSize = nodeSizes[static_cast<size_t>(edge.fromActionIndex)];
         const ImVec2 toSize = nodeSizes[static_cast<size_t>(edge.toActionIndex)];
-        const ImVec2 start = toScreen(ImVec2(fromPos.x + fromSize.x, fromPos.y + fromSize.y * 0.5f));
-        const ImVec2 endTip = toScreen(ImVec2(toPos.x, toPos.y + toSize.y * 0.5f));
-        const ImVec2 arrowBase(endTip.x - 10.0f, endTip.y);
-        const ImVec2 bendPoint(arrowBase.x - 18.0f, arrowBase.y);
-        const float controlOffset = (std::max)(44.0f, std::abs(bendPoint.x - start.x) * 0.32f);
-        const ImVec2 cp1(start.x + controlOffset, start.y);
-        const ImVec2 cp2(bendPoint.x - (std::max)(30.0f, controlOffset * 0.45f), bendPoint.y);
+        const EdgeEndpointSlot& osl = outSlot[static_cast<size_t>(edgeIndex)];
+        const EdgeEndpointSlot& isl = inSlot[static_cast<size_t>(edgeIndex)];
+        const float startY = slotY(fromPos.y, fromSize.y, osl.slotIndex, osl.slotCount);
+        const float endY = slotY(toPos.y, toSize.y, isl.slotIndex, isl.slotCount);
+        start = ImVec2(fromPos.x + fromSize.x, startY);
+        endTip = ImVec2(toPos.x, endY);
+    };
+
+    for (int edgeIndex : visibleEdgeIndices) {
+        const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(edgeIndex)];
+        ImVec2 startLocal, endLocal;
+        computeEdgeEndpoints(edge, edgeIndex, startLocal, endLocal);
+
         const bool edgeTouchesSelection =
             edge.fromActionIndex == state.selectedActionIndex || edge.toActionIndex == state.selectedActionIndex;
         const bool edgeTouchesHover =
@@ -5646,13 +5859,51 @@ static void drawActionsGraphPanel(AppState& state) {
             edgeColor = IM_COL32((edgeColor >> IM_COL32_R_SHIFT) & 0xFF,
                                  (edgeColor >> IM_COL32_G_SHIFT) & 0xFF,
                                  (edgeColor >> IM_COL32_B_SHIFT) & 0xFF,
-                                 96);
+                                 140);
         }
-        drawList->AddBezierCubic(start, cp1, cp2, bendPoint, edgeColor, 2.25f, 24);
-        drawList->AddLine(bendPoint, arrowBase, edgeColor, 2.25f);
-        drawActionsGraphArrow(drawList, arrowBase, endTip, edgeColor);
+        const float thickness = emphasizeEdge ? 2.6f : 2.0f;
+
+        const bool forward = endLocal.x > startLocal.x + 8.0f;
+        if (forward) {
+            // Orthogonal Z-route: out-stub, vertical, in-stub, arrow.
+            const float stub = 14.0f * zoom;
+            const float arrowGap = 8.0f * zoom;
+            const float midX = (startLocal.x + endLocal.x) * 0.5f;
+            const ImVec2 p0 = toScreen(startLocal);
+            const ImVec2 p1 = toScreen(ImVec2(midX, startLocal.y));
+            const ImVec2 p2 = toScreen(ImVec2(midX, endLocal.y));
+            const ImVec2 arrowBase = toScreen(ImVec2(endLocal.x - arrowGap, endLocal.y));
+            const ImVec2 endScreen = toScreen(endLocal);
+            (void)stub;
+            // Smooth corners with small bezier joins.
+            drawList->AddLine(p0, ImVec2(p1.x - 12.0f, p1.y), edgeColor, thickness);
+            drawList->AddBezierQuadratic(ImVec2(p1.x - 12.0f, p1.y), p1, ImVec2(p1.x, p1.y + (p2.y > p1.y ? 12.0f : -12.0f)), edgeColor, thickness, 12);
+            drawList->AddLine(ImVec2(p1.x, p1.y + (p2.y > p1.y ? 12.0f : -12.0f)),
+                              ImVec2(p2.x, p2.y - (p2.y > p1.y ? 12.0f : -12.0f)),
+                              edgeColor, thickness);
+            drawList->AddBezierQuadratic(ImVec2(p2.x, p2.y - (p2.y > p1.y ? 12.0f : -12.0f)), p2, ImVec2(p2.x + 12.0f, p2.y), edgeColor, thickness, 12);
+            drawList->AddLine(ImVec2(p2.x + 12.0f, p2.y), arrowBase, edgeColor, thickness);
+            drawActionsGraphArrow(drawList, arrowBase, endScreen, edgeColor);
+        } else {
+            // Backward / sideways: cubic bezier arcing back, arrow at target.
+            const ImVec2 startScreen = toScreen(startLocal);
+            const ImVec2 endScreen = toScreen(endLocal);
+            const float bend = 60.0f * zoom;
+            const ImVec2 cp1(startScreen.x + bend, startScreen.y);
+            const ImVec2 cp2(endScreen.x - bend, endScreen.y);
+            drawList->AddBezierCubic(startScreen, cp1, cp2, endScreen, edgeColor, thickness, 28);
+            // Arrow direction along last bezier tangent (approx: cp2 -> end).
+            ImVec2 dir(endScreen.x - cp2.x, endScreen.y - cp2.y);
+            const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+            if (len > 0.001f) {
+                dir.x /= len; dir.y /= len;
+                const ImVec2 arrowBase(endScreen.x - dir.x * 10.0f, endScreen.y - dir.y * 10.0f);
+                drawActionsGraphArrow(drawList, arrowBase, endScreen, edgeColor);
+            }
+        }
     }
 
+    // Nodes.
     for (int actionIndex : visibleNodes) {
         const ActionsGraphNodeRecord& node = graph.nodes[static_cast<size_t>(actionIndex)];
         const ImVec2 localPos = nodePositions[static_cast<size_t>(actionIndex)];
@@ -5662,44 +5913,51 @@ static void drawActionsGraphPanel(AppState& state) {
 
         const bool hovered = hoveredNodeIndex == actionIndex;
         const bool selected = actionIndex == state.selectedActionIndex;
-        const ImU32 bgColor = selected
-            ? IM_COL32(34, 76, 125, 238)
-            : (node.container ? IM_COL32(34, 38, 46, hovered ? 238 : 222)
-                              : IM_COL32(26, 30, 36, hovered ? 236 : 222));
+        const ImU32 bgColor = node.container
+            ? IM_COL32(30, 34, 42, hovered ? 238 : 222)
+            : IM_COL32(24, 28, 34, hovered ? 236 : 222);
         const ImU32 borderColor = selected
-            ? IM_COL32(110, 186, 255, 255)
-            : (hovered ? IM_COL32(90, 106, 126, 245) : IM_COL32(56, 66, 82, 230));
+            ? IM_COL32(140, 200, 255, 255)
+            : (hovered ? IM_COL32(120, 132, 152, 245) : IM_COL32(58, 68, 84, 230));
+        const float rounding = 8.0f * zoom;
 
-        drawList->AddRectFilled(screenMin, screenMax, bgColor, 8.0f);
-        drawList->AddRect(screenMin, screenMax, borderColor, 8.0f, 0, selected ? 2.4f : 1.6f);
-        if (node.dirty) {
-            drawList->AddCircleFilled(ImVec2(screenMax.x - 13.0f, screenMin.y + 13.0f), 4.2f, IM_COL32(255, 195, 86, 255), 12);
+        // Selection glow: faint outer rect.
+        if (selected) {
+            drawList->AddRect(ImVec2(screenMin.x - 4.0f, screenMin.y - 4.0f),
+                              ImVec2(screenMax.x + 4.0f, screenMax.y + 4.0f),
+                              IM_COL32(110, 186, 255, 90),
+                              rounding + 4.0f, 0, 3.0f);
+            drawList->AddRect(ImVec2(screenMin.x - 2.0f, screenMin.y - 2.0f),
+                              ImVec2(screenMax.x + 2.0f, screenMax.y + 2.0f),
+                              IM_COL32(140, 200, 255, 150),
+                              rounding + 2.0f, 0, 2.0f);
         }
 
+        drawList->AddRectFilled(screenMin, screenMax, bgColor, rounding);
+        drawList->AddRect(screenMin, screenMax, borderColor, rounding, 0, selected ? 2.4f : 1.6f);
+
+        // Left accent stripe — container vs leaf, plus active flag.
+        const ImU32 accentColor = node.container
+            ? IM_COL32(118, 158, 214, 220)
+            : (node.initiallyActive ? IM_COL32(96, 200, 140, 230) : IM_COL32(214, 168, 92, 220));
+        const float stripeW = 4.0f * zoom;
+        drawList->AddRectFilled(screenMin,
+                                ImVec2(screenMin.x + stripeW, screenMax.y),
+                                accentColor,
+                                rounding, ImDrawFlags_RoundCornersLeft);
+
         const std::string title = actionsGraphNodeTitle(node.name);
-        const float textWidth = size.x - 24.0f;
-        const float flowColumnWidth = (size.x - 36.0f) * 0.5f;
+        const float textWidth = size.x - (stripeW + 18.0f * zoom);
         const std::string metaLine = actionsGraphClipTextToWidth("#" + std::to_string(node.actionId) + "  " + node.typeLabel,
                                                                  textWidth);
-        const std::string outgoingSummary =
-            actionsGraphClipTextToWidth(actionsGraphEdgeKindsSummary(graph, node.outgoingEdgeIndices, true), flowColumnWidth);
-        const std::string incomingSummary =
-            actionsGraphClipTextToWidth(actionsGraphEdgeKindsSummary(graph, node.incomingEdgeIndices, false), flowColumnWidth);
 
         drawList->PushClipRect(screenMin, screenMax, true);
-        drawList->AddText(ImVec2(screenMin.x + 12.0f, screenMin.y + 10.0f),
+        drawList->AddText(ImVec2(screenMin.x + stripeW + 8.0f * zoom, screenMin.y + 10.0f * zoom),
                           IM_COL32(242, 246, 252, 255),
                           title.c_str());
-        drawList->AddText(ImVec2(screenMin.x + 12.0f, screenMin.y + 30.0f),
+        drawList->AddText(ImVec2(screenMin.x + stripeW + 8.0f * zoom, screenMin.y + 30.0f * zoom),
                           IM_COL32(176, 188, 204, 255),
                           metaLine.c_str());
-        drawList->AddText(ImVec2(screenMin.x + 12.0f, screenMin.y + 54.0f),
-                          IM_COL32(255, 194, 136, 255),
-                          incomingSummary.c_str());
-        const ImVec2 outgoingSize = ImGui::CalcTextSize(outgoingSummary.c_str());
-        drawList->AddText(ImVec2(screenMax.x - 12.0f - outgoingSize.x, screenMin.y + 54.0f),
-                          IM_COL32(140, 208, 255, 255),
-                          outgoingSummary.c_str());
 
         std::string modeChip = "Trig";
         if (node.expirationModeId == 1) modeChip = "Exec";
@@ -5707,15 +5965,59 @@ static void drawActionsGraphPanel(AppState& state) {
         else if (node.expirationModeId == 3) modeChip = "Never";
         else if (node.expirationModeId == 4) modeChip = "Fail";
 
-        ImVec2 chipCursor(screenMin.x + 12.0f, screenMin.y + 82.0f);
-        drawActionsGraphChip(drawList, chipCursor, modeChip.c_str(), IM_COL32(54, 66, 86, 220), IM_COL32(235, 242, 250, 255));
+        const ImU32 modeBg = (node.expirationModeId == 2) ? IM_COL32(54, 100, 72, 220)
+                            : (node.expirationModeId == 4) ? IM_COL32(120, 60, 60, 220)
+                            : (node.expirationModeId == 3) ? IM_COL32(60, 60, 70, 200)
+                            : IM_COL32(54, 66, 86, 220);
+        ImVec2 chipCursor(screenMin.x + stripeW + 8.0f * zoom, screenMin.y + 58.0f * zoom);
+        drawActionsGraphChip(drawList, chipCursor, modeChip.c_str(), modeBg, IM_COL32(235, 242, 250, 255));
         if (node.initiallyActive) {
             drawActionsGraphChip(drawList, chipCursor, "Init", IM_COL32(52, 122, 94, 220), IM_COL32(240, 250, 244, 255));
         }
         if (node.dirty) {
-            drawActionsGraphChip(drawList, chipCursor, "Dirty", IM_COL32(142, 98, 34, 230), IM_COL32(255, 245, 222, 255));
+            drawActionsGraphChip(drawList, chipCursor, "Dirty", IM_COL32(168, 116, 40, 230), IM_COL32(255, 245, 222, 255));
         }
         drawList->PopClipRect();
+
+        // Edge attach-point dots, color-coded by edge kind.
+        const float dotR = 3.5f * zoom;
+        for (int e : node.outgoingEdgeIndices) {
+            const EdgeEndpointSlot& sl = outSlot[static_cast<size_t>(e)];
+            if (sl.edgeIndex < 0) continue;
+            const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(e)];
+            const float y = slotY(localPos.y, size.y, sl.slotIndex, sl.slotCount);
+            const ImVec2 c = toScreen(ImVec2(localPos.x + size.x, y));
+            drawList->AddCircleFilled(c, dotR, actionsGraphEdgeColor(edge.kind), 12);
+            drawList->AddCircle(c, dotR, IM_COL32(20, 24, 30, 230), 12, 1.0f);
+        }
+        for (int e : node.incomingEdgeIndices) {
+            const EdgeEndpointSlot& sl = inSlot[static_cast<size_t>(e)];
+            if (sl.edgeIndex < 0) continue;
+            const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(e)];
+            const float y = slotY(localPos.y, size.y, sl.slotIndex, sl.slotCount);
+            const ImVec2 c = toScreen(ImVec2(localPos.x, y));
+            drawList->AddCircleFilled(c, dotR, actionsGraphEdgeColor(edge.kind), 12);
+            drawList->AddCircle(c, dotR, IM_COL32(20, 24, 30, 230), 12, 1.0f);
+        }
+    }
+
+    // Hover tooltip.
+    if (hoveredNodeIndex >= 0) {
+        const ActionsGraphNodeRecord& node = graph.nodes[static_cast<size_t>(hoveredNodeIndex)];
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted(node.name.empty() ? "(unnamed)" : node.name.c_str());
+        ImGui::TextDisabled("#%d  %s%s", node.actionId,
+                            node.typeFourCC.empty() ? "container" : node.typeFourCC.c_str(),
+                            node.container ? "" : "");
+        if (!node.typeLabel.empty() && node.typeLabel != node.typeFourCC) {
+            ImGui::TextDisabled("%s", node.typeLabel.c_str());
+        }
+        const std::string outs = actionsGraphEdgeKindsSummary(graph, node.outgoingEdgeIndices, true);
+        const std::string ins = actionsGraphEdgeKindsSummary(graph, node.incomingEdgeIndices, false);
+        ImGui::Separator();
+        ImGui::Text("%s", ins.c_str());
+        ImGui::Text("%s", outs.c_str());
+        ImGui::EndTooltip();
     }
 
     ImGui::EndChild();
