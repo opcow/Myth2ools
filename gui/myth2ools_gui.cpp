@@ -5784,6 +5784,7 @@ static void drawActionsGraphPanel(AppState& state) {
     std::vector<ImVec2> nodePositions(graph.nodes.size(), ImVec2(-1.0f, -1.0f));
     std::vector<ImVec2> nodeSizes(graph.nodes.size(), ImVec2(0.0f, 0.0f));
     std::vector<float> layerXCenter(uniqueLayers.size(), 0.0f);
+    float maxContentRight = 0.0f;
     float maxColumnHeight = 0.0f;
     for (size_t layerIdx = 0; layerIdx < nodesPerLayer.size(); ++layerIdx) {
         const auto& layerNodes = nodesPerLayer[layerIdx];
@@ -5797,6 +5798,7 @@ static void drawActionsGraphPanel(AppState& state) {
             const float x = marginX + layerStride * static_cast<float>(layerIdx);
             const float y = marginY + rowStride * static_cast<float>(row);
             nodePositions[static_cast<size_t>(actionIndex)] = ImVec2(x, y);
+            maxContentRight = (std::max)(maxContentRight, x + size.x);
             maxColumnHeight = (std::max)(maxColumnHeight, y + size.y);
         }
         if (!layerNodes.empty()) {
@@ -5917,7 +5919,9 @@ static void drawActionsGraphPanel(AppState& state) {
     ImGuiWindow* canvasWindow = ImGui::GetCurrentWindow();
 
     const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
-    const ImVec2 contentSize((std::max)(ImGui::GetContentRegionAvail().x, marginX * 2.0f + layerStride * static_cast<float>(uniqueLayers.size()) + 60.0f * zoom),
+    const float estimatedWidth = marginX * 2.0f + layerStride * static_cast<float>(uniqueLayers.size()) + 60.0f * zoom;
+    const float contentWidth = (std::max)(estimatedWidth, maxContentRight + marginX + 40.0f * zoom);
+    const ImVec2 contentSize((std::max)(ImGui::GetContentRegionAvail().x, contentWidth),
                              (std::max)(ImGui::GetContentRegionAvail().y, maxColumnHeight + marginY));
     ImGui::Dummy(contentSize);
 
@@ -6009,9 +6013,9 @@ static void drawActionsGraphPanel(AppState& state) {
         return true;
     };
 
-    // Build a list of nodes actually visible on screen — skip off-screen entries for hit
-    // testing, ImGui item creation, and node rendering. Drops the per-frame cost from
-    // O(N) to O(visible_in_viewport) which matters a lot for "Show Full Graph".
+    // Build a list of nodes actually visible on screen for hit testing only. We still
+    // render the full visible node set below because aggressive culling here was causing
+    // cards to pop in/out while their edges remained on screen.
     std::vector<int> onScreenNodes;
     onScreenNodes.reserve(visibleNodes.size());
     for (int actionIndex : visibleNodes) {
@@ -6258,8 +6262,8 @@ static void drawActionsGraphPanel(AppState& state) {
         }
     }
 
-    // Nodes (only those actually inside the viewport).
-    for (int actionIndex : onScreenNodes) {
+    // Nodes.
+    for (int actionIndex : visibleNodes) {
         const ActionsGraphNodeRecord& node = graph.nodes[static_cast<size_t>(actionIndex)];
         const ImVec2 localPos = nodePositions[static_cast<size_t>(actionIndex)];
         const ImVec2 size = nodeSizes[static_cast<size_t>(actionIndex)];
