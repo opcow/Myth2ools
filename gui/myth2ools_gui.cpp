@@ -742,6 +742,7 @@ struct AppState {
     bool actionsGraphShowFull = false;
     int actionsGraphFocusDepth = 1;
     float actionsGraphZoom = 1.0f;
+    std::set<std::string> actionsGraphHiddenEdgeKinds;
     ImGuiID actionsGraphDefaultDockId = 0;
     enum PendingDiscard { PENDING_NONE = 0, PENDING_RELOAD = 1, PENDING_QUIT = 2, PENDING_RUN = 3 };
     PendingDiscard pendingDiscard = PENDING_NONE;
@@ -1684,13 +1685,37 @@ static void drawActionsGraphChip(ImDrawList* drawList,
     cursor.x += size.x + 6.0f;
 }
 
-static void drawActionsGraphLegendChip(const char* text, ImU32 color) {
+static bool drawActionsGraphLegendChip(const char* text, ImU32 color, bool active) {
+    ImGui::PushID(text);
     const ImVec2 start = ImGui::GetCursorScreenPos();
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    drawList->AddLine(ImVec2(start.x, start.y + 9.0f), ImVec2(start.x + 16.0f, start.y + 9.0f), color, 2.5f);
-    ImGui::Dummy(ImVec2(18.0f, 0.0f));
-    ImGui::SameLine(0.0f, 4.0f);
-    ImGui::TextDisabled("%s", text);
+    const ImVec2 textSize = ImGui::CalcTextSize(text);
+    const float w = 22.0f + textSize.x + 6.0f;
+    const float h = (std::max)(textSize.y, 14.0f) + 4.0f;
+    const bool clicked = ImGui::InvisibleButton("##chip", ImVec2(w, h));
+    const bool hovered = ImGui::IsItemHovered();
+    const ImU32 lineCol = active
+        ? color
+        : IM_COL32((color >> IM_COL32_R_SHIFT) & 0xFF,
+                   (color >> IM_COL32_G_SHIFT) & 0xFF,
+                   (color >> IM_COL32_B_SHIFT) & 0xFF,
+                   70);
+    const ImU32 textCol = active ? IM_COL32(214, 222, 234, 255) : IM_COL32(110, 118, 130, 220);
+    drawList->AddLine(ImVec2(start.x + 2.0f, start.y + h * 0.5f),
+                      ImVec2(start.x + 18.0f, start.y + h * 0.5f), lineCol, 2.5f);
+    drawList->AddText(ImVec2(start.x + 22.0f, start.y + (h - textSize.y) * 0.5f), textCol, text);
+    if (!active) {
+        const float strikeY = start.y + h * 0.5f;
+        drawList->AddLine(ImVec2(start.x + 22.0f, strikeY),
+                          ImVec2(start.x + 22.0f + textSize.x, strikeY),
+                          IM_COL32(110, 118, 130, 200), 1.0f);
+    }
+    if (hovered) {
+        drawList->AddRect(start, ImVec2(start.x + w, start.y + h),
+                          IM_COL32(110, 122, 142, 200), 4.0f, 0, 1.0f);
+    }
+    ImGui::PopID();
+    return clicked;
 }
 
 static void drawActionsGraphArrow(ImDrawList* drawList,
@@ -5454,8 +5479,16 @@ static void drawActionsGraphPanel(AppState& state) {
 
     static const char* kLegendKinds[] = {"acos", "acof", "acoa", "deac", "acti", "resu"};
     for (const char* kind : kLegendKinds) {
+        ImGui::SameLine(0.0f, 8.0f);
+        const bool active = state.actionsGraphHiddenEdgeKinds.count(kind) == 0;
+        if (drawActionsGraphLegendChip(kind, actionsGraphEdgeColor(kind), active)) {
+            if (active) state.actionsGraphHiddenEdgeKinds.insert(kind);
+            else state.actionsGraphHiddenEdgeKinds.erase(kind);
+        }
+    }
+    if (!state.actionsGraphHiddenEdgeKinds.empty()) {
         ImGui::SameLine(0.0f, 12.0f);
-        drawActionsGraphLegendChip(kind, actionsGraphEdgeColor(kind));
+        if (ImGui::SmallButton("All")) state.actionsGraphHiddenEdgeKinds.clear();
     }
     ImGui::Separator();
 
@@ -5664,14 +5697,57 @@ static void drawActionsGraphPanel(AppState& state) {
         }
     }
 
+    auto kindHidden = [&](const std::string& kind) {
+        return state.actionsGraphHiddenEdgeKinds.count(kind) > 0;
+    };
+
     std::vector<int> visibleEdgeIndices;
     visibleEdgeIndices.reserve(graph.edges.size());
     for (size_t i = 0; i < graph.edges.size(); ++i) {
         const ActionsGraphEdgeRecord& edge = graph.edges[i];
         if (visibleActionIndices.count(edge.fromActionIndex) == 0) continue;
         if (visibleActionIndices.count(edge.toActionIndex) == 0) continue;
+        if (kindHidden(edge.kind)) continue;
         visibleEdgeIndices.push_back(static_cast<int>(i));
     }
+
+    // Reachable subtree from selection (both directions, traversing only visible edges).
+    std::set<int> downstreamFromSel;
+    std::set<int> upstreamFromSel;
+    if (hasSelection && state.selectedActionIndex >= 0 &&
+        visibleActionIndices.count(state.selectedActionIndex) > 0) {
+        const int sel = state.selectedActionIndex;
+        std::deque<int> q;
+        downstreamFromSel.insert(sel); q.push_back(sel);
+        while (!q.empty()) {
+            const int n = q.front(); q.pop_front();
+            const ActionsGraphNodeRecord& nd = graph.nodes[static_cast<size_t>(n)];
+            for (int e : nd.outgoingEdgeIndices) {
+                const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(e)];
+                if (visibleActionIndices.count(edge.toActionIndex) == 0) continue;
+                if (kindHidden(edge.kind)) continue;
+                if (downstreamFromSel.insert(edge.toActionIndex).second) q.push_back(edge.toActionIndex);
+            }
+        }
+        q.clear();
+        upstreamFromSel.insert(sel); q.push_back(sel);
+        while (!q.empty()) {
+            const int n = q.front(); q.pop_front();
+            const ActionsGraphNodeRecord& nd = graph.nodes[static_cast<size_t>(n)];
+            for (int e : nd.incomingEdgeIndices) {
+                const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(e)];
+                if (visibleActionIndices.count(edge.fromActionIndex) == 0) continue;
+                if (kindHidden(edge.kind)) continue;
+                if (upstreamFromSel.insert(edge.fromActionIndex).second) q.push_back(edge.fromActionIndex);
+            }
+        }
+    }
+    auto inSubtree = [&](int n) -> bool {
+        return downstreamFromSel.count(n) > 0 || upstreamFromSel.count(n) > 0;
+    };
+    auto edgeInSubtree = [&](const ActionsGraphEdgeRecord& edge) -> bool {
+        return inSubtree(edge.fromActionIndex) && inSubtree(edge.toActionIndex);
+    };
 
     // Group outgoing/incoming edges per node, ordered by neighbor row so attach points fan
     // out predictably along the right/left edges.
@@ -5684,6 +5760,7 @@ static void drawActionsGraphPanel(AppState& state) {
         for (int e : node.outgoingEdgeIndices) {
             const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(e)];
             if (visibleActionIndices.count(edge.toActionIndex) == 0) continue;
+            if (kindHidden(edge.kind)) continue;
             outs.push_back(e);
         }
         std::sort(outs.begin(), outs.end(), [&](int a, int b) {
@@ -5701,6 +5778,7 @@ static void drawActionsGraphPanel(AppState& state) {
         for (int e : node.incomingEdgeIndices) {
             const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(e)];
             if (visibleActionIndices.count(edge.fromActionIndex) == 0) continue;
+            if (kindHidden(edge.kind)) continue;
             ins.push_back(e);
         }
         std::sort(ins.begin(), ins.end(), [&](int a, int b) {
@@ -5844,62 +5922,116 @@ static void drawActionsGraphPanel(AppState& state) {
         endTip = ImVec2(toPos.x, endY);
     };
 
+    // Precompute screen-space polylines so we can hit-test before drawing.
+    struct EdgePolyline { std::vector<ImVec2> pts; bool forward; bool valid; };
+    std::vector<EdgePolyline> edgePolylines(graph.edges.size());
     for (int edgeIndex : visibleEdgeIndices) {
         const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(edgeIndex)];
         ImVec2 startLocal, endLocal;
         computeEdgeEndpoints(edge, edgeIndex, startLocal, endLocal);
-
-        const bool edgeTouchesSelection =
-            edge.fromActionIndex == state.selectedActionIndex || edge.toActionIndex == state.selectedActionIndex;
-        const bool edgeTouchesHover =
-            hoveredNodeIndex >= 0 && (edge.fromActionIndex == hoveredNodeIndex || edge.toActionIndex == hoveredNodeIndex);
-        const bool emphasizeEdge = edgeTouchesSelection || edgeTouchesHover;
-        ImU32 edgeColor = actionsGraphEdgeColor(edge.kind);
-        if (!emphasizeEdge && state.selectedActionIndex >= 0) {
-            edgeColor = IM_COL32((edgeColor >> IM_COL32_R_SHIFT) & 0xFF,
-                                 (edgeColor >> IM_COL32_G_SHIFT) & 0xFF,
-                                 (edgeColor >> IM_COL32_B_SHIFT) & 0xFF,
-                                 140);
-        }
-        const float thickness = emphasizeEdge ? 2.6f : 2.0f;
-
-        const bool forward = endLocal.x > startLocal.x + 8.0f;
-        if (forward) {
-            // Orthogonal Z-route: out-stub, vertical, in-stub, arrow.
-            const float stub = 14.0f * zoom;
+        EdgePolyline& pl = edgePolylines[static_cast<size_t>(edgeIndex)];
+        pl.valid = true;
+        pl.forward = endLocal.x > startLocal.x + 8.0f;
+        if (pl.forward) {
             const float arrowGap = 8.0f * zoom;
             const float midX = (startLocal.x + endLocal.x) * 0.5f;
-            const ImVec2 p0 = toScreen(startLocal);
-            const ImVec2 p1 = toScreen(ImVec2(midX, startLocal.y));
-            const ImVec2 p2 = toScreen(ImVec2(midX, endLocal.y));
-            const ImVec2 arrowBase = toScreen(ImVec2(endLocal.x - arrowGap, endLocal.y));
-            const ImVec2 endScreen = toScreen(endLocal);
-            (void)stub;
-            // Smooth corners with small bezier joins.
-            drawList->AddLine(p0, ImVec2(p1.x - 12.0f, p1.y), edgeColor, thickness);
-            drawList->AddBezierQuadratic(ImVec2(p1.x - 12.0f, p1.y), p1, ImVec2(p1.x, p1.y + (p2.y > p1.y ? 12.0f : -12.0f)), edgeColor, thickness, 12);
-            drawList->AddLine(ImVec2(p1.x, p1.y + (p2.y > p1.y ? 12.0f : -12.0f)),
-                              ImVec2(p2.x, p2.y - (p2.y > p1.y ? 12.0f : -12.0f)),
-                              edgeColor, thickness);
-            drawList->AddBezierQuadratic(ImVec2(p2.x, p2.y - (p2.y > p1.y ? 12.0f : -12.0f)), p2, ImVec2(p2.x + 12.0f, p2.y), edgeColor, thickness, 12);
-            drawList->AddLine(ImVec2(p2.x + 12.0f, p2.y), arrowBase, edgeColor, thickness);
-            drawActionsGraphArrow(drawList, arrowBase, endScreen, edgeColor);
+            pl.pts.push_back(toScreen(startLocal));
+            pl.pts.push_back(toScreen(ImVec2(midX, startLocal.y)));
+            pl.pts.push_back(toScreen(ImVec2(midX, endLocal.y)));
+            pl.pts.push_back(toScreen(ImVec2(endLocal.x - arrowGap, endLocal.y)));
+            pl.pts.push_back(toScreen(endLocal));
         } else {
-            // Backward / sideways: cubic bezier arcing back, arrow at target.
             const ImVec2 startScreen = toScreen(startLocal);
             const ImVec2 endScreen = toScreen(endLocal);
             const float bend = 60.0f * zoom;
             const ImVec2 cp1(startScreen.x + bend, startScreen.y);
             const ImVec2 cp2(endScreen.x - bend, endScreen.y);
-            drawList->AddBezierCubic(startScreen, cp1, cp2, endScreen, edgeColor, thickness, 28);
-            // Arrow direction along last bezier tangent (approx: cp2 -> end).
-            ImVec2 dir(endScreen.x - cp2.x, endScreen.y - cp2.y);
-            const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
-            if (len > 0.001f) {
-                dir.x /= len; dir.y /= len;
-                const ImVec2 arrowBase(endScreen.x - dir.x * 10.0f, endScreen.y - dir.y * 10.0f);
-                drawActionsGraphArrow(drawList, arrowBase, endScreen, edgeColor);
+            const int samples = 22;
+            for (int i = 0; i <= samples; ++i) {
+                const float t = static_cast<float>(i) / static_cast<float>(samples);
+                const float u = 1.0f - t;
+                const float x = u*u*u*startScreen.x + 3*u*u*t*cp1.x + 3*u*t*t*cp2.x + t*t*t*endScreen.x;
+                const float y = u*u*u*startScreen.y + 3*u*u*t*cp1.y + 3*u*t*t*cp2.y + t*t*t*endScreen.y;
+                pl.pts.emplace_back(x, y);
             }
+        }
+    }
+
+    // Edge hit test (only when no node is hovered).
+    int hoveredEdgeIndex = -1;
+    if (hoveredNodeIndex < 0 && ImGui::IsWindowHovered()) {
+        const ImVec2 mp = ImGui::GetIO().MousePos;
+        float best = 7.0f;
+        for (int edgeIndex : visibleEdgeIndices) {
+            const auto& pl = edgePolylines[static_cast<size_t>(edgeIndex)];
+            if (!pl.valid || pl.pts.size() < 2) continue;
+            for (size_t i = 1; i < pl.pts.size(); ++i) {
+                const ImVec2& a = pl.pts[i - 1];
+                const ImVec2& b = pl.pts[i];
+                const float abx = b.x - a.x, aby = b.y - a.y;
+                const float apx = mp.x - a.x, apy = mp.y - a.y;
+                const float lenSq = abx * abx + aby * aby;
+                float t = lenSq > 0.0f ? (apx * abx + apy * aby) / lenSq : 0.0f;
+                t = (std::max)(0.0f, (std::min)(t, 1.0f));
+                const float cx = a.x + t * abx - mp.x;
+                const float cy = a.y + t * aby - mp.y;
+                const float d = std::sqrt(cx * cx + cy * cy);
+                if (d < best) { best = d; hoveredEdgeIndex = edgeIndex; }
+            }
+        }
+    }
+
+    const bool selectionActive = hasSelection && state.selectedActionIndex >= 0;
+    auto applyAlpha = [](ImU32 color, int alpha) -> ImU32 {
+        return IM_COL32((color >> IM_COL32_R_SHIFT) & 0xFF,
+                        (color >> IM_COL32_G_SHIFT) & 0xFF,
+                        (color >> IM_COL32_B_SHIFT) & 0xFF,
+                        alpha);
+    };
+
+    for (int edgeIndex : visibleEdgeIndices) {
+        const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(edgeIndex)];
+        const EdgePolyline& pl = edgePolylines[static_cast<size_t>(edgeIndex)];
+        if (!pl.valid || pl.pts.size() < 2) continue;
+
+        const bool isHoveredEdge = edgeIndex == hoveredEdgeIndex;
+        const bool touchesSel =
+            selectionActive && (edge.fromActionIndex == state.selectedActionIndex ||
+                                edge.toActionIndex == state.selectedActionIndex);
+        const bool touchesHover =
+            hoveredNodeIndex >= 0 && (edge.fromActionIndex == hoveredNodeIndex ||
+                                      edge.toActionIndex == hoveredNodeIndex);
+        const bool inSub = selectionActive && edgeInSubtree(edge);
+        const bool emphasize = isHoveredEdge || touchesSel || touchesHover;
+
+        ImU32 edgeColor = actionsGraphEdgeColor(edge.kind);
+        float thickness = 2.0f;
+        if (emphasize) {
+            edgeColor = applyAlpha(edgeColor, 255);
+            thickness = 2.8f;
+        } else if (selectionActive && !inSub) {
+            edgeColor = applyAlpha(edgeColor, 70);
+            thickness = 1.5f;
+        } else if (selectionActive && inSub) {
+            edgeColor = applyAlpha(edgeColor, 200);
+            thickness = 2.0f;
+        }
+
+        // Draw the polyline (last segment leads into the arrow tip).
+        const size_t segCount = pl.pts.size();
+        for (size_t i = 1; i + 1 < segCount; ++i) {
+            drawList->AddLine(pl.pts[i - 1], pl.pts[i], edgeColor, thickness);
+        }
+        // Arrow at tip; direction from second-to-last to last.
+        const ImVec2& tipFrom = pl.pts[segCount - 2];
+        const ImVec2& tipTo = pl.pts[segCount - 1];
+        ImVec2 dir(tipTo.x - tipFrom.x, tipTo.y - tipFrom.y);
+        const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+        if (len > 0.001f) {
+            dir.x /= len; dir.y /= len;
+            const ImVec2 arrowBase(tipTo.x - dir.x * 10.0f, tipTo.y - dir.y * 10.0f);
+            drawList->AddLine(tipFrom, arrowBase, edgeColor, thickness);
+            drawActionsGraphArrow(drawList, arrowBase, tipTo, edgeColor);
         }
     }
 
@@ -5913,12 +6045,16 @@ static void drawActionsGraphPanel(AppState& state) {
 
         const bool hovered = hoveredNodeIndex == actionIndex;
         const bool selected = actionIndex == state.selectedActionIndex;
+        const bool faded = selectionActive && !inSubtree(actionIndex) && !selected;
+        const int baseAlpha = faded ? 90 : 222;
+        const int hoverAlpha = faded ? 110 : 238;
         const ImU32 bgColor = node.container
-            ? IM_COL32(30, 34, 42, hovered ? 238 : 222)
-            : IM_COL32(24, 28, 34, hovered ? 236 : 222);
+            ? IM_COL32(30, 34, 42, hovered ? hoverAlpha : baseAlpha)
+            : IM_COL32(24, 28, 34, hovered ? hoverAlpha : baseAlpha);
         const ImU32 borderColor = selected
             ? IM_COL32(140, 200, 255, 255)
-            : (hovered ? IM_COL32(120, 132, 152, 245) : IM_COL32(58, 68, 84, 230));
+            : (hovered ? IM_COL32(120, 132, 152, faded ? 180 : 245)
+                       : IM_COL32(58, 68, 84, faded ? 120 : 230));
         const float rounding = 8.0f * zoom;
 
         // Selection glow: faint outer rect.
@@ -5936,10 +6072,24 @@ static void drawActionsGraphPanel(AppState& state) {
         drawList->AddRectFilled(screenMin, screenMax, bgColor, rounding);
         drawList->AddRect(screenMin, screenMax, borderColor, rounding, 0, selected ? 2.4f : 1.6f);
 
+        // Subtree direction tag in the upper-right corner (when relevant).
+        if (selectionActive && !selected) {
+            const bool down = downstreamFromSel.count(actionIndex) > 0;
+            const bool up = upstreamFromSel.count(actionIndex) > 0;
+            if (down || up) {
+                const ImU32 tagCol = down && up
+                    ? IM_COL32(196, 156, 220, 220)
+                    : (down ? IM_COL32(96, 200, 140, 220) : IM_COL32(140, 184, 230, 220));
+                drawList->AddCircleFilled(ImVec2(screenMax.x - 10.0f * zoom, screenMin.y + 10.0f * zoom),
+                                          3.2f * zoom, tagCol, 12);
+            }
+        }
+
         // Left accent stripe — container vs leaf, plus active flag.
         const ImU32 accentColor = node.container
-            ? IM_COL32(118, 158, 214, 220)
-            : (node.initiallyActive ? IM_COL32(96, 200, 140, 230) : IM_COL32(214, 168, 92, 220));
+            ? IM_COL32(118, 158, 214, faded ? 110 : 220)
+            : (node.initiallyActive ? IM_COL32(96, 200, 140, faded ? 120 : 230)
+                                    : IM_COL32(214, 168, 92, faded ? 110 : 220));
         const float stripeW = 4.0f * zoom;
         drawList->AddRectFilled(screenMin,
                                 ImVec2(screenMin.x + stripeW, screenMax.y),
@@ -5951,12 +6101,14 @@ static void drawActionsGraphPanel(AppState& state) {
         const std::string metaLine = actionsGraphClipTextToWidth("#" + std::to_string(node.actionId) + "  " + node.typeLabel,
                                                                  textWidth);
 
+        const int titleAlpha = faded ? 130 : 255;
+        const int metaAlpha = faded ? 110 : 255;
         drawList->PushClipRect(screenMin, screenMax, true);
         drawList->AddText(ImVec2(screenMin.x + stripeW + 8.0f * zoom, screenMin.y + 10.0f * zoom),
-                          IM_COL32(242, 246, 252, 255),
+                          IM_COL32(242, 246, 252, titleAlpha),
                           title.c_str());
         drawList->AddText(ImVec2(screenMin.x + stripeW + 8.0f * zoom, screenMin.y + 30.0f * zoom),
-                          IM_COL32(176, 188, 204, 255),
+                          IM_COL32(176, 188, 204, metaAlpha),
                           metaLine.c_str());
 
         std::string modeChip = "Trig";
@@ -5979,16 +6131,21 @@ static void drawActionsGraphPanel(AppState& state) {
         }
         drawList->PopClipRect();
 
-        // Edge attach-point dots, color-coded by edge kind.
+        // Edge attach-point dots, color-coded by edge kind. Fade in step with the edge state.
         const float dotR = 3.5f * zoom;
+        auto dotAlpha = [&](const ActionsGraphEdgeRecord& edge) -> int {
+            if (!selectionActive) return 230;
+            return edgeInSubtree(edge) ? 230 : 90;
+        };
         for (int e : node.outgoingEdgeIndices) {
             const EdgeEndpointSlot& sl = outSlot[static_cast<size_t>(e)];
             if (sl.edgeIndex < 0) continue;
             const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(e)];
             const float y = slotY(localPos.y, size.y, sl.slotIndex, sl.slotCount);
             const ImVec2 c = toScreen(ImVec2(localPos.x + size.x, y));
-            drawList->AddCircleFilled(c, dotR, actionsGraphEdgeColor(edge.kind), 12);
-            drawList->AddCircle(c, dotR, IM_COL32(20, 24, 30, 230), 12, 1.0f);
+            const int a = dotAlpha(edge);
+            drawList->AddCircleFilled(c, dotR, applyAlpha(actionsGraphEdgeColor(edge.kind), a), 12);
+            drawList->AddCircle(c, dotR, IM_COL32(20, 24, 30, a), 12, 1.0f);
         }
         for (int e : node.incomingEdgeIndices) {
             const EdgeEndpointSlot& sl = inSlot[static_cast<size_t>(e)];
@@ -5996,19 +6153,19 @@ static void drawActionsGraphPanel(AppState& state) {
             const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(e)];
             const float y = slotY(localPos.y, size.y, sl.slotIndex, sl.slotCount);
             const ImVec2 c = toScreen(ImVec2(localPos.x, y));
-            drawList->AddCircleFilled(c, dotR, actionsGraphEdgeColor(edge.kind), 12);
-            drawList->AddCircle(c, dotR, IM_COL32(20, 24, 30, 230), 12, 1.0f);
+            const int a = dotAlpha(edge);
+            drawList->AddCircleFilled(c, dotR, applyAlpha(actionsGraphEdgeColor(edge.kind), a), 12);
+            drawList->AddCircle(c, dotR, IM_COL32(20, 24, 30, a), 12, 1.0f);
         }
     }
 
-    // Hover tooltip.
+    // Hover tooltip (node takes priority over edge).
     if (hoveredNodeIndex >= 0) {
         const ActionsGraphNodeRecord& node = graph.nodes[static_cast<size_t>(hoveredNodeIndex)];
         ImGui::BeginTooltip();
         ImGui::TextUnformatted(node.name.empty() ? "(unnamed)" : node.name.c_str());
-        ImGui::TextDisabled("#%d  %s%s", node.actionId,
-                            node.typeFourCC.empty() ? "container" : node.typeFourCC.c_str(),
-                            node.container ? "" : "");
+        ImGui::TextDisabled("#%d  %s", node.actionId,
+                            node.typeFourCC.empty() ? "container" : node.typeFourCC.c_str());
         if (!node.typeLabel.empty() && node.typeLabel != node.typeFourCC) {
             ImGui::TextDisabled("%s", node.typeLabel.c_str());
         }
@@ -6017,6 +6174,23 @@ static void drawActionsGraphPanel(AppState& state) {
         ImGui::Separator();
         ImGui::Text("%s", ins.c_str());
         ImGui::Text("%s", outs.c_str());
+        ImGui::EndTooltip();
+    } else if (hoveredEdgeIndex >= 0) {
+        const ActionsGraphEdgeRecord& edge = graph.edges[static_cast<size_t>(hoveredEdgeIndex)];
+        const ActionsGraphNodeRecord& fromN = graph.nodes[static_cast<size_t>(edge.fromActionIndex)];
+        const ActionsGraphNodeRecord& toN = graph.nodes[static_cast<size_t>(edge.toActionIndex)];
+        ImGui::BeginTooltip();
+        const ImU32 col = actionsGraphEdgeColor(edge.kind);
+        const ImVec4 c4(((col >> IM_COL32_R_SHIFT) & 0xFF) / 255.0f,
+                        ((col >> IM_COL32_G_SHIFT) & 0xFF) / 255.0f,
+                        ((col >> IM_COL32_B_SHIFT) & 0xFF) / 255.0f,
+                        1.0f);
+        ImGui::TextColored(c4, "%s", edge.kind.c_str());
+        ImGui::Separator();
+        ImGui::TextDisabled("from #%d", fromN.actionId);
+        ImGui::TextUnformatted(fromN.name.empty() ? "(unnamed)" : fromN.name.c_str());
+        ImGui::TextDisabled("→ to #%d", toN.actionId);
+        ImGui::TextUnformatted(toN.name.empty() ? "(unnamed)" : toN.name.c_str());
         ImGui::EndTooltip();
     }
 
