@@ -5914,6 +5914,7 @@ static void drawActionsGraphPanel(AppState& state) {
                       ImVec2(0.0f, 0.0f),
                       true,
                       ImGuiWindowFlags_HorizontalScrollbar);
+    ImGuiWindow* canvasWindow = ImGui::GetCurrentWindow();
 
     const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
     const ImVec2 contentSize((std::max)(ImGui::GetContentRegionAvail().x, marginX * 2.0f + layerStride * static_cast<float>(uniqueLayers.size()) + 60.0f * zoom),
@@ -5925,12 +5926,13 @@ static void drawActionsGraphPanel(AppState& state) {
     // ImGui InvisibleButton here: that placed an item whose window-local position drifts
     // with scroll, which kept expanding the child's content extents every frame and made
     // the scrollbar lurch to the right on every click.
-    const ImVec2 canvasSize = ImGui::GetWindowSize();
+    const ImVec2 canvasViewportMin(canvasWindow->InnerRect.Min.x, canvasWindow->InnerRect.Min.y);
+    const ImVec2 canvasSize(canvasWindow->InnerRect.GetWidth(), canvasWindow->InnerRect.GetHeight());
     const float miniW = 220.0f;
     const float miniH = 140.0f;
     const float miniPad = 12.0f;
-    const ImVec2 miniMin(canvasOrigin.x + canvasSize.x - miniW - miniPad,
-                         canvasOrigin.y + canvasSize.y - miniH - miniPad);
+    const ImVec2 miniMin(canvasViewportMin.x + canvasSize.x - miniW - miniPad,
+                         canvasViewportMin.y + canvasSize.y - miniH - miniPad);
     const ImVec2 miniMax(miniMin.x + miniW, miniMin.y + miniH);
     const ImVec2 mousePosForMini = ImGui::GetIO().MousePos;
     const bool windowHovered = ImGui::IsWindowHovered();
@@ -5951,12 +5953,12 @@ static void drawActionsGraphPanel(AppState& state) {
         const ImVec2 localPos = nodePositions[static_cast<size_t>(state.actionsGraphPendingCenterIndex)];
         const ImVec2 size = nodeSizes[static_cast<size_t>(state.actionsGraphPendingCenterIndex)];
         if (localPos.x >= 0.0f) {
-            const float viewportW = ImGui::GetWindowWidth();
-            const float viewportH = ImGui::GetWindowHeight();
+            const float viewportW = canvasSize.x;
+            const float viewportH = canvasSize.y;
             const float targetX = localPos.x + size.x * 0.5f - viewportW * 0.5f;
             const float targetY = localPos.y + size.y * 0.5f - viewportH * 0.5f;
-            ImGui::SetScrollX((std::max)(0.0f, targetX));
-            ImGui::SetScrollY((std::max)(0.0f, targetY));
+            ImGui::SetScrollX((std::max)(0.0f, (std::min)(canvasWindow->ScrollMax.x, targetX)));
+            ImGui::SetScrollY((std::max)(0.0f, (std::min)(canvasWindow->ScrollMax.y, targetY)));
             state.actionsGraphPendingCenterIndex = -1;
         }
     }
@@ -6399,10 +6401,10 @@ static void drawActionsGraphPanel(AppState& state) {
             const ImVec2 mp = ImGui::GetIO().MousePos;
             const float relX = (mp.x - plotMin.x) / miniScale;
             const float relY = (mp.y - plotMin.y) / miniScale;
-            const float vw = ImGui::GetWindowWidth();
-            const float vh = ImGui::GetWindowHeight();
-            const float maxScrollX = (std::max)(0.0f, contentW - vw);
-            const float maxScrollY = (std::max)(0.0f, contentH - vh);
+            const float vw = canvasSize.x;
+            const float vh = canvasSize.y;
+            const float maxScrollX = canvasWindow->ScrollMax.x;
+            const float maxScrollY = canvasWindow->ScrollMax.y;
             ImGui::SetScrollX((std::max)(0.0f, (std::min)(maxScrollX, relX - vw * 0.5f)));
             ImGui::SetScrollY((std::max)(0.0f, (std::min)(maxScrollY, relY - vh * 0.5f)));
         }
@@ -6438,8 +6440,8 @@ static void drawActionsGraphPanel(AppState& state) {
         }
 
         // Viewport rectangle.
-        const float vw = ImGui::GetWindowWidth();
-        const float vh = ImGui::GetWindowHeight();
+        const float vw = canvasSize.x;
+        const float vh = canvasSize.y;
         const ImVec2 vmin(plotMin.x + scrollX * miniScale, plotMin.y + scrollY * miniScale);
         const ImVec2 vmax(plotMin.x + (scrollX + vw) * miniScale,
                           plotMin.y + (scrollY + vh) * miniScale);
