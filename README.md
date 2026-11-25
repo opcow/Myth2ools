@@ -30,6 +30,19 @@ These are still mostly console tools, but we have a graphical shell.
 
 ![Image of the imgui graphical shell](images/imgui-workflow.png)
 
+### macOS downloads
+
+The macOS release zip is a universal build (Apple Silicon and Intel) that
+requires macOS 11 or newer. It is not notarized, so macOS quarantines it after
+download and may say the app "can't be opened" or "is damaged". After unzipping,
+clear the quarantine flag once:
+
+```bash
+xattr -dr com.apple.quarantine myth2ools_gui
+```
+
+Then run `./myth2ools_gui` from inside the `myth2ools_gui` folder.
+
 ## New Workflow
 
 As with the original tools, a map maker can work with 2D images to draw in the terrain type flags, but we can use the displacement.obj in Blender to precisely create terrain flags in 3D at the triangle level.
@@ -627,7 +640,14 @@ That is the same layout the local GUI expects when run outside the repo.
 Builds the release executables and writes `dist/myth2ools_<tag>_<platform>.zip`,
 where `<tag>` is the latest git tag reported by `git describe --tags --abbrev=0`
 and `<platform>` is a normalized OS/architecture suffix such as `windows-x64`,
-`linux-x64`, or `macos-arm64`.
+`linux-x64`, or `macos-universal`. On macOS the architecture suffix follows
+`CMAKE_OSX_ARCHITECTURES` (`universal` when it lists more than one), so a
+universal build looks like:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+cmake --build build --target package_release
+```
 
 ### GitHub Release
 

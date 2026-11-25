@@ -28,7 +28,7 @@ jobs:
             build: cmake --build build --target package_release
           - name: macos
             os: macos-latest
-            configure: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+            configure: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
             build: cmake --build build --target package_release
 
     steps:

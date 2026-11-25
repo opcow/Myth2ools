@@ -313,6 +313,8 @@ endif()
 set(PACKAGE_STAGING_DIR "${CMAKE_BINARY_DIR}/package_release")
 set(PACKAGE_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/dist")
 set(PACKAGE_COPY_COMMANDS)
+# Comma-separated so the list survives being passed as a single -D argument.
+string(REPLACE ";" "," PACKAGE_OSX_ARCHITECTURES "${CMAKE_OSX_ARCHITECTURES}")
 list(APPEND PACKAGE_COPY_COMMANDS
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "${PACKAGE_STAGING_DIR}/myth2ools_gui/bin"
@@ -397,6 +399,7 @@ add_custom_target(package_release
         "-DPACKAGE_SYSTEM_NAME=${CMAKE_SYSTEM_NAME}"
         "-DPACKAGE_SYSTEM_PROCESSOR=${CMAKE_SYSTEM_PROCESSOR}"
         "-DPACKAGE_HOST_SYSTEM_PROCESSOR=${CMAKE_HOST_SYSTEM_PROCESSOR}"
+        "-DPACKAGE_OSX_ARCHITECTURES=${PACKAGE_OSX_ARCHITECTURES}"
         -P "${CMAKE_SOURCE_DIR}/cmake/package_release.cmake"
     COMMENT "Packaging release executables"
     VERBATIM

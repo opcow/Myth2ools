@@ -59,6 +59,18 @@ elseif(PLATFORM_OS MATCHES "^mingw")
     set(PLATFORM_OS "windows")
 endif()
 
+# On macOS the target architectures come from CMAKE_OSX_ARCHITECTURES, not the
+# build host's CPU.
+if(PLATFORM_OS STREQUAL "macos" AND DEFINED PACKAGE_OSX_ARCHITECTURES AND NOT PACKAGE_OSX_ARCHITECTURES STREQUAL "")
+    string(REPLACE "," ";" OSX_ARCH_LIST "${PACKAGE_OSX_ARCHITECTURES}")
+    list(LENGTH OSX_ARCH_LIST OSX_ARCH_COUNT)
+    if(OSX_ARCH_COUNT GREATER 1)
+        set(PLATFORM_ARCH "universal")
+    else()
+        string(TOLOWER "${OSX_ARCH_LIST}" PLATFORM_ARCH)
+    endif()
+endif()
+
 if(PLATFORM_ARCH STREQUAL "amd64" OR PLATFORM_ARCH STREQUAL "x86_64")
     set(PLATFORM_ARCH "x64")
 elseif(PLATFORM_ARCH STREQUAL "aarch64")
