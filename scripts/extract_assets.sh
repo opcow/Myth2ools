@@ -34,6 +34,8 @@ try_bin_dir() {
 }
 
 try_bin_dir "$script_parent/bin"
+# macOS app bundle: scripts are in Contents/Resources, tools in Contents/MacOS/bin.
+try_bin_dir "$script_parent/../MacOS/bin"
 try_bin_dir "$current_dir/bin"
 try_bin_dir "$script_parent/build-linux"
 try_bin_dir "$script_parent/build/Release"
@@ -77,7 +79,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "Extracting map assets..."
-"$bin_dir/extract_map" "$tags_folder" "$mesh_tag" --out "$out_folder" "${extract_args[@]}"
+# ${arr[@]+"${arr[@]}"} expands empty arrays safely under `set -u` in bash 3.2
+# (the /bin/bash that ships with macOS).
+"$bin_dir/extract_map" "$tags_folder" "$mesh_tag" --out "$out_folder" ${extract_args[@]+"${extract_args[@]}"}
 [[ -f "$out_folder/manifest.json" ]] || { echo "extract_map did not produce $out_folder/manifest.json" >&2; exit 1; }
 
 echo "Exporting terrain mesh..."
@@ -87,7 +91,7 @@ echo "Exporting water mesh..."
 "$bin_dir/export_water_mesh" "$out_folder"
 
 echo "Exporting map objects..."
-"$bin_dir/export_map_objects" "$tags_folder" "$out_folder" "$out_folder/assets/terrain/displacement.obj" "${model_args[@]}"
+"$bin_dir/export_map_objects" "$tags_folder" "$out_folder" "$out_folder/assets/terrain/displacement.obj" ${model_args[@]+"${model_args[@]}"}
 
 echo "Exporting action scripts..."
 "$bin_dir/export_map_actions" "$out_folder"

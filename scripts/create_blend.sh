@@ -29,6 +29,11 @@ find_blender() {
     printf '%s\n' "blender"
     return 0
   fi
+  # Standard macOS install location (apps launched from Finder have no shell PATH).
+  if [[ -x "/Applications/Blender.app/Contents/MacOS/Blender" ]]; then
+    printf '%s\n' "/Applications/Blender.app/Contents/MacOS/Blender"
+    return 0
+  fi
   return 1
 }
 

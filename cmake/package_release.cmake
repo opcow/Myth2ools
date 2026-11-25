@@ -88,6 +88,32 @@ if(PACKAGE_FILES STREQUAL "")
     message(FATAL_ERROR "No files found to package in ${STAGING_DIR}")
 endif()
 
+# macOS: ad-hoc sign the assembled app bundle. Helpers were copied in after the
+# build, so the bundle has to be sealed again; an unsealed bundle is reported
+# as "damaged" on Apple Silicon. This is not notarization: Gatekeeper still
+# asks for confirmation on first launch.
+if(DEFINED PACKAGE_MAC_APP AND NOT PACKAGE_MAC_APP STREQUAL "")
+    set(APP_DIR "${STAGING_DIR}/${PACKAGE_MAC_APP}")
+    if(NOT IS_DIRECTORY "${APP_DIR}")
+        message(FATAL_ERROR "App bundle not found: ${APP_DIR}")
+    endif()
+    file(GLOB APP_HELPERS "${APP_DIR}/Contents/MacOS/bin/*")
+    foreach(helper IN LISTS APP_HELPERS)
+        execute_process(COMMAND codesign --force --sign - "${helper}" RESULT_VARIABLE SIGN_RESULT)
+        if(NOT SIGN_RESULT EQUAL 0)
+            message(FATAL_ERROR "codesign failed for ${helper}")
+        endif()
+    endforeach()
+    execute_process(COMMAND codesign --force --sign - "${APP_DIR}" RESULT_VARIABLE SIGN_RESULT)
+    if(NOT SIGN_RESULT EQUAL 0)
+        message(FATAL_ERROR "codesign failed for ${APP_DIR}")
+    endif()
+    execute_process(COMMAND codesign --verify --deep --strict --verbose=2 "${APP_DIR}" RESULT_VARIABLE VERIFY_RESULT)
+    if(NOT VERIFY_RESULT EQUAL 0)
+        message(FATAL_ERROR "codesign verification failed for ${APP_DIR}")
+    endif()
+endif()
+
 file(MAKE_DIRECTORY "${OUTPUT_DIR}")
 file(REMOVE "${ARCHIVE_PATH}")
 

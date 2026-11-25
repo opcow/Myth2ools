@@ -14,6 +14,9 @@
 #include <objbase.h>
 #include <shobjidl.h>
 #endif
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 
 #include <array>
 #include <atomic>
@@ -716,6 +719,9 @@ struct AppState {
     fs::path exeDir;
     fs::path scriptDir;
     fs::path toolDir;
+    fs::path dataDir;   // writable: settings.ini, imgui.ini, logs, blender_path.txt
+    fs::path baseDir;   // relative user paths (tags source, output folders) resolve here
+    bool macAppBundle = false;
     std::array<char, 512> tagsSource{};
     std::array<char, 64> meshTag{};
     std::array<char, 128> meshTagFilter{};
@@ -1055,7 +1061,7 @@ static std::string makeTimestampedLogName() {
 
 static bool saveLogToFile(AppState& state, fs::path& savedPath) {
     std::error_code ec;
-    fs::path logDir = state.exeDir / "logs";
+    fs::path logDir = state.dataDir / "logs";
     fs::create_directories(logDir, ec);
     if (ec) return false;
 
@@ -1071,11 +1077,11 @@ static bool saveLogToFile(AppState& state, fs::path& savedPath) {
 }
 
 static fs::path settingsPath(const AppState& state) {
-    return state.exeDir / "settings.ini";
+    return state.dataDir / "settings.ini";
 }
 
 static fs::path blenderPathFile(const AppState& state) {
-    return state.exeDir / "blender_path.txt";
+    return state.dataDir / "blender_path.txt";
 }
 
 static std::string escapeSetting(const std::string& value) {
@@ -1220,13 +1226,53 @@ static void loadSettings(AppState& state) {
     }
 }
 
+static fs::path executableDir(const char* argv0) {
+#if defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string buf(size, '\0');
+    if (size > 0 && _NSGetExecutablePath(buf.data(), &size) == 0) {
+        return fs::weakly_canonical(fs::path(buf.c_str())).parent_path();
+    }
+#endif
+    return fs::weakly_canonical(fs::path(argv0)).parent_path();
+}
+
 static void discoverPaths(AppState& s) {
     s.scriptDir = s.exeDir / "scripts";
     s.toolDir = s.exeDir / "bin";
+    s.dataDir = s.exeDir;
+    s.baseDir = s.exeDir.parent_path();
+#if defined(__APPLE__)
+    // Running as Myth2ools.app/Contents/MacOS/Myth2ools. The bundle must not be
+    // written to (it breaks the signature, and macOS may run a downloaded app
+    // from a read-only translocated copy), so user data lives outside it.
+    const fs::path contentsDir = s.exeDir.parent_path();
+    if (s.exeDir.filename() == "MacOS" && contentsDir.filename() == "Contents" &&
+        contentsDir.parent_path().extension() == ".app") {
+        s.macAppBundle = true;
+        s.scriptDir = contentsDir / "Resources" / "scripts";
+        // Local dev builds leave bin/ and scripts/ beside the .app rather than
+        // inside it; fall back to those when the bundle has no tools.
+        std::error_code existsEc;
+        const fs::path appParent = contentsDir.parent_path().parent_path();
+        if (!fs::exists(s.toolDir, existsEc) && fs::exists(appParent / "bin", existsEc)) {
+            s.toolDir = appParent / "bin";
+            s.scriptDir = appParent / "scripts";
+        }
+        const char* home = std::getenv("HOME");
+        const fs::path homeDir = (home && *home) ? fs::path(home) : fs::temp_directory_path();
+        s.dataDir = homeDir / "Library" / "Application Support" / "Myth2ools";
+        s.baseDir = homeDir / "Documents" / "Myth2ools";
+        std::error_code ec;
+        fs::create_directories(s.dataDir, ec);
+        fs::create_directories(s.baseDir, ec);
+    }
+#endif
 }
 
 static std::string buildExtractAssetsCommand(const AppState& s) {
-    fs::path repoDir = s.exeDir.parent_path();
+    fs::path repoDir = s.baseDir;
     fs::path script = s.scriptDir / scriptName("extract_assets.bat", "extract_assets.sh");
     fs::path tagsSource = resolveUserPath(repoDir, s.tagsSource.data());
     fs::path outFolder = resolveUserPath(repoDir, s.outputFolder.data());
@@ -1238,7 +1284,7 @@ static std::string buildExtractAssetsCommand(const AppState& s) {
 }
 
 static std::string buildPluginCommand(const AppState& s) {
-    fs::path repoDir = s.exeDir.parent_path();
+    fs::path repoDir = s.baseDir;
     fs::path exe = s.toolDir / scriptName("build_plugin.exe", "build_plugin");
     fs::path outFolder = resolveUserPath(repoDir, s.outputFolder.data());
     fs::path pluginOutput = resolveUserPath(repoDir, s.pluginOutput.data());
@@ -1252,21 +1298,28 @@ static std::string buildPluginCommand(const AppState& s) {
 }
 
 static std::string buildCreateBlendCommand(const AppState& s) {
-    fs::path repoDir = s.exeDir.parent_path();
+    fs::path repoDir = s.baseDir;
     fs::path script = s.scriptDir / scriptName("create_blend.bat", "create_blend.sh");
     fs::path outFolder = resolveUserPath(repoDir, s.outputFolder.data());
     std::string command = quoteArg(script) + " " + quoteArg(outFolder);
+#if !defined(_WIN32)
+    // Pass Blender explicitly: the script's blender_path.txt lookup is relative
+    // to its own folder, which is not where the macOS app bundle keeps settings.
+    if (s.blenderPath[0] != '\0') {
+        command = "BLENDER_PATH=" + quoteArg(s.blenderPath.data()) + " " + command;
+    }
+#endif
     return wrapWindowsCommand(command);
 }
 
 static fs::path actionsJsonPath(const AppState& state) {
-    fs::path repoDir = state.exeDir.parent_path();
+    fs::path repoDir = state.baseDir;
     fs::path outFolder = resolveUserPath(repoDir, state.outputFolder.data());
     return outFolder / "assets" / "actions" / "actions.json";
 }
 
 static fs::path terrainPreviewPath(const AppState& state) {
-    fs::path repoDir = state.exeDir.parent_path();
+    fs::path repoDir = state.baseDir;
     fs::path outFolder = resolveUserPath(repoDir, state.outputFolder.data());
     const fs::path colorPath = outFolder / "terrain" / "color.bmp";
     const fs::path legacyPath = outFolder / "terrain" / "terrain.bmp";
@@ -1278,13 +1331,13 @@ static fs::path terrainPreviewPath(const AppState& state) {
 }
 
 static fs::path shadowPreviewPath(const AppState& state) {
-    fs::path repoDir = state.exeDir.parent_path();
+    fs::path repoDir = state.baseDir;
     fs::path outFolder = resolveUserPath(repoDir, state.outputFolder.data());
     return outFolder / "terrain" / "shadow.bmp";
 }
 
 static fs::path unitsPreviewPath(const AppState& state) {
-    fs::path repoDir = state.exeDir.parent_path();
+    fs::path repoDir = state.baseDir;
     fs::path outFolder = resolveUserPath(repoDir, state.outputFolder.data());
     return outFolder / "assets" / "sprites" / "units.json";
 }
@@ -4017,7 +4070,7 @@ static void refreshAvailableMeshTags(AppState& state) {
     state.mapScanStatus.clear();
     state.lastScannedTagsSource = state.tagsSource.data();
 
-    fs::path repoDir = state.exeDir.parent_path();
+    fs::path repoDir = state.baseDir;
     fs::path sourcePath = resolveUserPath(repoDir, state.tagsSource.data());
     std::error_code ec;
     if (sourcePath.empty()) {
@@ -4102,7 +4155,7 @@ static void refreshAvailableMeshTags(AppState& state) {
 }
 
 static void drawWorkflowPanel(AppState& state) {
-    fs::path repoDir = state.exeDir.parent_path();
+    fs::path repoDir = state.baseDir;
     applyLockedDockWindowClass(state.lockDockLayout);
     static bool workflowFocusPending = true;
     if (workflowFocusPending) {
@@ -6663,7 +6716,7 @@ int main(int argc, char** argv) {
     // AppState is built first so settings (including window pos/size) load
     // before glfwCreateWindow uses them.
     AppState state;
-    state.exeDir = fs::weakly_canonical(fs::path(argv[0])).parent_path();
+    state.exeDir = executableDir(argv[0]);
     discoverPaths(state);
     copyToBuffer(state.tagsSource, "myth2_tags");
     copyToBuffer(state.meshTag, "le3e");
@@ -6696,6 +6749,13 @@ int main(int argc, char** argv) {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    // A Finder-launched app starts with the working directory at "/", so keep
+    // the layout file with the other settings instead of the default "imgui.ini".
+    static std::string imguiIniPath;
+    if (state.macAppBundle) {
+        imguiIniPath = (state.dataDir / "imgui.ini").string();
+        io.IniFilename = imguiIniPath.c_str();
+    }
     loadEmbeddedFonts(io);
     setupStyle();
 

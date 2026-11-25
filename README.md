@@ -32,16 +32,24 @@ These are still mostly console tools, but we have a graphical shell.
 
 ### macOS downloads
 
-The macOS release zip is a universal build (Apple Silicon and Intel) that
-requires macOS 11 or newer. It is not notarized, so macOS quarantines it after
-download and may say the app "can't be opened" or "is damaged". After unzipping,
-clear the quarantine flag once:
+The macOS release zip contains `Myth2ools.app`, a universal build (Apple
+Silicon and Intel) that requires macOS 11 or newer. Unzip it and drag it to
+Applications.
 
-```bash
-xattr -dr com.apple.quarantine myth2ools_gui
-```
+The app is not notarized by Apple, so the first launch is blocked with a
+warning that macOS can't verify it. To open it once and trust it from then on:
 
-Then run `./myth2ools_gui` from inside the `myth2ools_gui` folder.
+- macOS 15 and newer: try to open it, then go to **System Settings → Privacy &
+  Security** and click **Open Anyway**.
+- macOS 14 and older: right-click (or Control-click) the app, choose **Open**,
+  then **Open** again.
+- Or from Terminal: `xattr -dr com.apple.quarantine /Applications/Myth2ools.app`
+
+The app keeps its settings, window layout and logs in
+`~/Library/Application Support/Myth2ools`. Relative paths in the Workflow
+panel, such as the default `out/le3e` output folder, are relative to
+`~/Documents/Myth2ools`. If Blender is not in `/Applications`, set its path in
+the Workflow panel.
 
 ## New Workflow
 
@@ -636,6 +644,13 @@ the `myth2ools_gui/` app folder:
 - `myth2ools_gui/tools/`
 
 That is the same layout the local GUI expects when run outside the repo.
+
+On macOS the payload is an ad-hoc signed `Myth2ools.app` bundle instead:
+
+- `Myth2ools.app/Contents/MacOS/Myth2ools`
+- `Myth2ools.app/Contents/MacOS/bin/`
+- `Myth2ools.app/Contents/Resources/scripts/`
+- `Myth2ools.app/Contents/Resources/tools/`
 
 Builds the release executables and writes `dist/myth2ools_<tag>_<platform>.zip`,
 where `<tag>` is the latest git tag reported by `git describe --tags --abbrev=0`

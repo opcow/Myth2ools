@@ -96,6 +96,35 @@ if(WIN32)
     endif()
 endif()
 
+if(APPLE)
+    # Build the GUI as Myth2ools.app so it opens from Finder like a normal app.
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" describe --tags --abbrev=0
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE M2OOLS_GIT_TAG
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    string(REGEX MATCH "[0-9]+(\\.[0-9]+)*" M2OOLS_VERSION "${M2OOLS_GIT_TAG}")
+    if(M2OOLS_VERSION STREQUAL "")
+        set(M2OOLS_VERSION "0.0.0")
+    endif()
+    if(CMAKE_OSX_DEPLOYMENT_TARGET)
+        set(M2OOLS_MACOS_MIN "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    else()
+        set(M2OOLS_MACOS_MIN "11.0")
+    endif()
+    set_target_properties(myth2ools_gui PROPERTIES
+        MACOSX_BUNDLE TRUE
+        OUTPUT_NAME "Myth2ools"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/cmake/MacOSXBundleInfo.plist.in"
+        MACOSX_BUNDLE_BUNDLE_NAME "Myth2ools"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.opcow.myth2ools"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${M2OOLS_VERSION}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${M2OOLS_VERSION}"
+    )
+endif()
+
 set(GUI_TARGET myth2ools_gui)
 set(RELEASE_TARGETS
     myth_extract
@@ -315,22 +344,42 @@ set(PACKAGE_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/dist")
 set(PACKAGE_COPY_COMMANDS)
 # Comma-separated so the list survives being passed as a single -D argument.
 string(REPLACE ";" "," PACKAGE_OSX_ARCHITECTURES "${CMAKE_OSX_ARCHITECTURES}")
+if(APPLE)
+    # macOS ships a self-contained Myth2ools.app: helper tools beside the GUI
+    # executable in Contents/MacOS/bin, scripts and Python in Contents/Resources.
+    set(PACKAGE_MAC_APP_NAME "Myth2ools.app")
+    set(PACKAGE_APP_DIR "${PACKAGE_STAGING_DIR}/${PACKAGE_MAC_APP_NAME}")
+    set(PACKAGE_BIN_DIR "${PACKAGE_APP_DIR}/Contents/MacOS/bin")
+    set(PACKAGE_SCRIPTS_DIR "${PACKAGE_APP_DIR}/Contents/Resources/scripts")
+    set(PACKAGE_TOOLS_DIR "${PACKAGE_APP_DIR}/Contents/Resources/tools")
+    list(APPEND PACKAGE_COPY_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "$<TARGET_BUNDLE_DIR:${GUI_TARGET}>"
+            "${PACKAGE_APP_DIR}"
+    )
+else()
+    set(PACKAGE_MAC_APP_NAME "")
+    set(PACKAGE_APP_DIR "${PACKAGE_STAGING_DIR}/myth2ools_gui")
+    set(PACKAGE_BIN_DIR "${PACKAGE_APP_DIR}/bin")
+    set(PACKAGE_SCRIPTS_DIR "${PACKAGE_APP_DIR}/scripts")
+    set(PACKAGE_TOOLS_DIR "${PACKAGE_APP_DIR}/tools")
+    list(APPEND PACKAGE_COPY_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${PACKAGE_APP_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:${GUI_TARGET}>"
+            "${PACKAGE_APP_DIR}/"
+    )
+endif()
 list(APPEND PACKAGE_COPY_COMMANDS
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-        "${PACKAGE_STAGING_DIR}/myth2ools_gui/bin"
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-        "${PACKAGE_STAGING_DIR}/myth2ools_gui/scripts"
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-        "${PACKAGE_STAGING_DIR}/myth2ools_gui/tools"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "$<TARGET_FILE:${GUI_TARGET}>"
-        "${PACKAGE_STAGING_DIR}/myth2ools_gui/"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${PACKAGE_BIN_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${PACKAGE_SCRIPTS_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${PACKAGE_TOOLS_DIR}"
 )
 foreach(target IN LISTS CLI_RELEASE_TARGETS)
     list(APPEND PACKAGE_COPY_COMMANDS
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:${target}>"
-            "${PACKAGE_STAGING_DIR}/myth2ools_gui/bin/"
+            "${PACKAGE_BIN_DIR}/"
     )
 endforeach()
 foreach(script_file IN LISTS M2OOLS_GUI_SCRIPT_FILES)
@@ -341,7 +390,7 @@ foreach(script_file IN LISTS M2OOLS_GUI_SCRIPT_FILES)
                 list(APPEND PACKAGE_COPY_COMMANDS
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                         "${script_file}"
-                        "${PACKAGE_STAGING_DIR}/myth2ools_gui/scripts/"
+                        "${PACKAGE_SCRIPTS_DIR}/"
                 )
             endif()
         else()
@@ -349,9 +398,9 @@ foreach(script_file IN LISTS M2OOLS_GUI_SCRIPT_FILES)
                 list(APPEND PACKAGE_COPY_COMMANDS
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                         "${script_file}"
-                        "${PACKAGE_STAGING_DIR}/myth2ools_gui/scripts/"
+                        "${PACKAGE_SCRIPTS_DIR}/"
                     COMMAND chmod +x
-                        "${PACKAGE_STAGING_DIR}/myth2ools_gui/scripts/${script_name}"
+                        "${PACKAGE_SCRIPTS_DIR}/${script_name}"
                 )
             endif()
         endif()
@@ -363,12 +412,14 @@ foreach(tool_file IN LISTS M2OOLS_GUI_TOOL_FILES)
         list(APPEND PACKAGE_COPY_COMMANDS
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${tool_file}"
-                "${PACKAGE_STAGING_DIR}/myth2ools_gui/tools/"
+                "${PACKAGE_TOOLS_DIR}/"
         )
     endif()
 endforeach()
 
-if(EXISTS "${M2OOLS_GUI_DIR}/imgui.ini")
+# The macOS app keeps these in ~/Library/Application Support/Myth2ools, and
+# nothing may be added to the bundle after it is signed.
+if(NOT APPLE AND EXISTS "${M2OOLS_GUI_DIR}/imgui.ini")
     list(APPEND PACKAGE_COPY_COMMANDS
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${M2OOLS_GUI_DIR}/imgui.ini"
@@ -376,7 +427,7 @@ if(EXISTS "${M2OOLS_GUI_DIR}/imgui.ini")
     )
 endif()
 
-if(EXISTS "${M2OOLS_GUI_DIR}/blender_path.txt")
+if(NOT APPLE AND EXISTS "${M2OOLS_GUI_DIR}/blender_path.txt")
     list(APPEND PACKAGE_COPY_COMMANDS
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${M2OOLS_GUI_DIR}/blender_path.txt"
@@ -400,6 +451,7 @@ add_custom_target(package_release
         "-DPACKAGE_SYSTEM_PROCESSOR=${CMAKE_SYSTEM_PROCESSOR}"
         "-DPACKAGE_HOST_SYSTEM_PROCESSOR=${CMAKE_HOST_SYSTEM_PROCESSOR}"
         "-DPACKAGE_OSX_ARCHITECTURES=${PACKAGE_OSX_ARCHITECTURES}"
+        "-DPACKAGE_MAC_APP=${PACKAGE_MAC_APP_NAME}"
         -P "${CMAKE_SOURCE_DIR}/cmake/package_release.cmake"
     COMMENT "Packaging release executables"
     VERBATIM
