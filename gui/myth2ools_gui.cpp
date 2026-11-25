@@ -6496,7 +6496,6 @@ static void drawActionsGraphPanel(AppState& state) {
 
 static void drawUnitInfoPanel(AppState& state) {
     applyLockedDockWindowClass(state.lockDockLayout);
-    ImGui::SetNextWindowDockID(ImGui::GetID("MainDockSpace"), ImGuiCond_FirstUseEver);
     ImGui::Begin("Unit Info", nullptr, lockedDockPanelFlags(state.lockDockLayout));
 
     if (state.selectedMapUnitIdentifiers.empty()) {
@@ -6744,13 +6743,17 @@ int main(int argc, char** argv) {
         if (state.lockDockLayout) {
             dockspaceFlags |= ImGuiDockNodeFlags_NoDockingSplit | ImGuiDockNodeFlags_NoUndocking;
         }
-        ImGui::DockSpace(dockspaceId, ImVec2(0.0f, 0.0f), dockspaceFlags);
 
+        // Build the default layout before DockSpace() runs: DockSpace() creates
+        // the node itself, so checking afterwards would always find one and the
+        // default layout would never be applied on a fresh install. A dockspace
+        // that was never split (e.g. saved by a build with that bug) is treated
+        // as missing so it gets repaired too.
         static bool dockLayoutInitialized = false;
         if (!dockLayoutInitialized) {
             dockLayoutInitialized = true;
             ImGuiDockNode* existingNode = ImGui::DockBuilderGetNode(dockspaceId);
-            if (existingNode == nullptr) {
+            if (existingNode == nullptr || existingNode->IsLeafNode()) {
                 ImGui::DockBuilderRemoveNode(dockspaceId);
                 ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
                 ImGui::DockBuilderSetNodeSize(dockspaceId, viewport->WorkSize);
@@ -6776,6 +6779,8 @@ int main(int argc, char** argv) {
                 state.actionsGraphDefaultDockId = existingNode->ID;
             }
         }
+
+        ImGui::DockSpace(dockspaceId, ImVec2(0.0f, 0.0f), dockspaceFlags);
 
         ImGui::End();
 
